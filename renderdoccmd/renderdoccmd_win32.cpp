@@ -30,10 +30,17 @@
 #include <string>
 #include <vector>
 #include "miniz/miniz.h"
+#include "control_types.h"
+#include "rdcstr.h"
+#include "renderdoc_replay.h"
 #include "resource.h"
 
 #include <Psapi.h>
 #include <tlhelp32.h>
+#include <time.h>
+
+#include <atomic>         
+#include <thread>
 
 static std::string conv(const std::wstring &str)
 {
@@ -790,6 +797,19 @@ public:
   }
 };
 
+std::atomic<bool> kill(false);
+std::atomic_flag ping_flag = ATOMIC_FLAG_INIT;
+
+void ping_server(IRemoteServer* remote)
+{
+  bool success = true;
+  while(success && !kill) 
+  {
+    success = remote->Ping();
+    Sleep(1000);
+  }
+}
+
 // ignore the argc/argv we get here, convert from wide to be sure we're unicode safe.
 int main(int, char *)
 {
@@ -804,46 +824,118 @@ int main(int, char *)
   for(size_t i = 0; i < argv.size(); i++)
     argv[i] = conv(std::wstring(wargv[i]));
 
-  if(argv.empty())
-    argv.push_back("renderdoccmd");
-
+  if(argv.size() != 2)
+  {
+    std::cerr << "packageName/mainActivity is needed" << std::endl;
+  }
   LocalFree(wargv);
 
-  hInstance = GetModuleHandleA(NULL);
+  std::string packageName = argv[1];
 
-  WNDCLASSEX wc;
-  wc.cbSize = sizeof(WNDCLASSEX);
-  wc.style = 0;
-  wc.lpfnWndProc = WndProc;
-  wc.cbClsExtra = 0;
-  wc.cbWndExtra = 0;
-  wc.hInstance = hInstance;
-  wc.hIcon = LoadIcon(NULL, MAKEINTRESOURCE(IDI_ICON));
-  wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-  wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-  wc.lpszMenuName = NULL;
-  wc.lpszClassName = L"renderdoccmd";
-  wc.hIconSm = LoadIcon(NULL, MAKEINTRESOURCE(IDI_ICON));
-
-  if(!RegisterClassEx(&wc))
+  RENDERDOC_InitialiseReplay(GlobalEnvironment(), NULL);
+  rdcarray<rdcstr> protocols;
+  RENDERDOC_GetSupportedDeviceProtocols(&protocols);
+  for(const rdcstr &p : protocols)
   {
-    return 1;
+    IDeviceProtocolController *controller = RENDERDOC_GetDeviceProtocolController(p);
+    IRemoteServer *remote = NULL;
+    rdcstr urlrdc = rdcstr("adb://") + controller->GetDevices()[0];
+    const char* url = urlrdc.c_str();
+    ReplayStatus status = RENDERDOC_CreateRemoteServerConnection(url, &remote);
+
+    if(status == ReplayStatus::NetworkIOFailed)
+    {
+      ReplayStatus status = controller->StartRemoteServer(urlrdc);
+      std::cout << ToStr(status).c_str() << std::endl;
+      status = RENDERDOC_CreateRemoteServerConnection(url, &remote);
+      if(remote == NULL || status != ReplayStatus::Succeeded)
+      {
+        std::cerr << "Error: " << ToStr(status).c_str() << " - Couldn't connect to "
+                  << controller->GetDevices()[0].c_str() << "." << std::endl;
+        std::cerr << "       Have you run renderdoccmd remoteserver on '"
+                  << controller->GetDevices()[0].c_str() << "'?" << std::endl;
+        return 1;
+      }
+	}	   
+
+    CaptureOptions opts;
+    RENDERDOC_GetDefaultCaptureOptions(&opts);
+    ExecuteResult result = remote->ExecuteAndInject(packageName.c_str(), NULL, NULL, NULL, opts);
+    if(result.status != ReplayStatus::Succeeded)
+    {
+      std::cout << ToStr(result.status).c_str() << std::endl;
+      remote->ShutdownServerAndConnection();
+      return 1;
+    }
+
+	std::cout << "game started" << std::endl;
+	std::thread ping_thread(ping_server, remote);
+
+	ITargetControl *conn = RENDERDOC_CreateTargetControl(url, result.ident, "test", true);
+    if(!conn)
+    {
+      kill = true;
+      ping_thread.join();
+      remote->ShutdownServerAndConnection();
+      std::cerr << "       Couldn't connect to target control for " << packageName << "." << std::endl;
+      return 1;
+    }
+
+    std::string line;
+    while(getline(std::cin, line))
+    {
+      if(line.compare(0, 4, "exit") == 0)
+      {
+        conn->Shutdown();
+        kill = true;
+        ping_thread.join();
+        remote->ShutdownServerAndConnection();
+        RENDERDOC_ShutdownReplay();
+        return 0;
+	  }
+      else
+      {
+		conn->TriggerCapture(1);
+
+        std::cout << "capture done" << std::endl;
+
+        TargetControlMessage *msg = NULL;
+        clock_t start = clock();
+        while(msg == NULL || msg->type != TargetControlMessageType::NewCapture)
+        {
+          msg = &conn->ReceiveMessage(NULL);
+          if((clock() - start) / CLOCKS_PER_SEC > 30)
+          {
+            std::cout << "capture time out" << std::endl;
+            break;
+          }
+        }
+
+        if(msg->type != TargetControlMessageType::NewCapture)
+        {
+          remote->ShutdownServerAndConnection();
+          std::cerr << "Didn't get new capture notification after triggering capture" << std::endl;
+          return 1;
+        }
+        rdcstr cap_path = msg->newCapture.path;
+        std::cout << "Got new capture at " << cap_path.c_str() << " which is frame "
+                  << msg->newCapture.frameNumber << std::endl;
+        remote->CopyCaptureFromRemote(cap_path.c_str(), ("D:\\"+line+".rdc").c_str(), NULL);
+        //Sleep(1);
+        //conn->DeleteCapture(msg->newCapture.captureId);
+
+        std::cout << "copy capture done" << std::endl;
+	  }
+    }
   }
 
-  GlobalEnvironment env;
 
-  // perform an upgrade of the UI
-  add_command("upgrade", new UpgradeCommand());
 
-#if CRASH_HANDLER
-  // special WIN32 option for launching the crash handler
-  add_command("crashhandle", new CrashHandlerCommand());
-#endif
+ /* TCPServer tcpServer{27015};
+  tcpServer.Run();
 
-  // this installs a global windows hook pointing at renderdocshim*.dll that filters all running
-  // processes and loads renderdoc.dll in the target one. In any other process it unloads as soon as
-  // possible
-  add_command("globalhook", new GlobalHookCommand());
+  std::puts("Press enter to close server");
+  std::getc(stdin);*/
 
-  return renderdoccmd(env, argv);
+  return 0;
 }
