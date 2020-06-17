@@ -201,16 +201,16 @@ rdcstr getToolPath(ToolDir subdir, const rdcstr &toolname, bool checkExist)
   }
 
   // if we have the path cached and it's still valid, return it
-  if(toolExists(cache.paths[toolname]))
-    return cache.paths[toolname];
+//  if(toolExists(cache.paths[toolname]))
+//    return cache.paths[toolname];
 
   rdcstr &toolpath = cache.paths[toolname];
 
   // first try according to the configured paths
   toolpath = getToolInSDK(subdir, jdk, sdk, toolname);
 
-  if(toolExists(toolpath))
-    return toolpath;
+ // if(toolExists(toolpath))
+ //   return toolpath;
 
   // need to try to auto-guess the tool's location
 
@@ -219,8 +219,8 @@ rdcstr getToolPath(ToolDir subdir, const rdcstr &toolname, bool checkExist)
   {
     toolpath = FileIO::FindFileInPath(toolname);
 
-    if(toolExists(toolpath))
-      return toolpath;
+//    if(toolExists(toolpath))
+//      return toolpath;
 
     // if the tool name contains a .jar then try stripping that and look for the non-.jar version in
     // the PATH.
@@ -229,8 +229,8 @@ rdcstr getToolPath(ToolDir subdir, const rdcstr &toolname, bool checkExist)
       toolpath = strip_extension(toolname);
       toolpath = FileIO::FindFileInPath(toolpath);
 
-      if(toolExists(toolpath))
-        return toolpath;
+ //     if(toolExists(toolpath))
+ //       return toolpath;
     }
   }
 
@@ -280,8 +280,8 @@ rdcstr getToolPath(ToolDir subdir, const rdcstr &toolname, bool checkExist)
 
   toolpath = getToolInSDK(subdir, jdk, sdk, toolname);
 
-  if(toolExists(toolpath))
-    return toolpath;
+ // if(toolExists(toolpath))
+ //   return toolpath;
 
   // finally try to locate it in our own distributed android subfolder
   {
@@ -289,7 +289,7 @@ rdcstr getToolPath(ToolDir subdir, const rdcstr &toolname, bool checkExist)
     FileIO::GetLibraryFilename(libpath);
     rdcstr libdir = get_dirname(FileIO::GetFullPathname(libpath));
 
-    toolpath = libdir + "/plugins/android/" + toolname;
+    toolpath = libdir + "/" + toolname;
     if(toolExists(toolpath))
     {
       if(toolname == "adb")

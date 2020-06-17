@@ -310,7 +310,7 @@ bool CheckAndroidServerVersion(const rdcstr &deviceID, ABI abi)
   rdcstr hostVersionName = GitVersionHash;
 
   // False positives will hurt us, so check for explicit matches
-  if((hostVersionCode == versionCode) && (hostVersionName == versionName))
+  if((hostVersionCode == versionCode))
   {
     RDCLOG("Installed server version (%s:%s) is compatible", versionCode.c_str(),
            versionName.c_str());
@@ -363,6 +363,7 @@ ReplayStatus InstallRenderDocServer(const rdcstr &deviceID)
 
   rdcstr suff = GetPlainABIName(abis[0]);
 
+  paths.push_back(libDir + "/");
   paths.push_back(libDir + "/plugins/android/");                                  // Windows install
   paths.push_back(libDir + "/../share/renderdoc/plugins/android/");               // Linux install
   paths.push_back(libDir + "/../plugins/android/");                               // macOS install
