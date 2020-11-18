@@ -64,8 +64,8 @@ void VulkanReplay::CreateTexImageView(VkImage liveIm, const VulkanCreationInfo::
       {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
        VK_COMPONENT_SWIZZLE_IDENTITY},
       {
-          VK_IMAGE_ASPECT_COLOR_BIT, 0, RDCMAX(1U, (uint32_t)iminfo.mipLevels), 0,
-          RDCMAX(1U, (uint32_t)iminfo.arrayLayers),
+          VK_IMAGE_ASPECT_COLOR_BIT, 0, RDCMAX(1U, iminfo.mipLevels), 0,
+          RDCMAX(1U, iminfo.arrayLayers),
       },
   };
 
@@ -489,6 +489,8 @@ bool VulkanReplay::RenderTextureInternal(TextureDisplay cfg, const ImageState &i
 
   vt->BeginCommandBuffer(Unwrap(cmd), &beginInfo);
 
+  VkMarkerRegion::Begin("RenderTexture", cmd);
+
   ImageBarrierSequence setupBarriers, cleanupBarriers;
   imageState.TempTransition(m_pDriver->GetQueueFamilyIndex(),
                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_SHADER_READ_BIT,
@@ -565,6 +567,7 @@ bool VulkanReplay::RenderTextureInternal(TextureDisplay cfg, const ImageState &i
   }
 
   m_pDriver->InlineCleanupImageBarriers(cmd, cleanupBarriers);
+  VkMarkerRegion::End(cmd);
   vt->EndCommandBuffer(Unwrap(cmd));
   if(!cleanupBarriers.empty())
   {

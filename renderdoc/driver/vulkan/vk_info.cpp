@@ -46,6 +46,19 @@ VkDynamicState ConvertDynamicState(VulkanDynamicStateIndex idx)
       return VK_DYNAMIC_STATE_VIEWPORT_COARSE_SAMPLE_ORDER_NV;
     case VkDynamicExclusiveScissorNV: return VK_DYNAMIC_STATE_EXCLUSIVE_SCISSOR_NV;
     case VkDynamicLineStippleEXT: return VK_DYNAMIC_STATE_LINE_STIPPLE_EXT;
+    case VkDynamicCullModeEXT: return VK_DYNAMIC_STATE_CULL_MODE_EXT;
+    case VkDynamicFrontFaceEXT: return VK_DYNAMIC_STATE_FRONT_FACE_EXT;
+    case VkDynamicPrimitiveTopologyEXT: return VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY_EXT;
+    case VkDynamicViewportCountEXT: return VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT_EXT;
+    case VkDynamicScissorCountEXT: return VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT_EXT;
+    case VkDynamicVertexInputBindingStrideEXT:
+      return VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE_EXT;
+    case VkDynamicDepthTestEnableEXT: return VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE_EXT;
+    case VkDynamicDepthWriteEnableEXT: return VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE_EXT;
+    case VkDynamicDepthCompareOpEXT: return VK_DYNAMIC_STATE_DEPTH_COMPARE_OP_EXT;
+    case VkDynamicDepthBoundsTestEnableEXT: return VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE_EXT;
+    case VkDynamicStencilTestEnableEXT: return VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE_EXT;
+    case VkDynamicStencilOpEXT: return VK_DYNAMIC_STATE_STENCIL_OP_EXT;
     case VkDynamicCount: break;
   }
 
@@ -76,7 +89,19 @@ VulkanDynamicStateIndex ConvertDynamicState(VkDynamicState state)
       return VkDynamicViewportCoarseSampleOrderNV;
     case VK_DYNAMIC_STATE_EXCLUSIVE_SCISSOR_NV: return VkDynamicExclusiveScissorNV;
     case VK_DYNAMIC_STATE_LINE_STIPPLE_EXT: return VkDynamicLineStippleEXT;
-    case VK_DYNAMIC_STATE_RANGE_SIZE:
+    case VK_DYNAMIC_STATE_CULL_MODE_EXT: return VkDynamicCullModeEXT;
+    case VK_DYNAMIC_STATE_FRONT_FACE_EXT: return VkDynamicFrontFaceEXT;
+    case VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY_EXT: return VkDynamicPrimitiveTopologyEXT;
+    case VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT_EXT: return VkDynamicViewportCountEXT;
+    case VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT_EXT: return VkDynamicScissorCountEXT;
+    case VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE_EXT:
+      return VkDynamicVertexInputBindingStrideEXT;
+    case VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE_EXT: return VkDynamicDepthTestEnableEXT;
+    case VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE_EXT: return VkDynamicDepthWriteEnableEXT;
+    case VK_DYNAMIC_STATE_DEPTH_COMPARE_OP_EXT: return VkDynamicDepthCompareOpEXT;
+    case VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE_EXT: return VkDynamicDepthBoundsTestEnableEXT;
+    case VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE_EXT: return VkDynamicStencilTestEnableEXT;
+    case VK_DYNAMIC_STATE_STENCIL_OP_EXT: return VkDynamicStencilOpEXT;
     case VK_DYNAMIC_STATE_MAX_ENUM: break;
   }
 
@@ -89,8 +114,14 @@ void DescSetLayout::Init(VulkanResourceManager *resourceMan, VulkanCreationInfo 
                          const VkDescriptorSetLayoutCreateInfo *pCreateInfo)
 {
   dynamicCount = 0;
+  inlineCount = 0;
+  inlineByteSize = 0;
 
   flags = pCreateInfo->flags;
+
+  VkDescriptorSetLayoutBindingFlagsCreateInfo *bindingFlags =
+      (VkDescriptorSetLayoutBindingFlagsCreateInfo *)FindNextStruct(
+          pCreateInfo, VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO);
 
   // descriptor set layouts can be sparse, such that only three bindings exist
   // but they are at 0, 5 and 10.
@@ -115,6 +146,12 @@ void DescSetLayout::Init(VulkanResourceManager *resourceMan, VulkanCreationInfo 
        bindings[b].descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC)
       dynamicCount++;
 
+    if(bindings[b].descriptorType == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT)
+    {
+      inlineCount++;
+      inlineByteSize = AlignUp4(inlineByteSize + bindings[b].descriptorCount);
+    }
+
     if((bindings[b].descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER ||
         bindings[b].descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) &&
        pCreateInfo->pBindings[i].pImmutableSamplers)
@@ -124,45 +161,133 @@ void DescSetLayout::Init(VulkanResourceManager *resourceMan, VulkanCreationInfo 
       for(uint32_t s = 0; s < bindings[b].descriptorCount; s++)
         bindings[b].immutableSampler[s] = GetResID(pCreateInfo->pBindings[i].pImmutableSamplers[s]);
     }
+
+    if(bindingFlags &&
+       (bindingFlags->pBindingFlags[i] & VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT))
+      bindings[b].variableSize = 1;
+    else
+      bindings[b].variableSize = 0;
   }
+
+  // assign offsets in sorted bindings order, as the bindings we were provided by the application
+  // don't have to appear in bindings order
+  uint32_t elemOffset = 0;
+
+  for(size_t b = 0; b < bindings.size(); b++)
+  {
+    bindings[b].elemOffset = elemOffset;
+
+    // don't count the descriptors in the variable size array. We'll add on the allocated size after
+    // this
+    if(bindings[b].variableSize)
+      break;
+
+    if(bindings[b].descriptorType == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT)
+    {
+      elemOffset++;
+    }
+    else
+    {
+      elemOffset += bindings[b].descriptorCount;
+    }
+  }
+
+  totalElems = elemOffset;
 }
 
-void DescSetLayout::CreateBindingsArray(rdcarray<DescriptorSetSlot *> &descBindings) const
+void DescSetLayout::CreateBindingsArray(BindingStorage &bindingStorage, uint32_t variableAllocSize) const
 {
-  descBindings.resize(bindings.size());
-  for(size_t i = 0; i < bindings.size(); i++)
+  bindingStorage.variableDescriptorCount = variableAllocSize;
+
+  if(!bindings.empty())
   {
-    descBindings[i] = new DescriptorSetSlot[bindings[i].descriptorCount];
-    memset(descBindings[i], 0, sizeof(DescriptorSetSlot) * bindings[i].descriptorCount);
+    bindingStorage.elems.resize(totalElems + variableAllocSize);
+    bindingStorage.binds.resize(bindings.size());
+
+    if(inlineByteSize == 0)
+    {
+      for(size_t i = 0; i < bindings.size(); i++)
+        bindingStorage.binds[i] = bindingStorage.elems.data() + bindings[i].elemOffset;
+
+      bindingStorage.inlineBytes.clear();
+    }
+    else
+    {
+      uint32_t inlineOffset = 0;
+      for(size_t i = 0; i < bindings.size(); i++)
+      {
+        bindingStorage.binds[i] = bindingStorage.elems.data() + bindings[i].elemOffset;
+
+        if(bindings[i].descriptorType == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT)
+        {
+          bindingStorage.binds[i]->inlineOffset = inlineOffset;
+          inlineOffset = AlignUp4(inlineOffset + bindings[i].descriptorCount);
+        }
+      }
+
+      bindingStorage.inlineBytes.resize(inlineByteSize);
+    }
   }
 }
 
 void DescSetLayout::UpdateBindingsArray(const DescSetLayout &prevLayout,
-                                        rdcarray<DescriptorSetSlot *> &descBindings) const
+                                        BindingStorage &bindingStorage) const
 {
-  // if we have fewer bindings now, delete the orphaned bindings arrays
-  for(size_t i = bindings.size(); i < prevLayout.bindings.size(); i++)
-    SAFE_DELETE_ARRAY(descBindings[i]);
-
-  // resize to the new number of bindings
-  descBindings.resize(bindings.size());
-
-  // re-allocate slots and move any previous bindings that overlapped over.
-  for(size_t i = 0; i < bindings.size(); i++)
+  if(bindings.empty())
   {
-    // allocate new slot array
-    DescriptorSetSlot *newSlots = new DescriptorSetSlot[bindings[i].descriptorCount];
-    memset(newSlots, 0, sizeof(DescriptorSetSlot) * bindings[i].descriptorCount);
+    bindingStorage.clear();
+  }
+  else
+  {
+    rdcarray<DescriptorSetSlot> newElems;
+    newElems.resize(totalElems);
 
-    // copy over any previous bindings that overlapped
-    if(i < prevLayout.bindings.size())
-      memcpy(newSlots, descBindings[i],
-             sizeof(DescriptorSetSlot) *
-                 RDCMIN(prevLayout.bindings[i].descriptorCount, bindings[i].descriptorCount));
+    // resize to the new size, discarding any excess we don't need anymore
+    bindingStorage.binds.resize(bindings.size());
 
-    // delete old array, and assign the new one
-    SAFE_DELETE_ARRAY(descBindings[i]);
-    descBindings[i] = newSlots;
+    if(inlineByteSize == 0)
+    {
+      for(size_t i = 0; i < bindings.size(); i++)
+      {
+        DescriptorSetSlot *newSlots = newElems.data() + bindings[i].elemOffset;
+
+        // copy over any previous bindings that overlapped
+        if(i < prevLayout.bindings.size())
+          memcpy(newSlots, bindingStorage.binds[i],
+                 sizeof(DescriptorSetSlot) *
+                     RDCMIN(prevLayout.bindings[i].descriptorCount, bindings[i].descriptorCount));
+
+        bindingStorage.binds[i] = newSlots;
+      }
+    }
+    else
+    {
+      uint32_t inlineOffset = 0;
+      for(size_t i = 0; i < bindings.size(); i++)
+      {
+        DescriptorSetSlot *newSlots = newElems.data() + bindings[i].elemOffset;
+
+        if(bindings[i].descriptorType == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT)
+        {
+          bindingStorage.binds[i]->inlineOffset = inlineOffset;
+          inlineOffset = AlignUp4(inlineOffset + bindings[i].descriptorCount);
+        }
+        else
+        {
+          // copy over any previous bindings that overlapped
+          if(i < prevLayout.bindings.size())
+            memcpy(newSlots, bindingStorage.binds[i],
+                   sizeof(DescriptorSetSlot) *
+                       RDCMIN(prevLayout.bindings[i].descriptorCount, bindings[i].descriptorCount));
+        }
+
+        bindingStorage.binds[i] = newSlots;
+      }
+
+      bindingStorage.inlineBytes.resize(inlineByteSize);
+    }
+
+    bindingStorage.elems.swap(newElems);
   }
 }
 
@@ -220,6 +345,14 @@ void VulkanCreationInfo::Pipeline::Init(VulkanResourceManager *resourceMan,
   {
     for(uint32_t i = 0; i < pCreateInfo->pDynamicState->dynamicStateCount; i++)
       dynamicStates[ConvertDynamicState(pCreateInfo->pDynamicState->pDynamicStates[i])] = true;
+
+    // if the viewports and counts are dynamic this supersets the viewport only being dynamic. For
+    // ease of code elsewhere, turn off the older one if both are specified so that we don't call
+    // vkCmdSetViewports when the count is also dynamic.
+    if(dynamicStates[VkDynamicViewportCountEXT])
+      dynamicStates[VkDynamicViewport] = false;
+    if(dynamicStates[VkDynamicScissorCountEXT])
+      dynamicStates[VkDynamicScissor] = false;
   }
 
   // VkPipelineShaderStageCreateInfo
@@ -661,6 +794,7 @@ void VulkanCreationInfo::RenderPass::Init(VulkanResourceManager *resourceMan,
   for(uint32_t i = 0; i < pCreateInfo->attachmentCount; i++)
   {
     Attachment &dst = attachments[i];
+    dst.used = false;
     dst.flags = pCreateInfo->pAttachments[i].flags;
     dst.format = pCreateInfo->pAttachments[i].format;
     dst.samples = pCreateInfo->pAttachments[i].samples;
@@ -706,6 +840,11 @@ void VulkanCreationInfo::RenderPass::Init(VulkanResourceManager *resourceMan,
           src.pResolveAttachments ? src.pResolveAttachments[i].attachment : ~0U;
       dst.colorAttachments[i] = src.pColorAttachments[i].attachment;
       dst.colorLayouts[i] = src.pColorAttachments[i].layout;
+
+      if(dst.resolveAttachments[i] != VK_ATTACHMENT_UNUSED)
+        attachments[dst.resolveAttachments[i]].used = true;
+      if(dst.colorAttachments[i] != VK_ATTACHMENT_UNUSED)
+        attachments[dst.colorAttachments[i]].used = true;
     }
 
     dst.depthstencilAttachment =
@@ -718,6 +857,9 @@ void VulkanCreationInfo::RenderPass::Init(VulkanResourceManager *resourceMan,
                  src.pDepthStencilAttachment->attachment != VK_ATTACHMENT_UNUSED
              ? src.pDepthStencilAttachment->layout
              : VK_IMAGE_LAYOUT_UNDEFINED);
+
+    if(dst.depthstencilAttachment >= 0)
+      attachments[dst.depthstencilAttachment].used = true;
 
     dst.fragmentDensityAttachment =
         (fragmentDensity &&
@@ -751,6 +893,7 @@ void VulkanCreationInfo::RenderPass::Init(VulkanResourceManager *resourceMan,
   for(uint32_t i = 0; i < pCreateInfo->attachmentCount; i++)
   {
     Attachment &dst = attachments[i];
+    dst.used = false;
     dst.flags = pCreateInfo->pAttachments[i].flags;
     dst.format = pCreateInfo->pAttachments[i].format;
     dst.samples = pCreateInfo->pAttachments[i].samples;
@@ -808,6 +951,11 @@ void VulkanCreationInfo::RenderPass::Init(VulkanResourceManager *resourceMan,
           src.pResolveAttachments ? src.pResolveAttachments[i].attachment : ~0U;
       dst.colorAttachments[i] = src.pColorAttachments[i].attachment;
       dst.colorLayouts[i] = src.pColorAttachments[i].layout;
+
+      if(dst.resolveAttachments[i] != VK_ATTACHMENT_UNUSED)
+        attachments[dst.resolveAttachments[i]].used = true;
+      if(dst.colorAttachments[i] != VK_ATTACHMENT_UNUSED)
+        attachments[dst.colorAttachments[i]].used = true;
     }
 
     dst.depthstencilAttachment =
@@ -820,6 +968,9 @@ void VulkanCreationInfo::RenderPass::Init(VulkanResourceManager *resourceMan,
                  src.pDepthStencilAttachment->attachment != VK_ATTACHMENT_UNUSED
              ? src.pDepthStencilAttachment->layout
              : VK_IMAGE_LAYOUT_UNDEFINED);
+
+    if(dst.depthstencilAttachment >= 0)
+      attachments[dst.depthstencilAttachment].used = true;
 
     // VK_KHR_separate_depth_stencil_layouts
     const VkAttachmentReferenceStencilLayoutKHR *separateStencil =
@@ -899,12 +1050,54 @@ void VulkanCreationInfo::Memory::Init(VulkanResourceManager *resourceMan, Vulkan
   size = pAllocInfo->allocationSize;
 }
 
+void VulkanCreationInfo::Memory::SimplifyBindings()
+{
+  // after initialisation we're likely to end up with a lot of gaps of 'none' in between tiled or
+  // linear resources. Regions of memory with no bindings are not visible in any meaningful way
+  // (memory can only be read with an image or buffer bound to it) so we perform a pass collapsing
+  // any 'None' intervals into the previous to be able to simplify the set of intervals. This means
+  // we might promote some regions to tiled, but that's fine since as above their contents are
+  // essentially meaningless.
+
+  // if the first entry is None and we have a second entry, then set the first to whatever the
+  // second is
+  if(bindings.size() > 1 && bindings.begin()->value() == VulkanCreationInfo::Memory::None)
+  {
+    auto it = bindings.begin();
+    it++;
+    bindings.begin()->setValue(it->value());
+  }
+
+  for(auto it = bindings.begin(); it != bindings.end(); it++)
+  {
+    // if we're not at the begining and the current range is None, copy whatever was in the previous
+    // range
+    if(it != bindings.begin() && it->value() == VulkanCreationInfo::Memory::None)
+    {
+      auto previt = it;
+      previt--;
+
+      it->setValue(previt->value());
+    }
+
+    // merge left when possible
+    it->mergeLeft();
+  }
+}
+
 void VulkanCreationInfo::Buffer::Init(VulkanResourceManager *resourceMan, VulkanCreationInfo &info,
                                       const VkBufferCreateInfo *pCreateInfo)
 {
   usage = pCreateInfo->usage;
   size = pCreateInfo->size;
   gpuAddress = 0;
+
+  external = false;
+
+  if(FindNextStruct(pCreateInfo, VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO))
+  {
+    external = true;
+  }
 }
 
 void VulkanCreationInfo::BufferView::Init(VulkanResourceManager *resourceMan,
@@ -926,6 +1119,17 @@ void VulkanCreationInfo::Image::Init(VulkanResourceManager *resourceMan, VulkanC
   arrayLayers = pCreateInfo->arrayLayers;
   mipLevels = pCreateInfo->mipLevels;
   samples = RDCMAX(VK_SAMPLE_COUNT_1_BIT, pCreateInfo->samples);
+
+  linear = pCreateInfo->tiling == VK_IMAGE_TILING_LINEAR;
+
+  external = false;
+
+  if(FindNextStruct(pCreateInfo, VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO_NV) ||
+     FindNextStruct(pCreateInfo, VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO) ||
+     FindNextStruct(pCreateInfo, VK_STRUCTURE_TYPE_EXTERNAL_FORMAT_ANDROID))
+  {
+    external = true;
+  }
 
   creationFlags = TextureCategory::NoFlags;
 
@@ -977,6 +1181,20 @@ void VulkanCreationInfo::Sampler::Init(VulkanResourceManager *resourceMan, Vulka
   {
     ycbcr = GetResID(ycbcrInfo->conversion);
   }
+
+  customBorder = false;
+  RDCEraseEl(customBorderColor);
+  customBorderFormat = VK_FORMAT_UNDEFINED;
+
+  const VkSamplerCustomBorderColorCreateInfoEXT *border =
+      (const VkSamplerCustomBorderColorCreateInfoEXT *)FindNextStruct(
+          pCreateInfo, VK_STRUCTURE_TYPE_SAMPLER_CUSTOM_BORDER_COLOR_CREATE_INFO_EXT);
+  if(border)
+  {
+    customBorder = true;
+    customBorderColor = border->customBorderColor;
+    customBorderFormat = border->format;
+  }
 }
 
 void VulkanCreationInfo::YCbCrSampler::Init(VulkanResourceManager *resourceMan,
@@ -992,32 +1210,28 @@ void VulkanCreationInfo::YCbCrSampler::Init(VulkanResourceManager *resourceMan,
     case VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_709: ycbcrModel = YcbcrConversion::BT709; break;
     case VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_601: ycbcrModel = YcbcrConversion::BT601; break;
     case VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_2020: ycbcrModel = YcbcrConversion::BT2020; break;
-    case VK_SAMPLER_YCBCR_MODEL_CONVERSION_MAX_ENUM:
-    case VK_SAMPLER_YCBCR_MODEL_CONVERSION_RANGE_SIZE: break;
+    case VK_SAMPLER_YCBCR_MODEL_CONVERSION_MAX_ENUM: break;
   }
 
   switch(pCreateInfo->ycbcrRange)
   {
     case VK_SAMPLER_YCBCR_RANGE_ITU_FULL: ycbcrRange = YcbcrRange::ITUFull; break;
     case VK_SAMPLER_YCBCR_RANGE_ITU_NARROW: ycbcrRange = YcbcrRange::ITUNarrow; break;
-    case VK_SAMPLER_YCBCR_RANGE_MAX_ENUM:
-    case VK_SAMPLER_YCBCR_RANGE_RANGE_SIZE: break;
+    case VK_SAMPLER_YCBCR_RANGE_MAX_ENUM: break;
   }
 
   switch(pCreateInfo->xChromaOffset)
   {
     case VK_CHROMA_LOCATION_COSITED_EVEN: xChromaOffset = ChromaSampleLocation::CositedEven; break;
     case VK_CHROMA_LOCATION_MIDPOINT: xChromaOffset = ChromaSampleLocation::Midpoint; break;
-    case VK_CHROMA_LOCATION_MAX_ENUM:
-    case VK_CHROMA_LOCATION_RANGE_SIZE: break;
+    case VK_CHROMA_LOCATION_MAX_ENUM: break;
   }
 
   switch(pCreateInfo->yChromaOffset)
   {
     case VK_CHROMA_LOCATION_COSITED_EVEN: yChromaOffset = ChromaSampleLocation::CositedEven; break;
     case VK_CHROMA_LOCATION_MIDPOINT: yChromaOffset = ChromaSampleLocation::Midpoint; break;
-    case VK_CHROMA_LOCATION_MAX_ENUM:
-    case VK_CHROMA_LOCATION_RANGE_SIZE: break;
+    case VK_CHROMA_LOCATION_MAX_ENUM: break;
   }
 
   componentMapping = pCreateInfo->components;
@@ -1083,6 +1297,14 @@ void VulkanCreationInfo::ShaderModuleReflection::PopulateDisassembly(const rdcsp
     disassembly = spirv.Disassemble(refl.entryPoint.c_str(), instructionLines);
 }
 
+void VulkanCreationInfo::QueryPool::Init(VulkanResourceManager *resourceMan, VulkanCreationInfo &info,
+                                         const VkQueryPoolCreateInfo *pCreateInfo)
+{
+  queryType = pCreateInfo->queryType;
+  queryCount = pCreateInfo->queryCount;
+  pipelineStatistics = pCreateInfo->pipelineStatistics;
+}
+
 void VulkanCreationInfo::DescSetPool::Init(VulkanResourceManager *resourceMan,
                                            VulkanCreationInfo &info,
                                            const VkDescriptorPoolCreateInfo *pCreateInfo)
@@ -1123,7 +1345,7 @@ void DescUpdateTemplate::Init(VulkanResourceManager *resourceMan, VulkanCreation
 
   bindPoint = pCreateInfo->pipelineBindPoint;
 
-  dataByteSize = 0;
+  unwrapByteSize = 0;
 
   texelBufferViewCount = 0;
   bufferInfoCount = 0;
@@ -1132,6 +1354,8 @@ void DescUpdateTemplate::Init(VulkanResourceManager *resourceMan, VulkanCreation
   for(const VkDescriptorUpdateTemplateEntry &entry : updates)
   {
     uint32_t entrySize = 4;
+
+    size_t stride = entry.stride;
 
     if(entry.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER ||
        entry.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)
@@ -1150,6 +1374,19 @@ void DescUpdateTemplate::Init(VulkanResourceManager *resourceMan, VulkanCreation
 
       imageInfoCount += entry.descriptorCount;
     }
+    else if(entry.descriptorType == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT)
+    {
+      // a bit of magic handling. The calculation is stride * descriptorCount bytes for the data,
+      // plus the size of the 'base' structure. For inline uniform blocks there's no base structure
+      // and the data is in bytes, so stride 1.
+      stride = 1;
+
+      entrySize = 0;
+
+      inlineInfoCount++;
+      inlineByteSize += entry.descriptorCount;
+      inlineByteSize = AlignUp4(inlineByteSize);
+    }
     else
     {
       entrySize = sizeof(VkDescriptorBufferInfo);
@@ -1157,8 +1394,8 @@ void DescUpdateTemplate::Init(VulkanResourceManager *resourceMan, VulkanCreation
       bufferInfoCount += entry.descriptorCount;
     }
 
-    dataByteSize =
-        RDCMAX(dataByteSize, entry.offset + entry.stride * entry.descriptorCount + entrySize);
+    unwrapByteSize =
+        RDCMAX(unwrapByteSize, entry.offset + stride * entry.descriptorCount + entrySize);
   }
 
   if(pCreateInfo->templateType == VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_DESCRIPTOR_SET)
@@ -1193,7 +1430,10 @@ void DescUpdateTemplate::Apply(const void *pData, DescUpdateTemplateApplication 
   application.bufView.reserve(texelBufferViewCount);
   application.bufInfo.reserve(bufferInfoCount);
   application.imgInfo.reserve(imageInfoCount);
+  application.inlineData.resize(inlineByteSize);
+  application.inlineUniform.reserve(inlineInfoCount);
 
+  uint32_t inlineOffset = 0;
   for(const VkDescriptorUpdateTemplateEntry &entry : updates)
   {
     VkWriteDescriptorSet write = {};
@@ -1239,6 +1479,22 @@ void DescUpdateTemplate::Apply(const void *pData, DescUpdateTemplateApplication 
       }
 
       write.pImageInfo = &application.imgInfo[idx];
+    }
+    else if(entry.descriptorType == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT)
+    {
+      application.inlineUniform.push_back({});
+
+      VkWriteDescriptorSetInlineUniformBlockEXT &inlineWrite = application.inlineUniform.back();
+      inlineWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_INLINE_UNIFORM_BLOCK_EXT;
+      inlineWrite.pNext = NULL;
+      inlineWrite.dataSize = entry.descriptorCount;
+
+      void *dst = application.inlineData.data() + inlineOffset;
+      memcpy(dst, src, inlineWrite.dataSize);
+      inlineWrite.pData = dst;
+
+      write.pNext = &inlineWrite;
+      write.descriptorCount = entry.descriptorCount;
     }
     else
     {

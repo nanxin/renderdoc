@@ -107,7 +107,10 @@ public:
   void BindOutputWindow(uint64_t id, bool depth) { m_Proxy->BindOutputWindow(id, depth); }
   bool IsOutputWindowVisible(uint64_t id) { return m_Proxy->IsOutputWindowVisible(id); }
   void FlipOutputWindow(uint64_t id) { m_Proxy->FlipOutputWindow(id); }
-  void RenderCheckerboard() { m_Proxy->RenderCheckerboard(); }
+  void RenderCheckerboard(FloatVector dark, FloatVector light)
+  {
+    m_Proxy->RenderCheckerboard(dark, light);
+  }
   void RenderHighlightBox(float w, float h, float scale)
   {
     m_Proxy->RenderHighlightBox(w, h, scale);
@@ -249,9 +252,8 @@ public:
     RDCEraseEl(ret);
     return ret;
   }
-  ResourceId RenderOverlay(ResourceId texid, const Subresource &sub, CompType typeCast,
-                           FloatVector clearCol, DebugOverlay overlay, uint32_t eventId,
-                           const rdcarray<uint32_t> &passEvents)
+  ResourceId RenderOverlay(ResourceId texid, FloatVector clearCol, DebugOverlay overlay,
+                           uint32_t eventId, const rdcarray<uint32_t> &passEvents)
   {
     return ResourceId();
   }
@@ -260,7 +262,7 @@ public:
   {
     return NULL;
   }
-  rdcarray<rdcstr> GetDisassemblyTargets() { return {"N/A"}; }
+  rdcarray<rdcstr> GetDisassemblyTargets(bool withPipeline) { return {"N/A"}; }
   rdcstr DisassembleShader(ResourceId pipeline, const ShaderReflection *refl, const rdcstr &target)
   {
     return "";
@@ -774,7 +776,7 @@ void ImageViewer::RefreshFile()
       {
         // see if we can convert this format on the CPU for proxying
         bool convertSupported = false;
-        ConvertComponents(texDetails.format, NULL, &convertSupported);
+        DecodeFormattedComponents(texDetails.format, NULL, &convertSupported);
 
         if(convertSupported)
         {
@@ -810,7 +812,7 @@ void ImageViewer::RefreshFile()
               {
                 for(uint32_t x = 0; x < mipwidth; x++)
                 {
-                  *dst = ConvertComponents(texDetails.format, src);
+                  *dst = DecodeFormattedComponents(texDetails.format, src);
                   dst++;
                   src += srcStride;
                 }

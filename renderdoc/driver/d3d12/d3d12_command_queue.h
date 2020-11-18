@@ -126,6 +126,8 @@ class WrappedID3D12CommandQueue : public ID3D12CommandQueue,
 
   StreamReader *m_FrameReader = NULL;
 
+  uint64_t m_TimeBase = 0;
+  double m_TimeFrequency = 1.0f;
   SDFile *m_StructuredFile = NULL;
 
   // command recording/replay data shared between queues and lists
@@ -138,8 +140,7 @@ class WrappedID3D12CommandQueue : public ID3D12CommandQueue,
   static rdcstr GetChunkName(uint32_t idx);
   D3D12ResourceManager *GetResourceManager() { return m_pDevice->GetResourceManager(); }
 public:
-  static const int AllocPoolCount = 16;
-  ALLOCATE_WITH_WRAPPED_POOL(WrappedID3D12CommandQueue, AllocPoolCount);
+  ALLOCATE_WITH_WRAPPED_POOL(WrappedID3D12CommandQueue);
 
   WrappedID3D12CommandQueue(ID3D12CommandQueue *real, WrappedID3D12Device *device,
                             CaptureState &state);
@@ -178,6 +179,8 @@ public:
     return NULL;
   }
   // the rest forward to the device
+  virtual void *GetFrameCapturerDevice() { return m_pDevice->GetFrameCapturerDevice(); }
+  virtual IFrameCapturer *GetFrameCapturer() { return m_pDevice->GetFrameCapturer(); }
   virtual void FirstFrame(IDXGISwapper *swapper) { m_pDevice->FirstFrame(swapper); }
   virtual void NewSwapchainBuffer(IUnknown *backbuffer)
   {

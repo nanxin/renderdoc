@@ -113,12 +113,17 @@ private:
 
   template <typename viewType>
   bool setViewDetails(RDTreeWidgetItem *node, const viewType &view, TextureDescription *tex,
-                      const QString &hiddenCombinedSampler, bool includeSampleLocations = false);
+                      bool stageBitsIncluded, const QString &hiddenCombinedSampler,
+                      bool includeSampleLocations = false);
 
   template <typename viewType>
-  bool setViewDetails(RDTreeWidgetItem *node, const viewType &view, BufferDescription *buf);
+  bool setViewDetails(RDTreeWidgetItem *node, const viewType &view, BufferDescription *buf,
+                      bool stageBitsIncluded);
 
   bool showNode(bool usedSlot, bool filledSlot);
+
+  bool m_ShowUnused = false;
+  bool m_ShowEmpty = false;
 
   void exportHTML(QXmlStreamWriter &xml, const VKPipe::VertexInput &vi);
   void exportHTML(QXmlStreamWriter &xml, const VKPipe::InputAssembly &ia);

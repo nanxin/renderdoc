@@ -44,6 +44,12 @@
 char **GetCurrentEnvironment();
 int GetIdentPort(pid_t childPid);
 
+// functions to try and let the child run just far enough to get to main() but no further. This lets
+// us check the ident port and resume.
+void StopAtMainInChild();
+bool StopChildAtMain(pid_t childPid);
+void ResumeProcess(pid_t childPid, uint32_t delay = 0);
+
 #if ENABLED(RDOC_APPLE)
 
 #define PRELOAD_ENV_VAR "DYLD_INSERT_LIBRARIES"
@@ -396,24 +402,118 @@ void Process::ApplyEnvironmentModification()
   modifications.clear();
 }
 
-static void CleanupStringArray(char **arr, char **invalid)
+static void CleanupStringArray(char **arr)
 {
-  if(arr != invalid)
-  {
-    char **arr_delete = arr;
+  char **arr_delete = arr;
 
-    while(*arr)
+  while(*arr)
+  {
+    delete[] * arr;
+    arr++;
+  }
+
+  delete[] arr_delete;
+}
+
+static rdcarray<rdcstr> ParseCommandLine(const rdcstr &appName, const char *cmdLine)
+{
+  // argv[0] is the application name, by convention
+  rdcarray<rdcstr> argv = {appName};
+
+  const char *c = cmdLine;
+
+  // parse command line into argv[], similar to how bash would
+  if(cmdLine)
+  {
+    rdcstr a;
+    bool haveArg = false;
+
+    bool dquot = false, squot = false;    // are we inside ''s or ""s
+    while(*c)
     {
-      delete[] * arr;
-      arr++;
+      if(!dquot && !squot && (*c == ' ' || *c == '\t'))
+      {
+        if(!a.empty() || haveArg)
+        {
+          // if we've fetched some number of non-space characters
+          argv.push_back(a);
+        }
+
+        a = "";
+        haveArg = false;
+      }
+      // if we're not quoting at all and see a quote, enter that quote mode
+      else if(!dquot && !squot && *c == '"')
+      {
+        dquot = true;
+        haveArg = true;
+      }
+      else if(!dquot && !squot && *c == '\'')
+      {
+        squot = true;
+        haveArg = true;
+      }
+      // exit quoting if we see the matching quote (we skip over escapes separately)
+      else if(dquot && *c == '"')
+      {
+        dquot = false;
+      }
+      else if(squot && *c == '\'')
+      {
+        squot = false;
+      }
+      else if(squot)
+      {
+        // single quotes don't escape, just copy literally until we leave single quote mode
+        a.push_back(*c);
+      }
+      else if(dquot)
+      {
+        // handle escaping
+        if(*c == '\\')
+        {
+          c++;
+          if(*c)
+          {
+            a.push_back(*c);
+          }
+          else
+          {
+            RDCERR("Malformed command line:\n%s", cmdLine);
+            return {};
+          }
+        }
+        else
+        {
+          a.push_back(*c);
+        }
+      }
+      else
+      {
+        a.push_back(*c);
+      }
+
+      c++;
     }
 
-    delete[] arr_delete;
+    if(!a.empty() || haveArg)
+    {
+      // if we've fetched some number of non-space characters
+      argv.push_back(a);
+    }
+
+    if(squot || dquot)
+    {
+      RDCERR("Malformed command line\n%s", cmdLine);
+      return {};
+    }
   }
+
+  return argv;
 }
 
 static pid_t RunProcess(const char *app, const char *workingDir, const char *cmdLine, char **envp,
-                        int stdoutPipe[2] = NULL, int stderrPipe[2] = NULL)
+                        bool pauseAtMain, int stdoutPipe[2] = NULL, int stderrPipe[2] = NULL)
 {
   if(!app)
     return (pid_t)0;
@@ -441,122 +541,15 @@ static pid_t RunProcess(const char *app, const char *workingDir, const char *cmd
   appName = shellExpand(appName);
   workDir = shellExpand(workDir);
 
-  // it is safe to use app directly as execve never modifies argv
-  char *emptyargv[] = {(char *)appName.c_str(), NULL};
-  char **argv = emptyargv;
+  rdcarray<rdcstr> argvList = ParseCommandLine(appName, cmdLine);
 
-  const char *c = cmdLine;
+  if(argvList.empty())
+    return 0;
 
-  // parse command line into argv[], similar to how bash would
-  if(cmdLine)
-  {
-    int argc = 1;
-
-    // get a rough upper bound on the number of arguments
-    while(*c)
-    {
-      if(*c == ' ' || *c == '\t')
-        argc++;
-      c++;
-    }
-
-    argv = new char *[argc + 2];
-    memset(argv, 0, (argc + 2) * sizeof(char *));
-
-    c = cmdLine;
-
-    rdcstr a;
-
-    argc = 0;    // current argument we're fetching
-
-    // argv[0] is the application name, by convention
-    size_t len = appName.length() + 1;
-    argv[argc] = new char[len];
-    strcpy(argv[argc], appName.c_str());
-
-    argc++;
-
-    bool dquot = false, squot = false;    // are we inside ''s or ""s
-    while(*c)
-    {
-      if(!dquot && !squot && (*c == ' ' || *c == '\t'))
-      {
-        if(!a.empty())
-        {
-          // if we've fetched some number of non-space characters
-          argv[argc] = new char[a.length() + 1];
-          memcpy(argv[argc], a.c_str(), a.length() + 1);
-          argc++;
-        }
-
-        a = "";
-      }
-      else if(!dquot && *c == '"')
-      {
-        dquot = true;
-      }
-      else if(!squot && *c == '\'')
-      {
-        squot = true;
-      }
-      else if(dquot && *c == '"')
-      {
-        dquot = false;
-      }
-      else if(squot && *c == '\'')
-      {
-        squot = false;
-      }
-      else if(squot)
-      {
-        // single quotes don't escape, just copy literally until we leave single quote mode
-        a.push_back(*c);
-      }
-      else if(dquot)
-      {
-        // handle escaping
-        if(*c == '\\')
-        {
-          c++;
-          if(*c)
-          {
-            a.push_back(*c);
-          }
-          else
-          {
-            CleanupStringArray(argv, emptyargv);
-            RDCERR("Malformed command line:\n%s", cmdLine);
-            return 0;
-          }
-        }
-        else
-        {
-          a.push_back(*c);
-        }
-      }
-      else
-      {
-        a.push_back(*c);
-      }
-
-      c++;
-    }
-
-    if(!a.empty())
-    {
-      // if we've fetched some number of non-space characters
-      argv[argc] = new char[a.length() + 1];
-      memcpy(argv[argc], a.c_str(), a.length() + 1);
-      argc++;
-    }
-
-    if(squot || dquot)
-    {
-      CleanupStringArray(argv, emptyargv);
-      RDCERR("Malformed command line\n%s", cmdLine);
-      return 0;
-    }
-  }
+  char **argv = new char *[argvList.size() + 1];
+  for(size_t i = 0; i < argvList.size(); i++)
+    argv[i] = argvList[i].data();
+  argv[argvList.size()] = NULL;
 
   const rdcstr appPath(GetAbsoluteAppPathFromName(appName));
 
@@ -572,6 +565,9 @@ static pid_t RunProcess(const char *app, const char *workingDir, const char *cmd
     childPid = fork();
     if(childPid == 0)
     {
+      if(pauseAtMain)
+        StopAtMainInChild();
+
       FileIO::ReleaseFDAfterFork();
       if(stdoutPipe)
       {
@@ -593,22 +589,28 @@ static pid_t RunProcess(const char *app, const char *workingDir, const char *cmd
       fprintf(stderr, "exec failed\n");
       _exit(1);
     }
-    else if(!stdoutPipe)
+    else
     {
-      // remember this PID so we can wait on it later
-      SCOPED_SPINLOCK(zombieLock);
+      if(!stdoutPipe)
+      {
+        // remember this PID so we can wait on it later
+        SCOPED_SPINLOCK(zombieLock);
 
-      PIDNode *node = NULL;
+        PIDNode *node = NULL;
 
-      // take a child from the free list if available, otherwise allocate a new one
-      if(freeChildren.head)
-        node = freeChildren.pop_front();
-      else
-        node = new PIDNode();
+        // take a child from the free list if available, otherwise allocate a new one
+        if(freeChildren.head)
+          node = freeChildren.pop_front();
+        else
+          node = new PIDNode();
 
-      node->pid = childPid;
+        node->pid = childPid;
 
-      children.append(node);
+        children.append(node);
+      }
+
+      if(pauseAtMain)
+        StopChildAtMain(childPid);
     }
   }
 
@@ -619,7 +621,7 @@ static pid_t RunProcess(const char *app, const char *workingDir, const char *cmd
     close(stderrPipe[1]);
   }
 
-  CleanupStringArray(argv, emptyargv);
+  delete[] argv;
   return childPid;
 }
 
@@ -650,8 +652,8 @@ uint32_t Process::LaunchProcess(const char *app, const char *workingDir, const c
   }
 
   char **currentEnvironment = GetCurrentEnvironment();
-  uint32_t ret = (uint32_t)RunProcess(app, workingDir, cmdLine, currentEnvironment,
-                                      result ? stdoutPipe : NULL, result ? stderrPipe : NULL);
+  pid_t ret = RunProcess(app, workingDir, cmdLine, currentEnvironment, false,
+                         result ? stdoutPipe : NULL, result ? stderrPipe : NULL);
 
   if(result)
   {
@@ -698,7 +700,7 @@ uint32_t Process::LaunchProcess(const char *app, const char *workingDir, const c
     close(stderrPipe[0]);
   }
 
-  return ret;
+  return (uint32_t)ret;
 }
 
 uint32_t Process::LaunchScript(const char *script, const char *workingDir, const char *argList,
@@ -826,16 +828,19 @@ rdcpair<ReplayStatus, uint32_t> Process::LaunchAndInjectIntoProcess(
     i++;
   }
 
-  pid_t childPid = RunProcess(app, workingDir, cmdLine, envp);
+  RDCLOG("Running process %s for injection", app);
+
+  pid_t childPid = RunProcess(app, workingDir, cmdLine, envp, true);
 
   int ret = 0;
 
   if(childPid != (pid_t)0)
   {
-    // wait for child to have opened its socket
-    usleep(1000);
-
+    // ideally we stopped at main so we can check the port immediately. Otherwise this will do an
+    // exponential wait to get it as soon as possible
     ret = GetIdentPort(childPid);
+
+    ResumeProcess(childPid, opts.delayForDebugger);
 
     if(waitForExit)
     {
@@ -844,7 +849,7 @@ rdcpair<ReplayStatus, uint32_t> Process::LaunchAndInjectIntoProcess(
     }
   }
 
-  CleanupStringArray(envp, NULL);
+  CleanupStringArray(envp);
   return {ret == 0 ? ReplayStatus::InjectionFailed : ReplayStatus::Succeeded, (uint32_t)ret};
 }
 
@@ -905,6 +910,314 @@ void Process::Shutdown()
 #if ENABLED(ENABLE_UNIT_TESTS)
 
 #include "catch/catch.hpp"
+
+TEST_CASE("Test command line parsing", "[osspecific]")
+{
+  rdcarray<rdcstr> args;
+
+  SECTION("NULL command line")
+  {
+    args = ParseCommandLine("app", NULL);
+
+    REQUIRE(args.size() == 1);
+    CHECK(args[0] == "app");
+  }
+
+  SECTION("empty command line")
+  {
+    args = ParseCommandLine("app", "");
+
+    REQUIRE(args.size() == 1);
+    CHECK(args[0] == "app");
+
+    args = ParseCommandLine("app", "   ");
+
+    REQUIRE(args.size() == 1);
+    CHECK(args[0] == "app");
+
+    args = ParseCommandLine("app", "  \t  \t ");
+
+    REQUIRE(args.size() == 1);
+    CHECK(args[0] == "app");
+  }
+
+  SECTION("whitespace command line")
+  {
+    args = ParseCommandLine("app", "'   '");
+
+    REQUIRE(args.size() == 2);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "   ");
+
+    args = ParseCommandLine("app", "   '   '");
+
+    REQUIRE(args.size() == 2);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "   ");
+
+    args = ParseCommandLine("app", "   '   '   ");
+
+    REQUIRE(args.size() == 2);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "   ");
+
+    args = ParseCommandLine("app", "   \"   \"   ");
+
+    REQUIRE(args.size() == 2);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "   ");
+  }
+
+  SECTION("a single parameter")
+  {
+    args = ParseCommandLine("app", "--foo");
+
+    REQUIRE(args.size() == 2);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "--foo");
+
+    args = ParseCommandLine("app", "--bar");
+
+    REQUIRE(args.size() == 2);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "--bar");
+
+    args = ParseCommandLine("app", "/a/path/to/somewhere");
+
+    REQUIRE(args.size() == 2);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "/a/path/to/somewhere");
+  }
+
+  SECTION("multiple parameters")
+  {
+    args = ParseCommandLine("app", "--foo --bar   ");
+
+    REQUIRE(args.size() == 3);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "--foo");
+    CHECK(args[2] == "--bar");
+
+    args = ParseCommandLine("app", "  --qux    \t   --asdf");
+
+    REQUIRE(args.size() == 3);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "--qux");
+    CHECK(args[2] == "--asdf");
+
+    args = ParseCommandLine("app", "--path /a/path/to/somewhere    --many --param a   b c     d ");
+
+    REQUIRE(args.size() == 9);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "--path");
+    CHECK(args[2] == "/a/path/to/somewhere");
+    CHECK(args[3] == "--many");
+    CHECK(args[4] == "--param");
+    CHECK(args[5] == "a");
+    CHECK(args[6] == "b");
+    CHECK(args[7] == "c");
+    CHECK(args[8] == "d");
+  }
+
+  SECTION("parameters with single quotes")
+  {
+    args = ParseCommandLine("app", "'single quoted single parameter'");
+
+    REQUIRE(args.size() == 2);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "single quoted single parameter");
+
+    args = ParseCommandLine("app", "      'single quoted single parameter'  ");
+
+    REQUIRE(args.size() == 2);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "single quoted single parameter");
+
+    args = ParseCommandLine("app", "      'single quoted \t\tsingle parameter'  ");
+
+    REQUIRE(args.size() == 2);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "single quoted \t\tsingle parameter");
+
+    args = ParseCommandLine("app", "   --thing='single quoted single parameter'  ");
+
+    REQUIRE(args.size() == 2);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "--thing=single quoted single parameter");
+
+    args = ParseCommandLine("app", " 'quoted string with \"double quotes inside\" it' ");
+
+    REQUIRE(args.size() == 2);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "quoted string with \"double quotes inside\" it");
+
+    args =
+        ParseCommandLine("app", " --multiple --params 'single quoted parameter'  --with --quotes ");
+
+    REQUIRE(args.size() == 6);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "--multiple");
+    CHECK(args[2] == "--params");
+    CHECK(args[3] == "single quoted parameter");
+    CHECK(args[4] == "--with");
+    CHECK(args[5] == "--quotes");
+
+    args = ParseCommandLine("app", "--explicit '' --empty");
+
+    REQUIRE(args.size() == 4);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "--explicit");
+    CHECK(args[2] == "");
+    CHECK(args[3] == "--empty");
+
+    args = ParseCommandLine("app", "--explicit '  ' --spaces");
+
+    REQUIRE(args.size() == 4);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "--explicit");
+    CHECK(args[2] == "  ");
+    CHECK(args[3] == "--spaces");
+
+    args = ParseCommandLine("app", "--explicit ''");
+
+    REQUIRE(args.size() == 3);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "--explicit");
+    CHECK(args[2] == "");
+
+    args = ParseCommandLine("app", "--explicit '  '");
+
+    REQUIRE(args.size() == 3);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "--explicit");
+    CHECK(args[2] == "  ");
+  }
+
+  SECTION("parameters with double quotes")
+  {
+    args = ParseCommandLine("app", "\"double quoted single parameter\"");
+
+    REQUIRE(args.size() == 2);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "double quoted single parameter");
+
+    args = ParseCommandLine("app", "      \"double quoted single parameter\"  ");
+
+    REQUIRE(args.size() == 2);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "double quoted single parameter");
+
+    args = ParseCommandLine("app", "      \"double quoted \t\tsingle parameter\"  ");
+
+    REQUIRE(args.size() == 2);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "double quoted \t\tsingle parameter");
+
+    args = ParseCommandLine("app", "   --thing=\"double quoted single parameter\"  ");
+
+    REQUIRE(args.size() == 2);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "--thing=double quoted single parameter");
+
+    args = ParseCommandLine("app", " \"quoted string with \\\"double quotes inside\\\" it\" ");
+
+    REQUIRE(args.size() == 2);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "quoted string with \"double quotes inside\" it");
+
+    args = ParseCommandLine("app", " \"string's contents has a quoted quote\" ");
+
+    REQUIRE(args.size() == 2);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "string's contents has a quoted quote");
+
+    args =
+        ParseCommandLine("app", " --multiple --params 'double quoted parameter'  --with --quotes ");
+
+    REQUIRE(args.size() == 6);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "--multiple");
+    CHECK(args[2] == "--params");
+    CHECK(args[3] == "double quoted parameter");
+    CHECK(args[4] == "--with");
+    CHECK(args[5] == "--quotes");
+
+    args = ParseCommandLine("app", "--explicit \"\" --empty");
+
+    REQUIRE(args.size() == 4);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "--explicit");
+    CHECK(args[2] == "");
+    CHECK(args[3] == "--empty");
+
+    args = ParseCommandLine("app", "--explicit \"  \" --spaces");
+
+    REQUIRE(args.size() == 4);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "--explicit");
+    CHECK(args[2] == "  ");
+    CHECK(args[3] == "--spaces");
+
+    args = ParseCommandLine("app", "--explicit \"\"");
+
+    REQUIRE(args.size() == 3);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "--explicit");
+    CHECK(args[2] == "");
+
+    args = ParseCommandLine("app", "--explicit \"  \"");
+
+    REQUIRE(args.size() == 3);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "--explicit");
+    CHECK(args[2] == "  ");
+  }
+
+  SECTION("concatenated quotes")
+  {
+    args = ParseCommandLine("app", "'foo''bar''blah'");
+
+    REQUIRE(args.size() == 2);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "foobarblah");
+
+    args = ParseCommandLine("app", "\"foo\"\"bar\"\"blah\"");
+
+    REQUIRE(args.size() == 2);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "foobarblah");
+
+    args = ParseCommandLine("app", "\"foo\"'bar'\"blah\"");
+
+    REQUIRE(args.size() == 2);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "foobarblah");
+
+    args = ParseCommandLine("app", "\"foo\"'bar'\"blah\"");
+
+    REQUIRE(args.size() == 2);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "foobarblah");
+
+    args = ParseCommandLine("app", "foo'bar'blah");
+
+    REQUIRE(args.size() == 2);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "foobarblah");
+
+    args = ParseCommandLine("app", "foo\"bar\"blah");
+
+    REQUIRE(args.size() == 2);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "foobarblah");
+
+    args = ParseCommandLine("app", "\"string with spaces\"' and other string'");
+
+    REQUIRE(args.size() == 2);
+    CHECK(args[0] == "app");
+    CHECK(args[1] == "string with spaces and other string");
+  }
+}
 
 TEST_CASE("Test PID Node list handling", "[osspecific]")
 {

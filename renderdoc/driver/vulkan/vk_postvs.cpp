@@ -25,12 +25,16 @@
 #include <float.h>
 #include <math.h>
 #include <algorithm>
+#include "core/settings.h"
 #include "driver/shaders/spirv/spirv_editor.h"
 #include "driver/shaders/spirv/spirv_op_helpers.h"
 #include "vk_core.h"
 #include "vk_debug.h"
 #include "vk_replay.h"
 #include "vk_shader_cache.h"
+
+RDOC_DEBUG_CONFIG(rdcstr, Vulkan_Debug_PostVSDumpDirPath, "",
+                  "Path to dump gnerated SPIR-V compute shaders for fetching post-vs.");
 
 #undef None
 
@@ -505,15 +509,16 @@ static void ConvertToMeshOutputCompute(const ShaderReflection &refl, const SPIRV
     else if(compType == CompType::Float)
     {
       io.tbuffer = tbuffer_float;
-    }
-    else if(compType == CompType::Double)
-    {
-      // doubles are loaded packed from a uint tbuffer
-      io.tbuffer = tbuffer_uint;
+
+      if(refl.inputSignature[i].varType == VarType::Double)
+      {
+        // doubles are loaded packed from a uint tbuffer
+        io.tbuffer = tbuffer_uint;
+      }
     }
 
     // doubles are loaded as uvec4 and then packed in pairs, so we need to declare vec4ID as uvec4
-    if(compType == CompType::Double)
+    if(refl.inputSignature[i].varType == VarType::Double)
       io.vec4ID = editor.DeclareType(rdcspv::Vector(rdcspv::scalar<uint32_t>(), 4));
     else
       io.vec4ID = editor.DeclareType(rdcspv::Vector(scalarType, 4));
@@ -1216,7 +1221,7 @@ void VulkanReplay::FetchVSOut(uint32_t eventId, VulkanRenderState &state)
   // set defaults so that we don't try to fetch this output again if something goes wrong and the
   // same event is selected again
   {
-    m_PostVS.Data[eventId].vsin.topo = pipeInfo.topology;
+    m_PostVS.Data[eventId].vsin.topo = MakeVkPrimitiveTopology(drawcall->topology);
     m_PostVS.Data[eventId].vsout.buf = VK_NULL_HANDLE;
     m_PostVS.Data[eventId].vsout.bufmem = VK_NULL_HANDLE;
     m_PostVS.Data[eventId].vsout.instStride = 0;
@@ -1226,10 +1231,11 @@ void VulkanReplay::FetchVSOut(uint32_t eventId, VulkanRenderState &state)
     m_PostVS.Data[eventId].vsout.farPlane = 0.0f;
     m_PostVS.Data[eventId].vsout.useIndices = false;
     m_PostVS.Data[eventId].vsout.hasPosOut = false;
+    m_PostVS.Data[eventId].vsout.flipY = false;
     m_PostVS.Data[eventId].vsout.idxbuf = VK_NULL_HANDLE;
     m_PostVS.Data[eventId].vsout.idxbufmem = VK_NULL_HANDLE;
 
-    m_PostVS.Data[eventId].vsout.topo = pipeInfo.topology;
+    m_PostVS.Data[eventId].vsout.topo = MakeVkPrimitiveTopology(drawcall->topology);
   }
 
   // no outputs from this shader? unexpected but theoretically possible (dummy VS before
@@ -1656,26 +1662,27 @@ void VulkanReplay::FetchVSOut(uint32_t eventId, VulkanRenderState &state)
       }
 
       VkDeviceSize offs = state.vbuffers[binding].offs;
+      VkDeviceSize stride = state.vbuffers[binding].stride;
       uint64_t len = 0;
 
       if(vi->pVertexBindingDescriptions[vb].inputRate == VK_VERTEX_INPUT_RATE_INSTANCE)
       {
-        len = (uint64_t(maxInstance) + 1) * vi->pVertexBindingDescriptions[vb].stride;
+        len = (uint64_t(maxInstance) + 1) * stride;
 
-        offs += drawcall->instanceOffset * vi->pVertexBindingDescriptions[vb].stride;
+        offs += drawcall->instanceOffset * stride;
       }
       else
       {
-        len = (uint64_t(maxIndex) + 1) * vi->pVertexBindingDescriptions[vb].stride;
+        len = (uint64_t(maxIndex) + 1) * stride;
 
-        offs += drawcall->vertexOffset * vi->pVertexBindingDescriptions[vb].stride;
+        offs += drawcall->vertexOffset * stride;
       }
 
+      len = RDCMIN(len, state.vbuffers[binding].size);
+
+      origVBs.push_back(bytebuf());
       if(state.vbuffers[binding].buf != ResourceId())
-      {
-        origVBs.push_back(bytebuf());
         GetBufferData(state.vbuffers[binding].buf, offs, len, origVBs.back());
-      }
     }
 
     for(uint32_t i = 0; i < vi->vertexAttributeDescriptionCount; i++)
@@ -1712,7 +1719,11 @@ void VulkanReplay::FetchVSOut(uint32_t eventId, VulkanRenderState &state)
         }
       }
 
-      RDCASSERT(origVBEnd);
+      if(attrDesc.binding < state.vbuffers.size())
+        stride = (size_t)state.vbuffers[attrDesc.binding].stride;
+
+      if(origVBBegin == NULL)
+        continue;
 
       // in some limited cases, provided we added the UNIFORM_TEXEL_BUFFER usage bit, we could use
       // the original buffers here as-is and read out of them. However it is likely that the offset
@@ -1985,9 +1996,15 @@ void VulkanReplay::FetchVSOut(uint32_t eventId, VulkanRenderState &state)
     m_pDriver->vkUpdateDescriptorSets(dev, numWrites, descWrites, 0, NULL);
   }
 
+  if(!Vulkan_Debug_PostVSDumpDirPath().empty())
+    FileIO::WriteAll(Vulkan_Debug_PostVSDumpDirPath() + "/debug_postvs_vert.spv", modSpirv);
+
   ConvertToMeshOutputCompute(*refl, *pipeInfo.shaders[0].patchData,
                              pipeInfo.shaders[0].entryPoint.c_str(), attrInstDivisor, drawcall,
                              numVerts, numViews, modSpirv, bufStride);
+
+  if(!Vulkan_Debug_PostVSDumpDirPath().empty())
+    FileIO::WriteAll(Vulkan_Debug_PostVSDumpDirPath() + "/debug_postvs_comp.spv", modSpirv);
 
   VkComputePipelineCreateInfo compPipeInfo = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
 
@@ -2295,8 +2312,8 @@ void VulkanReplay::FetchVSOut(uint32_t eventId, VulkanRenderState &state)
   }
 
   // fill out m_PostVS.Data
-  m_PostVS.Data[eventId].vsin.topo = pipeCreateInfo.pInputAssemblyState->topology;
-  m_PostVS.Data[eventId].vsout.topo = pipeCreateInfo.pInputAssemblyState->topology;
+  m_PostVS.Data[eventId].vsin.topo = state.primitiveTopology;
+  m_PostVS.Data[eventId].vsout.topo = state.primitiveTopology;
   m_PostVS.Data[eventId].vsout.buf = meshBuffer;
   m_PostVS.Data[eventId].vsout.bufmem = meshMem;
 
@@ -2331,6 +2348,7 @@ void VulkanReplay::FetchVSOut(uint32_t eventId, VulkanRenderState &state)
 
   m_PostVS.Data[eventId].vsout.hasPosOut =
       refl->outputSignature[0].systemValue == ShaderBuiltin::Position;
+  m_PostVS.Data[eventId].vsout.flipY = state.views.empty() ? false : state.views[0].height < 0.0f;
 
   // delete descriptors. Technically we don't have to free the descriptor sets, but our tracking on
   // replay doesn't handle destroying children of pooled objects so we do it explicitly anyway.
@@ -2371,6 +2389,7 @@ void VulkanReplay::FetchTessGSOut(uint32_t eventId, VulkanRenderState &state)
     m_PostVS.Data[eventId].gsout.farPlane = 0.0f;
     m_PostVS.Data[eventId].gsout.useIndices = false;
     m_PostVS.Data[eventId].gsout.hasPosOut = false;
+    m_PostVS.Data[eventId].gsout.flipY = false;
     m_PostVS.Data[eventId].gsout.idxbuf = VK_NULL_HANDLE;
     m_PostVS.Data[eventId].gsout.idxbufmem = VK_NULL_HANDLE;
   }
@@ -2432,6 +2451,7 @@ void VulkanReplay::FetchTessGSOut(uint32_t eventId, VulkanRenderState &state)
     m_PostVS.Data[eventId].gsout.farPlane = 0.0f;
     m_PostVS.Data[eventId].gsout.useIndices = false;
     m_PostVS.Data[eventId].gsout.hasPosOut = false;
+    m_PostVS.Data[eventId].gsout.flipY = false;
     m_PostVS.Data[eventId].gsout.idxbuf = VK_NULL_HANDLE;
     m_PostVS.Data[eventId].gsout.idxbufmem = VK_NULL_HANDLE;
     return;
@@ -2883,6 +2903,7 @@ void VulkanReplay::FetchTessGSOut(uint32_t eventId, VulkanRenderState &state)
   m_PostVS.Data[eventId].gsout.idxbufmem = VK_NULL_HANDLE;
 
   m_PostVS.Data[eventId].gsout.hasPosOut = true;
+  m_PostVS.Data[eventId].gsout.flipY = state.views.empty() ? false : state.views[0].height < 0.0f;
 
   // delete framebuffer and renderpass
   m_pDriver->vkDestroyFramebuffer(dev, fb, NULL);
@@ -3038,6 +3059,7 @@ MeshFormat VulkanReplay::GetPostVSBuffers(uint32_t eventId, uint32_t instID, uin
       ret.indexByteStride = 1;
     else
       ret.indexByteStride = 2;
+    ret.indexByteSize = ~0ULL;
   }
   else
   {
@@ -3048,9 +3070,14 @@ MeshFormat VulkanReplay::GetPostVSBuffers(uint32_t eventId, uint32_t instID, uin
   ret.baseVertex = s.baseVertex;
 
   if(s.buf != VK_NULL_HANDLE)
+  {
     ret.vertexResourceId = GetResID(s.buf);
+    ret.vertexByteSize = ~0ULL;
+  }
   else
+  {
     ret.vertexResourceId = ResourceId();
+  }
 
   ret.vertexByteOffset = s.instStride * (instID + viewID * numInstances);
   ret.vertexByteStride = s.vertStride;
@@ -3068,6 +3095,7 @@ MeshFormat VulkanReplay::GetPostVSBuffers(uint32_t eventId, uint32_t instID, uin
   ret.unproject = s.hasPosOut;
   ret.nearPlane = s.nearPlane;
   ret.farPlane = s.farPlane;
+  ret.flipY = s.flipY;
 
   if(instID < s.instData.size())
   {

@@ -315,6 +315,7 @@ struct BoundResourceArray
   BoundResourceArray(Bindpoint b, const rdcarray<BoundResource> &r) : bindPoint(b), resources(r)
   {
     dynamicallyUsedCount = (uint32_t)r.size();
+    firstIndex = 0;
   }
   // for convenience for searching the array, we compare only using the BindPoint
   bool operator==(const BoundResourceArray &o) const { return bindPoint == o.bindPoint; }
@@ -330,8 +331,17 @@ struct BoundResourceArray
 
 Some APIs provide fine-grained usage based on dynamic shader feedback, to support 'bindless'
 scenarios where only a small sparse subset of bound resources are actually used.
+
+If this information isn't present this will be set to a large number.
 )");
-  uint32_t dynamicallyUsedCount = 0;
+  uint32_t dynamicallyUsedCount = ~0U;
+  DOCUMENT(R"(Gives the array index of the first binding in :data:`resource`. If only a small subset
+of the resources are used by the shader then the array may be rebased such that the first element is
+not array index 0.
+
+For more information see :data:`VKBindingElement.dynamicallyUsed`.
+)");
+  int32_t firstIndex = 0;
 };
 
 DECLARE_REFLECTION_STRUCT(BoundResourceArray);
@@ -346,7 +356,8 @@ struct BoundVBuffer
 
   bool operator==(const BoundVBuffer &o) const
   {
-    return resourceId == o.resourceId && byteOffset == o.byteOffset && byteStride == o.byteStride;
+    return resourceId == o.resourceId && byteOffset == o.byteOffset && byteStride == o.byteStride &&
+           byteSize == o.byteSize;
   }
   bool operator<(const BoundVBuffer &o) const
   {
@@ -356,6 +367,8 @@ struct BoundVBuffer
       return byteOffset < o.byteOffset;
     if(byteStride != o.byteStride)
       return byteStride < o.byteStride;
+    if(byteSize != o.byteSize)
+      return byteSize < o.byteSize;
     return false;
   }
   DOCUMENT("A :class:`~renderdoc.ResourceId` identifying the buffer.");
@@ -364,6 +377,8 @@ struct BoundVBuffer
   uint64_t byteOffset = 0;
   DOCUMENT("The stride in bytes between the start of one element and the start of the next.");
   uint32_t byteStride = 0;
+  DOCUMENT("The size of the buffer binding, or 0xFFFFFFFF if the whole buffer is bound.");
+  uint64_t byteSize = 0;
 };
 
 DECLARE_REFLECTION_STRUCT(BoundVBuffer);
@@ -443,7 +458,7 @@ no VB bound.
 )");
   PixelValue genericValue;
   DOCUMENT("``True`` if this attribute is using :data:`genericValue` for its data.");
-  bool genericEnabled;
+  bool genericEnabled = false;
   DOCUMENT("``True`` if this attribute is enabled and used by the vertex shader.");
   bool used;
 };

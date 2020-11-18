@@ -67,7 +67,7 @@ static CompType glToRdcCounterType(GLuint glDataType)
     case GL_PERFQUERY_COUNTER_DATA_UINT32_INTEL: return CompType::UInt;
     case GL_PERFQUERY_COUNTER_DATA_UINT64_INTEL: return CompType::UInt;
     case GL_PERFQUERY_COUNTER_DATA_FLOAT_INTEL: return CompType::Float;
-    case GL_PERFQUERY_COUNTER_DATA_DOUBLE_INTEL: return CompType::Double;
+    case GL_PERFQUERY_COUNTER_DATA_DOUBLE_INTEL: return CompType::Float;
     case GL_PERFQUERY_COUNTER_DATA_BOOL32_INTEL: return CompType::UInt;
     default: RDCERR("Wrong counter data type: %u", glDataType);
   }
@@ -88,13 +88,14 @@ void IntelGlCounters::addCounter(const IntelGlQuery &query, GLuint counterId)
   GL.glGetIntegerv(eGL_PERFQUERY_COUNTER_DESC_LENGTH_MAX_INTEL, &len);
   counter.desc.description.resize(len);
 
+  GLuint64 rawCounterMaxValue = 0;
   GL.glGetPerfCounterInfoINTEL(
       query.queryId, counterId, (GLuint)counter.desc.name.size(), &counter.desc.name[0],
       (GLuint)counter.desc.description.size(), &counter.desc.description[0], &counter.offset,
-      &counter.desc.resultByteWidth, &counter.type, &counter.dataType, NULL);
+      &counter.desc.resultByteWidth, &counter.type, &counter.dataType, &rawCounterMaxValue);
 
-  if(m_CounterNames.find(counter.desc.name) != m_CounterNames.end())
-    return;
+  counter.desc.name.resize(strlen(&counter.desc.name[0]));
+  counter.desc.description.resize(strlen(&counter.desc.description[0]));
 
   uint32_t query_hash = strhash(query.name.c_str());
   uint32_t name_hash = strhash(counter.desc.name.c_str());
@@ -104,7 +105,6 @@ void IntelGlCounters::addCounter(const IntelGlQuery &query, GLuint counterId)
   counter.desc.unit = CounterUnit::Absolute;
 
   m_Counters.push_back(counter);
-  m_CounterNames[counter.desc.name] = counter;
 }
 
 void IntelGlCounters::addQuery(GLuint queryId)
@@ -117,13 +117,16 @@ void IntelGlCounters::addQuery(GLuint queryId)
   GL.glGetIntegerv(eGL_PERFQUERY_QUERY_NAME_LENGTH_MAX_INTEL, &len);
   query.name.resize(len);
   GLuint nCounters = 0;
+  GLuint nInstances = 0;
+  GLuint capsMask = 0;
   GL.glGetPerfQueryInfoINTEL(queryId, (GLuint)query.name.size(), &query.name[0], &query.size,
-                             &nCounters, NULL, NULL);
+                             &nCounters, &nInstances, &capsMask);
   // Some drivers raise an error when we query some of its IDs because those
   // are used to plumb external library with raw counter data.
   if(GL.glGetError() != eGL_NONE)
     return;
 
+  query.name.resize(strlen(&query.name[0]));
   if(metricSetBlacklist.contains(query.name))
     return;
 
@@ -287,18 +290,21 @@ rdcarray<CounterResult> IntelGlCounters::GetCounterData(uint32_t maxSampleIndex,
       const IntelGlCounter &counter = m_Counters[GPUCounterToCounterIndex(c)];
       switch(counter.desc.resultType)
       {
-        case CompType::Double:
-        {
-          double r;
-          CopyData(&r, counter, s, maxSampleIndex);
-          ret.push_back(CounterResult(eventIDs[s], counter.desc.counter, r));
-          break;
-        }
         case CompType::Float:
         {
-          float r;
-          CopyData(&r, counter, s, maxSampleIndex);
-          ret.push_back(CounterResult(eventIDs[s], counter.desc.counter, r));
+          if(counter.desc.resultByteWidth == 8)
+          {
+            double r;
+            CopyData(&r, counter, s, maxSampleIndex);
+            ret.push_back(CounterResult(eventIDs[s], counter.desc.counter, r));
+            break;
+          }
+          else
+          {
+            float r;
+            CopyData(&r, counter, s, maxSampleIndex);
+            ret.push_back(CounterResult(eventIDs[s], counter.desc.counter, r));
+          }
           break;
         }
         case CompType::UInt:

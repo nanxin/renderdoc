@@ -23,6 +23,7 @@
  ******************************************************************************/
 
 #include "../vk_core.h"
+#include "../vk_debug.h"
 
 /*
  * Events and fences need careful handling.
@@ -685,7 +686,7 @@ void WrappedVulkan::vkCmdSetEvent(VkCommandBuffer commandBuffer, VkEvent event,
     SCOPED_SERIALISE_CHUNK(VulkanChunk::vkCmdSetEvent);
     Serialise_vkCmdSetEvent(ser, commandBuffer, event, stageMask);
 
-    record->AddChunk(scope.Get());
+    record->AddChunk(scope.Get(record->cmdInfo->alloc));
     record->MarkResourceFrameReferenced(GetResID(event), eFrameRef_Read);
   }
 }
@@ -742,7 +743,7 @@ void WrappedVulkan::vkCmdResetEvent(VkCommandBuffer commandBuffer, VkEvent event
     SCOPED_SERIALISE_CHUNK(VulkanChunk::vkCmdResetEvent);
     Serialise_vkCmdResetEvent(ser, commandBuffer, event, stageMask);
 
-    record->AddChunk(scope.Get());
+    record->AddChunk(scope.Get(record->cmdInfo->alloc));
     record->MarkResourceFrameReferenced(GetResID(event), eFrameRef_Read);
   }
 }
@@ -838,12 +839,22 @@ bool WrappedVulkan::Serialise_vkCmdWaitEvents(
       // since we cache and replay this command buffer we can't clean up this event just when we're
       // done replaying this section. We have to keep this event until shutdown
       m_PersistentEvents.push_back(ev);
+
+      for(uint32_t i = 0; i < imageMemoryBarrierCount; i++)
+      {
+        const VkImageMemoryBarrier &b = pImageMemoryBarriers[i];
+        if(b.image != VK_NULL_HANDLE && b.oldLayout == VK_IMAGE_LAYOUT_UNDEFINED)
+        {
+          m_BakedCmdBufferInfo[m_LastCmdBufferID].resourceUsage.push_back(make_rdcpair(
+              GetResID(b.image), EventUsage(m_BakedCmdBufferInfo[m_LastCmdBufferID].curEventID,
+                                            ResourceUsage::Discard)));
+        }
+      }
     }
 
-    ResourceId cmd = GetResID(commandBuffer);
-    GetResourceManager()->RecordBarriers(m_BakedCmdBufferInfo[cmd].imageStates,
-                                         m_commandQueueFamilies[cmd], (uint32_t)imgBarriers.size(),
-                                         &imgBarriers[0]);
+    GetResourceManager()->RecordBarriers(m_BakedCmdBufferInfo[m_LastCmdBufferID].imageStates,
+                                         m_commandQueueFamilies[m_LastCmdBufferID],
+                                         (uint32_t)imgBarriers.size(), &imgBarriers[0]);
 
     if(commandBuffer != VK_NULL_HANDLE)
     {
@@ -859,6 +870,20 @@ bool WrappedVulkan::Serialise_vkCmdWaitEvents(
           ->CmdWaitEvents(Unwrap(commandBuffer), 1, &ev, srcStageMask, dstStageMask,
                           memoryBarrierCount, pMemoryBarriers, (uint32_t)bufBarriers.size(),
                           bufBarriers.data(), (uint32_t)imgBarriers.size(), imgBarriers.data());
+
+      if(m_ReplayOptions.optimisation != ReplayOptimisationLevel::Fastest)
+      {
+        for(uint32_t i = 0; i < imageMemoryBarrierCount; i++)
+        {
+          const VkImageMemoryBarrier &b = pImageMemoryBarriers[i];
+          if(b.image != VK_NULL_HANDLE && b.oldLayout == VK_IMAGE_LAYOUT_UNDEFINED)
+          {
+            GetDebugManager()->FillWithDiscardPattern(
+                commandBuffer, DiscardType::UndefinedTransition, b.image, b.newLayout,
+                b.subresourceRange, {{0, 0}, {~0U, ~0U}});
+          }
+        }
+      }
     }
   }
 
@@ -919,11 +944,11 @@ void WrappedVulkan::vkCmdWaitEvents(VkCommandBuffer commandBuffer, uint32_t even
     if(imageMemoryBarrierCount > 0)
     {
       GetResourceManager()->RecordBarriers(record->cmdInfo->imageStates,
-                                           record->pool->queueFamilyIndex, imageMemoryBarrierCount,
-                                           pImageMemoryBarriers);
+                                           record->pool->cmdPoolInfo->queueFamilyIndex,
+                                           imageMemoryBarrierCount, pImageMemoryBarriers);
     }
 
-    record->AddChunk(scope.Get());
+    record->AddChunk(scope.Get(record->cmdInfo->alloc));
     for(uint32_t i = 0; i < eventCount; i++)
       record->MarkResourceFrameReferenced(GetResID(pEvents[i]), eFrameRef_Read);
   }

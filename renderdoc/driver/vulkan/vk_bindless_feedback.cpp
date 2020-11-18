@@ -31,6 +31,8 @@
 #include "vk_replay.h"
 #include "vk_shader_cache.h"
 
+RDOC_DEBUG_CONFIG(rdcstr, Vulkan_Debug_FeedbackDumpDirPath, "",
+                  "Path to dump bindless feedback annotation generated SPIR-V files.");
 RDOC_CONFIG(
     bool, Vulkan_BindlessFeedback, true,
     "Enable fetching from GPU which descriptors were dynamically used in descriptor arrays.");
@@ -212,6 +214,8 @@ void AnnotateShader(const SPIRVPatchData &patchData, const char *entryName,
   rdcspv::Id scope = editor.AddConstantImmediate<uint32_t>((uint32_t)rdcspv::Scope::Invocation);
   rdcspv::Id semantics = editor.AddConstantImmediate<uint32_t>(0U);
   rdcspv::Id uint32shift = editor.AddConstantImmediate<uint32_t>(2U);
+
+  rdcspv::Id glsl450 = editor.ImportExtInst("GLSL.std.450");
 
   std::map<rdcspv::Id, rdcspv::Scalar> intTypeLookup;
 
@@ -458,8 +462,6 @@ void AnnotateShader(const SPIRVPatchData &patchData, const char *entryName,
           // clamp the index to the maximum slot. If the user is reading out of bounds, don't write
           // out of bounds.
           {
-            rdcspv::Id glsl450 = editor.ImportExtInst("GLSL.std.450");
-
             rdcspv::Id clampedtype =
                 editor.DeclareType(rdcspv::Scalar(rdcspv::Op::TypeInt, targetIndexWidth, false));
             index = editor.AddOperation(
@@ -593,11 +595,12 @@ void VulkanReplay::FetchShaderFeedback(uint32_t eventId)
         const DescSetLayout::Binding &bindData = layout.bindings[binding];
 
         // skip empty bindings
-        if(bindData.descriptorCount == 0 || bindData.stageFlags == 0)
+        if(bindData.descriptorType == VK_DESCRIPTOR_TYPE_MAX_ENUM)
           continue;
 
         // only process array bindings
-        if(bindData.descriptorCount > 1)
+        if(bindData.descriptorCount > 1 &&
+           bindData.descriptorType != VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT)
         {
           key.binding = (uint32_t)binding;
 
@@ -736,6 +739,11 @@ void VulkanReplay::FetchShaderFeedback(uint32_t eventId)
 
   VkShaderModule modules[6] = {};
 
+  const rdcstr filename[6] = {
+      "bindless_vertex.spv",   "bindless_hull.spv",  "bindless_domain.spv",
+      "bindless_geometry.spv", "bindless_pixel.spv", "bindless_compute.spv",
+  };
+
   if(result.compute)
   {
     VkPipelineShaderStageCreateInfo &stage = computeInfo.stage;
@@ -745,8 +753,14 @@ void VulkanReplay::FetchShaderFeedback(uint32_t eventId)
 
     rdcarray<uint32_t> modSpirv = moduleInfo.spirv.GetSPIRV();
 
+    if(!Vulkan_Debug_FeedbackDumpDirPath().empty())
+      FileIO::WriteAll(Vulkan_Debug_FeedbackDumpDirPath() + "/before_" + filename[5], modSpirv);
+
     AnnotateShader(*pipeInfo.shaders[5].patchData, stage.pName, offsetMap, maxSlot, bufferAddress,
                    useBufferAddressKHR, modSpirv);
+
+    if(!Vulkan_Debug_FeedbackDumpDirPath().empty())
+      FileIO::WriteAll(Vulkan_Debug_FeedbackDumpDirPath() + "/after_" + filename[5], modSpirv);
 
     moduleCreateInfo.pCode = modSpirv.data();
     moduleCreateInfo.codeSize = modSpirv.size() * sizeof(uint32_t);
@@ -770,8 +784,14 @@ void VulkanReplay::FetchShaderFeedback(uint32_t eventId)
 
       rdcarray<uint32_t> modSpirv = moduleInfo.spirv.GetSPIRV();
 
+      if(!Vulkan_Debug_FeedbackDumpDirPath().empty())
+        FileIO::WriteAll(Vulkan_Debug_FeedbackDumpDirPath() + "/before_" + filename[idx], modSpirv);
+
       AnnotateShader(*pipeInfo.shaders[idx].patchData, stage.pName, offsetMap, maxSlot,
                      bufferAddress, useBufferAddressKHR, modSpirv);
+
+      if(!Vulkan_Debug_FeedbackDumpDirPath().empty())
+        FileIO::WriteAll(Vulkan_Debug_FeedbackDumpDirPath() + "/after_" + filename[idx], modSpirv);
 
       moduleCreateInfo.pCode = modSpirv.data();
       moduleCreateInfo.codeSize = modSpirv.size() * sizeof(uint32_t);

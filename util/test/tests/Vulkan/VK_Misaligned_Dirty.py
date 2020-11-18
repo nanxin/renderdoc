@@ -1,12 +1,18 @@
 import renderdoc as rd
+import struct
 import rdtest
 
 
 class VK_Misaligned_Dirty(rdtest.TestCase):
     demos_test_name = 'VK_Misaligned_Dirty'
 
+    def get_capture_options(self):
+        opts = rdtest.TestCase.get_capture_options(self)
+        opts.apiValidation = True
+        return opts
+
     def get_replay_options(self):
-        opts = rd.ReplayOptions()
+        opts = rdtest.TestCase.get_replay_options(self)
         # Set a balanced optimisation level to ensure that written ranges are cleared instead of being either restored
         # or ignored
         opts.optimisation = rd.ReplayOptimisationLevel.Balanced
@@ -18,6 +24,11 @@ class VK_Misaligned_Dirty(rdtest.TestCase):
         self.check(draw is not None)
 
         self.controller.SetFrameEvent(draw.eventId, False)
+
+        self.check(len(self.controller.GetFrameInfo().debugMessages) == 0)
+        self.check(len(self.controller.GetDebugMessages()) == 0)
+
+        rdtest.log.success("No debug messages found")
 
         pipe: rd.PipeState = self.controller.GetPipelineState()
 
@@ -64,3 +75,44 @@ class VK_Misaligned_Dirty(rdtest.TestCase):
             self.check_pixel_value(tex, coord[0], coord[1], [0.0, 1.0, 0.0, 1.0])
 
         rdtest.log.success("picked values are as expected")
+
+        checkpoint1 = self.find_draw("First Submit")
+        checkpoint2 = self.find_draw("Second Submit")
+        checkpoint3 = self.find_draw("Third Submit")
+
+        self.check(checkpoint1 is not None)
+        self.check(checkpoint2 is not None)
+        self.check(checkpoint3 is not None)
+
+        resources = self.controller.GetResources()
+
+        copy_src = None
+        vb = None
+
+        for r in resources:
+            if r.name == 'copy_src':
+                copy_src = r.resourceId
+            elif r.name == 'vb':
+                vb = r.resourceId
+
+        self.check(copy_src is not None)
+        self.check(vb is not None)
+
+        self.controller.SetFrameEvent(checkpoint1.eventId, False)
+
+        val = struct.unpack('f', self.controller.GetBufferData(copy_src, 116, 4))
+        self.check(val[0] == 11.0)
+
+        self.controller.SetFrameEvent(checkpoint2.eventId, False)
+
+        val = struct.unpack('f', self.controller.GetBufferData(copy_src, 116, 4))
+        self.check(val[0] == 12.0)
+        val = struct.unpack('f', self.controller.GetBufferData(vb, 116, 4))
+        self.check(val[0] == 12.0)
+
+        self.controller.SetFrameEvent(checkpoint3.eventId, False)
+
+        val = struct.unpack('f', self.controller.GetBufferData(copy_src, 116, 4))
+        self.check(val[0] == 11.0)
+
+        rdtest.log.success("buffers have correct values in both submits")

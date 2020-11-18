@@ -83,7 +83,7 @@ public:
   rdcarray<ShaderEntryPoint> GetShaderEntryPoints(ResourceId shader);
   ShaderReflection *GetShader(ResourceId pipeline, ResourceId shader, ShaderEntryPoint entry);
 
-  rdcarray<rdcstr> GetDisassemblyTargets();
+  rdcarray<rdcstr> GetDisassemblyTargets(bool withPipeline);
   rdcstr DisassembleShader(ResourceId pipeline, const ShaderReflection *refl, const rdcstr &target);
 
   rdcarray<EventUsage> GetUsage(ResourceId id);
@@ -176,7 +176,7 @@ public:
 
   bool RenderTexture(TextureDisplay cfg);
 
-  void RenderCheckerboard();
+  void RenderCheckerboard(FloatVector dark, FloatVector light);
 
   void RenderHighlightBox(float w, float h, float scale);
 
@@ -197,9 +197,8 @@ public:
   uint32_t PickVertex(uint32_t eventId, int32_t width, int32_t height, const MeshDisplay &cfg,
                       uint32_t x, uint32_t y);
 
-  ResourceId RenderOverlay(ResourceId texid, const Subresource &sub, CompType typeCast,
-                           FloatVector clearCol, DebugOverlay overlay, uint32_t eventId,
-                           const rdcarray<uint32_t> &passEvents);
+  ResourceId RenderOverlay(ResourceId texid, FloatVector clearCol, DebugOverlay overlay,
+                           uint32_t eventId, const rdcarray<uint32_t> &passEvents);
 
   void BuildCustomShader(ShaderEncoding sourceEncoding, const bytebuf &source, const rdcstr &entry,
                          const ShaderCompileFlags &compileFlags, ShaderStage type, ResourceId &id,
@@ -207,8 +206,8 @@ public:
   ResourceId ApplyCustomShader(ResourceId shader, ResourceId texid, const Subresource &sub,
                                CompType typeCast);
 
-  bool IsRenderOutput(ResourceId id);
-
+  RenderOutputSubresource GetRenderOutputSubresource(ResourceId id);
+  bool IsRenderOutput(ResourceId id) { return GetRenderOutputSubresource(id).mip != ~0U; }
   void FileChanged() {}
   AMDCounters *GetAMDCounters() { return m_pAMDCounters; }
 private:
@@ -367,6 +366,7 @@ private:
     ID3DBlob *TriangleSizeGS = NULL;
     ID3DBlob *TriangleSizePS = NULL;
     ID3DBlob *QuadOverdrawWritePS = NULL;
+    ID3DBlob *QuadOverdrawWriteDXILPS = NULL;
     ID3D12RootSignature *QuadResolveRootSig = NULL;
     ID3D12PipelineState *QuadResolvePipe = NULL;
 

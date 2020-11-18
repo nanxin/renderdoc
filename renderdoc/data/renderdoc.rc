@@ -113,6 +113,30 @@ RESOURCE_texdisplay_hlsl   TYPE_EMBED   "hlsl/texdisplay.hlsl"
 RESOURCE_pixelhistory_hlsl TYPE_EMBED   "hlsl/pixelhistory.hlsl"
 RESOURCE_quadoverdraw_hlsl TYPE_EMBED   "hlsl/quadoverdraw.hlsl"
 RESOURCE_texremap_hlsl     TYPE_EMBED   "hlsl/texremap.hlsl"
+RESOURCE_fixedcol_hlsl     TYPE_EMBED   "hlsl/fixedcol.hlsl"
+
+#ifdef RENDERDOC_BAKED_DXC_SHADERS
+
+#if !defined(CONCAT)
+#define CONCAT2(a, b) a##b
+#define CONCAT(a, b) CONCAT2(a, b)
+#endif
+
+RESOURCE_fixedcol_0_dxbc   TYPE_EMBED  fixedcol_0.dxbc
+RESOURCE_fixedcol_1_dxbc   TYPE_EMBED  fixedcol_1.dxbc
+RESOURCE_fixedcol_2_dxbc   TYPE_EMBED  fixedcol_2.dxbc
+RESOURCE_fixedcol_3_dxbc   TYPE_EMBED  fixedcol_3.dxbc
+RESOURCE_quadwrite_dxbc    TYPE_EMBED  quadwrite.dxbc
+
+#else
+
+RESOURCE_fixedcol_0_dxbc   TYPE_EMBED   "hlsl/empty.dxbc"
+RESOURCE_fixedcol_1_dxbc   TYPE_EMBED   "hlsl/empty.dxbc"
+RESOURCE_fixedcol_2_dxbc   TYPE_EMBED   "hlsl/empty.dxbc"
+RESOURCE_fixedcol_3_dxbc   TYPE_EMBED   "hlsl/empty.dxbc"
+RESOURCE_quadwrite_dxbc    TYPE_EMBED   "hlsl/empty.dxbc"
+
+#endif
 
 RESOURCE_sourcecodepro_ttf TYPE_EMBED   "sourcecodepro.ttf"
 
@@ -129,6 +153,7 @@ RESOURCE_glsl_minmaxtile_comp          TYPE_EMBED   "glsl/minmaxtile.comp"
 RESOURCE_glsl_minmaxresult_comp        TYPE_EMBED   "glsl/minmaxresult.comp"
 RESOURCE_glsl_histogram_comp           TYPE_EMBED   "glsl/histogram.comp"
 RESOURCE_glsl_pixelhistory_mscopy_comp TYPE_EMBED   "glsl/pixelhistory_mscopy.comp"
+RESOURCE_glsl_pixelhistory_mscopy_depth_comp TYPE_EMBED   "glsl/pixelhistory_mscopy_depth.comp"
 RESOURCE_glsl_pixelhistory_primid_frag TYPE_EMBED   "glsl/pixelhistory_primid.frag"
 RESOURCE_glsl_glsl_ubos_h              TYPE_EMBED   "glsl/glsl_ubos.h"
 RESOURCE_glsl_gl_texsample_h           TYPE_EMBED   "glsl/gl_texsample.h"
@@ -148,6 +173,7 @@ RESOURCE_glsl_gltext_frag              TYPE_EMBED   "glsl/gltext.frag"
 RESOURCE_glsl_glsl_globals_h           TYPE_EMBED   "glsl/glsl_globals.h"
 RESOURCE_glsl_texremap_frag            TYPE_EMBED   "glsl/texremap.frag"
 RESOURCE_glsl_shaderdebug_sample_vert  TYPE_EMBED   "glsl/shaderdebug_sample.vert"
+RESOURCE_glsl_discard_frag             TYPE_EMBED   "glsl/discard.frag"
 
 #ifndef APSTUDIO_INVOKED
 /////////////////////////////////////////////////////////////////////////////

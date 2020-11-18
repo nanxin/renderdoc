@@ -757,6 +757,8 @@ bool WrappedID3D12CommandQueue::ProcessChunk(ReadSerialiser &ser, D3D12Chunk chu
     case D3D12Chunk::Device_CreateCommittedResource1:
     case D3D12Chunk::Device_CreateHeap1:
     case D3D12Chunk::Device_ExternalDXGIResource:
+    case D3D12Chunk::CompatDevice_CreateSharedResource:
+    case D3D12Chunk::CompatDevice_CreateSharedHeap:
       RDCERR("Unexpected chunk while processing frame: %s", ToStr(chunk).c_str());
       return false;
 
@@ -841,7 +843,8 @@ ReplayStatus WrappedID3D12CommandQueue::ReplayLog(CaptureState readType, uint32_
 
   if(IsLoading(m_State) || IsStructuredExporting(m_State))
   {
-    ser.ConfigureStructuredExport(&GetChunkName, IsStructuredExporting(m_State));
+    ser.ConfigureStructuredExport(&GetChunkName, IsStructuredExporting(m_State),
+                                  m_pDevice->GetTimeBase(), m_pDevice->GetTimeFrequency());
 
     ser.GetStructuredFile().Swap(m_pDevice->GetStructuredFile());
 
@@ -945,7 +948,7 @@ ReplayStatus WrappedID3D12CommandQueue::ReplayLog(CaptureState readType, uint32_
         LoadProgress::FrameEventsRead,
         float(m_Cmd.m_CurChunkOffset - startOffset) / float(ser.GetReader()->GetSize()));
 
-    if((SystemChunk)context == SystemChunk::CaptureEnd)
+    if((SystemChunk)context == SystemChunk::CaptureEnd || ser.GetReader()->AtEnd())
       break;
 
     // break out if we were only executing one event
@@ -1248,6 +1251,10 @@ HRESULT STDMETHODCALLTYPE WrappedID3D12GraphicsCommandList::QueryInterface(REFII
     {
       return E_NOINTERFACE;
     }
+  }
+  else if(riid == __uuidof(ID3D12GraphicsCommandList6))
+  {
+    return E_NOINTERFACE;
   }
   else if(riid == __uuidof(ID3D12CommandList))
   {

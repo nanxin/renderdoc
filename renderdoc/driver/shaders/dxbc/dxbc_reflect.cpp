@@ -33,22 +33,7 @@ static ShaderVariableType MakeShaderVariableType(DXBC::CBufferVariableType type)
 {
   ShaderVariableType ret;
 
-  switch(type.descriptor.type)
-  {
-    // D3D treats all cbuffer variables as 32-bit regardless of declaration
-    case DXBC::VARTYPE_MIN12INT:
-    case DXBC::VARTYPE_MIN16INT:
-    case DXBC::VARTYPE_INT: ret.descriptor.type = VarType::SInt; break;
-    case DXBC::VARTYPE_BOOL: ret.descriptor.type = VarType::Bool; break;
-    case DXBC::VARTYPE_MIN16UINT:
-    case DXBC::VARTYPE_UINT: ret.descriptor.type = VarType::UInt; break;
-    case DXBC::VARTYPE_DOUBLE: ret.descriptor.type = VarType::Double; break;
-    case DXBC::VARTYPE_FLOAT:
-    case DXBC::VARTYPE_MIN8FLOAT:
-    case DXBC::VARTYPE_MIN10FLOAT:
-    case DXBC::VARTYPE_MIN16FLOAT:
-    default: ret.descriptor.type = VarType::Float; break;
-  }
+  ret.descriptor.type = type.descriptor.varType;
   ret.descriptor.rows = (uint8_t)type.descriptor.rows;
   ret.descriptor.columns = (uint8_t)type.descriptor.cols;
   ret.descriptor.elements = type.descriptor.elements;
@@ -96,7 +81,7 @@ static ShaderConstant MakeConstantBufferVariable(const DXBC::CBufferVariable &va
   ShaderConstant ret;
 
   ret.name = var.name;
-  ret.byteOffset = var.descriptor.offset;
+  ret.byteOffset = var.offset;
   ret.defaultValue = 0;
   ret.type = MakeShaderVariableType(var.type);
 
@@ -146,28 +131,54 @@ static void MakeResourceList(bool srv, DXBC::DXBCContainer *dxbc,
         break;
     }
 
-    if(r.retType != DXBC::RETURN_TYPE_UNKNOWN && r.retType != DXBC::RETURN_TYPE_MIXED &&
-       r.retType != DXBC::RETURN_TYPE_CONTINUED)
+    if(r.type == DXBC::ShaderInputBind::TYPE_BYTEADDRESS ||
+       r.type == DXBC::ShaderInputBind::TYPE_UAV_RWBYTEADDRESS)
+    {
+      res.variableType.descriptor.rows = res.variableType.descriptor.columns = 1;
+      res.variableType.descriptor.elements = 1;
+      res.variableType.descriptor.type = VarType::UByte;
+      res.variableType.descriptor.name = "byte";
+    }
+    else if(r.retType != DXBC::RETURN_TYPE_UNKNOWN && r.retType != DXBC::RETURN_TYPE_MIXED &&
+            r.retType != DXBC::RETURN_TYPE_CONTINUED)
     {
       res.variableType.descriptor.rows = 1;
-      res.variableType.descriptor.columns = (uint8_t)r.numSamples;
+      res.variableType.descriptor.columns = (uint8_t)r.numComps;
       res.variableType.descriptor.elements = 1;
 
       rdcstr name;
 
       switch(r.retType)
       {
-        case DXBC::RETURN_TYPE_UNORM: name = "unorm float"; break;
-        case DXBC::RETURN_TYPE_SNORM: name = "snorm float"; break;
-        case DXBC::RETURN_TYPE_SINT: name = "int"; break;
-        case DXBC::RETURN_TYPE_UINT: name = "uint"; break;
-        case DXBC::RETURN_TYPE_FLOAT: name = "float"; break;
-        case DXBC::RETURN_TYPE_DOUBLE: name = "double"; break;
+        case DXBC::RETURN_TYPE_UNORM:
+          name = "unorm float";
+          res.variableType.descriptor.type = VarType::Float;
+          break;
+        case DXBC::RETURN_TYPE_SNORM:
+          name = "snorm float";
+          res.variableType.descriptor.type = VarType::Float;
+          break;
+        case DXBC::RETURN_TYPE_SINT:
+          name = "int";
+          res.variableType.descriptor.type = VarType::SInt;
+          break;
+        case DXBC::RETURN_TYPE_UINT:
+          name = "uint";
+          res.variableType.descriptor.type = VarType::UInt;
+          break;
+        case DXBC::RETURN_TYPE_FLOAT:
+          name = "float";
+          res.variableType.descriptor.type = VarType::Float;
+          break;
+        case DXBC::RETURN_TYPE_DOUBLE:
+          name = "double";
+          res.variableType.descriptor.type = VarType::Double;
+          break;
         default: name = "unknown"; break;
       }
 
-      if(r.numSamples > 1)
-        name += StringFormat::Fmt("%u", r.numSamples);
+      if(r.numComps > 1)
+        name += StringFormat::Fmt("%u", r.numComps);
 
       res.variableType.descriptor.name = name;
     }
@@ -228,7 +239,7 @@ void MakeShaderReflection(DXBC::DXBCContainer *dxbc, ShaderReflection *refl,
 
     refl->debugInfo.encoding = ShaderEncoding::HLSL;
 
-    refl->debugInfo.compileFlags = DXBC::EncodeFlags(dxbc->GetDebugInfo());
+    refl->debugInfo.compileFlags = dxbc->GetDebugInfo()->GetShaderCompileFlags();
 
     refl->debugInfo.files.resize(dxbc->GetDebugInfo()->Files.size());
     for(size_t i = 0; i < dxbc->GetDebugInfo()->Files.size(); i++)
@@ -243,6 +254,38 @@ void MakeShaderReflection(DXBC::DXBCContainer *dxbc, ShaderReflection *refl,
 
     // assume the debug info put the file with the entry point at the start. SDBG seems to do this
     // by default, and SPDB has an extra sorting step that probably maybe possibly does this.
+  }
+  else
+  {
+    // ensure we at least have shader compiler flags to indicate the right profile
+    rdcstr profile;
+    switch(dxbc->m_Type)
+    {
+      case DXBC::ShaderType::Pixel: profile = "ps"; break;
+      case DXBC::ShaderType::Vertex: profile = "vs"; break;
+      case DXBC::ShaderType::Geometry: profile = "gs"; break;
+      case DXBC::ShaderType::Hull: profile = "hs"; break;
+      case DXBC::ShaderType::Domain: profile = "ds"; break;
+      case DXBC::ShaderType::Compute: profile = "cs"; break;
+      default: profile = "xx"; break;
+    }
+    profile += StringFormat::Fmt("_%u_%u", dxbc->m_Version.Major, dxbc->m_Version.Minor);
+
+    refl->debugInfo.compileFlags = DXBC::EncodeFlags(0, profile);
+  }
+
+  if(dxbc->GetDXBCByteCode())
+  {
+    refl->debugInfo.debuggable = true;
+  }
+  else
+  {
+    refl->debugInfo.debuggable = false;
+
+    if(dxbc->GetDXILByteCode())
+      refl->debugInfo.debugStatus = "Debugging DXIL is not supported";
+    else
+      refl->debugInfo.debugStatus = "Shader contains no recognised bytecode";
   }
 
   refl->encoding = ShaderEncoding::DXBC;
@@ -316,11 +359,10 @@ void MakeShaderReflection(DXBC::DXBCContainer *dxbc, ShaderReflection *refl,
 
   uint32_t numInterfaces = 0;
   for(size_t i = 0; i < dxbc->GetReflection()->Interfaces.variables.size(); i++)
-    numInterfaces =
-        RDCMAX(dxbc->GetReflection()->Interfaces.variables[i].descriptor.offset + 1, numInterfaces);
+    numInterfaces = RDCMAX(dxbc->GetReflection()->Interfaces.variables[i].offset + 1, numInterfaces);
 
   refl->interfaces.resize(numInterfaces);
   for(size_t i = 0; i < dxbc->GetReflection()->Interfaces.variables.size(); i++)
-    refl->interfaces[dxbc->GetReflection()->Interfaces.variables[i].descriptor.offset] =
+    refl->interfaces[dxbc->GetReflection()->Interfaces.variables[i].offset] =
         dxbc->GetReflection()->Interfaces.variables[i].name;
 }

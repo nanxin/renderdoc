@@ -224,12 +224,12 @@ void Shutdown();
 
 namespace Atomic
 {
-int32_t Inc32(volatile int32_t *i);
-int32_t Dec32(volatile int32_t *i);
-int64_t Inc64(volatile int64_t *i);
-int64_t Dec64(volatile int64_t *i);
-int64_t ExchAdd64(volatile int64_t *i, int64_t a);
-int32_t CmpExch32(volatile int32_t *dest, int32_t oldVal, int32_t newVal);
+int32_t Inc32(int32_t *i);
+int32_t Dec32(int32_t *i);
+int64_t Inc64(int64_t *i);
+int64_t Dec64(int64_t *i);
+int64_t ExchAdd64(int64_t *i, int64_t a);
+int32_t CmpExch32(int32_t *dest, int32_t oldVal, int32_t newVal);
 };
 
 namespace Callstack
@@ -325,9 +325,10 @@ LogFileHandle *logfile_open(const char *filename);
 void logfile_append(LogFileHandle *logHandle, const char *msg, size_t length);
 void logfile_close(LogFileHandle *logHandle, const char *deleteFilename);
 
-// read the whole logfile into memory. This may race with processes writing, but it will read the
-// whole of the file at some point. Useful since normal file reading may fail on the shared logfile
-rdcstr logfile_readall(const char *filename);
+// read the whole logfile into memory starting at a given offset. This may race with processes
+// writing, but it will read the whole of the file at some point. Useful since normal file reading
+// may fail on the shared logfile
+rdcstr logfile_readall(uint64_t offset, const char *filename);
 
 // utility functions
 inline bool WriteAll(const rdcstr &filename, const void *buffer, size_t size)
@@ -349,8 +350,7 @@ bool WriteAll(const rdcstr &filename, const rdcarray<T> &buffer)
   return WriteAll(filename, buffer.data(), buffer.size() * sizeof(T));
 }
 
-template <typename T>
-bool WriteAll(const rdcstr &filename, const rdcstr &buffer)
+inline bool WriteAll(const rdcstr &filename, const rdcstr &buffer)
 {
   return WriteAll(filename, buffer.c_str(), buffer.length());
 }
@@ -381,17 +381,18 @@ inline bool ReadAll(const rdcstr &filename, rdcstr &str)
   if(f == NULL)
     return false;
 
-  FileIO::fseek64(f, 0, SEEK_END);
-  uint64_t size = ftell64(f);
-  FileIO::fseek64(f, 0, SEEK_SET);
+  char chunk[513];
 
-  str.resize((size_t)size);
-
-  size_t numRead = FileIO::fread(&str[0], 1, str.size(), f);
+  while(!FileIO::feof(f))
+  {
+    memset(chunk, 0, 513);
+    size_t numRead = FileIO::fread(chunk, 1, 512, f);
+    str.append(chunk, numRead);
+  }
 
   FileIO::fclose(f);
 
-  return numRead == str.size();
+  return true;
 }
 };
 

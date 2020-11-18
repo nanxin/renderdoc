@@ -256,6 +256,36 @@ struct GLWindowingData
   EGLConfig egl_cfg;
 };
 
+#elif ENABLED(RDOC_SWITCH)
+
+// force include the eglplatform.h
+#include "official/eglplatform.h"
+
+#include "official/egl.h"
+#include "official/eglext.h"
+
+struct GLWindowingData
+{
+  GLWindowingData()
+  {
+    egl_ctx = NULL;
+    egl_dpy = NULL;
+    wnd = NULL;
+    egl_wnd = NULL;
+    egl_cfg = NULL;
+  }
+
+  union
+  {
+    void *ctx;
+    EGLContext egl_ctx;
+  };
+  EGLSurface egl_wnd;
+  void *wnd;
+  EGLDisplay egl_dpy;
+  EGLConfig egl_cfg;
+};
+
 #else
 #error "Unknown platform"
 #endif
@@ -422,12 +452,11 @@ T CheckConstParam(T t);
 
 #define USE_SCRATCH_SERIALISER() WriteSerialiser &ser = m_ScratchSerialiser;
 
-#define SERIALISE_TIME_CALL(...)                                                                    \
-  m_ScratchSerialiser.ChunkMetadata().timestampMicro = RenderDoc::Inst().GetMicrosecondTimestamp(); \
-  __VA_ARGS__;                                                                                      \
-  m_ScratchSerialiser.ChunkMetadata().durationMicro =                                               \
-      RenderDoc::Inst().GetMicrosecondTimestamp() -                                                 \
-      m_ScratchSerialiser.ChunkMetadata().timestampMicro;
+#define SERIALISE_TIME_CALL(...)                                          \
+  m_ScratchSerialiser.ChunkMetadata().timestampMicro = Timing::GetTick(); \
+  __VA_ARGS__;                                                            \
+  m_ScratchSerialiser.ChunkMetadata().durationMicro =                     \
+      Timing::GetTick() - m_ScratchSerialiser.ChunkMetadata().timestampMicro;
 
 // A handy macros to say "is the serialiser reading and we're doing replay-mode stuff?"
 // The reason we check both is that checking the first allows the compiler to eliminate the other

@@ -112,6 +112,11 @@ public:
   bool IsDepthReadOnly() const { return depthReadOnly; }
   bool IsStencilReadOnly() const { return stencilReadOnly; }
   bool IsNull() const { return resource == NULL; }
+  ID3D11Resource *GetResource() const { return resource; }
+  UINT GetMinMip() const { return minMip; }
+  UINT GetMaxMip() const { return maxMip; }
+  UINT GetMinSlice() const { return minSlice; }
+  UINT GetMaxSlice() const { return maxSlice; }
 private:
   ResourceRange();
 
@@ -136,7 +141,7 @@ private:
   static const UINT allMip = 0xf;
   static const UINT allSlice = 0x7ff;
 
-  IUnknown *resource;
+  ID3D11Resource *resource;
   UINT minMip : 4;
   UINT minSlice : 12;
   UINT maxMip : 4;
@@ -214,62 +219,33 @@ inline rdcstr GetDebugName(T *pObj)
   return rdcstr();
 }
 
-class RefCounter
-{
-private:
-  IUnknown *m_pReal;
-  unsigned int m_iRefcount;
-  bool m_SelfDeleting;
+#define SAFE_INTADDREF(p) \
+  do                      \
+  {                       \
+    if(p)                 \
+    {                     \
+      IntAddRef(p);       \
+    }                     \
+  } while((void)0, 0)
 
-protected:
-  void SetSelfDeleting(bool selfDelete) { m_SelfDeleting = selfDelete; }
-  // used for derived classes that need to soft ref but are handling their
-  // own self-deletion
-  static void AddDeviceSoftref(WrappedID3D11Device *device);
-  static void ReleaseDeviceSoftref(WrappedID3D11Device *device);
+#define SAFE_INTRELEASE(p) \
+  do                       \
+  {                        \
+    if(p)                  \
+    {                      \
+      IntRelease(p);       \
+      (p) = NULL;          \
+    }                      \
+  } while((void)0, 0)
 
-public:
-  RefCounter(IUnknown *real, bool selfDelete = true)
-      : m_pReal(real), m_iRefcount(1), m_SelfDeleting(selfDelete)
-  {
-  }
-  virtual ~RefCounter() {}
-  unsigned int GetRefCount() { return m_iRefcount; }
-  //////////////////////////////
-  // implement IUnknown
-  HRESULT STDMETHODCALLTYPE QueryInterface(
-      /* [in] */ REFIID riid,
-      /* [annotation][iid_is][out] */
-      __RPC__deref_out void **ppvObject);
+#if ENABLED(RDOC_DEVEL)
+#define ASSERT_REFCOUNT(refcount) \
+  if(refcount < 0)                \
+    RDCERR("Unbalanced refcounting, refcount has dropped below 0");
+#else
+#define ASSERT_REFCOUNT(refcount)
+#endif
 
-  ULONG STDMETHODCALLTYPE AddRef()
-  {
-    InterlockedIncrement(&m_iRefcount);
-    return m_iRefcount;
-  }
-  ULONG STDMETHODCALLTYPE Release()
-  {
-    unsigned int ret = InterlockedDecrement(&m_iRefcount);
-    if(ret == 0 && m_SelfDeleting)
-      delete this;
-    return ret;
-  }
-
-  unsigned int SoftRef(WrappedID3D11Device *device);
-  unsigned int SoftRelease(WrappedID3D11Device *device);
-};
-
-#define IMPLEMENT_IUNKNOWN_WITH_REFCOUNTER                                \
-  ULONG STDMETHODCALLTYPE AddRef() { return RefCounter::AddRef(); }       \
-  ULONG STDMETHODCALLTYPE Release() { return RefCounter::Release(); }     \
-  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) \
-  {                                                                       \
-    return RefCounter::QueryInterface(riid, ppvObject);                   \
-  }
-
-#define IMPLEMENT_IUNKNOWN_WITH_REFCOUNTER_CUSTOMQUERY              \
-  ULONG STDMETHODCALLTYPE AddRef() { return RefCounter::AddRef(); } \
-  ULONG STDMETHODCALLTYPE Release() { return RefCounter::Release(); }
 #define IMPLEMENT_FUNCTION_SERIALISED(ret, func, ...) \
   ret func(__VA_ARGS__);                              \
   template <typename SerialiserType>                  \
@@ -277,12 +253,11 @@ public:
 
 #define USE_SCRATCH_SERIALISER() WriteSerialiser &ser = m_ScratchSerialiser;
 
-#define SERIALISE_TIME_CALL(...)                                                                    \
-  m_ScratchSerialiser.ChunkMetadata().timestampMicro = RenderDoc::Inst().GetMicrosecondTimestamp(); \
-  __VA_ARGS__;                                                                                      \
-  m_ScratchSerialiser.ChunkMetadata().durationMicro =                                               \
-      RenderDoc::Inst().GetMicrosecondTimestamp() -                                                 \
-      m_ScratchSerialiser.ChunkMetadata().timestampMicro;
+#define SERIALISE_TIME_CALL(...)                                          \
+  m_ScratchSerialiser.ChunkMetadata().timestampMicro = Timing::GetTick(); \
+  __VA_ARGS__;                                                            \
+  m_ScratchSerialiser.ChunkMetadata().durationMicro =                     \
+      Timing::GetTick() - m_ScratchSerialiser.ChunkMetadata().timestampMicro;
 
 // A handy macros to say "is the serialiser reading and we're doing replay-mode stuff?"
 // The reason we check both is that checking the first allows the compiler to eliminate the other

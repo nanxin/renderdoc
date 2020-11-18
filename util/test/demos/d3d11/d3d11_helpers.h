@@ -99,13 +99,14 @@ struct D3D11GraphicsTest;
 class D3D11BufferCreator
 {
 public:
-  D3D11BufferCreator(D3D11GraphicsTest *test);
+  D3D11BufferCreator(ID3D11DevicePtr dev);
 
   D3D11BufferCreator &Vertex();
   D3D11BufferCreator &Index();
   D3D11BufferCreator &Constant();
   D3D11BufferCreator &StreamOut();
   D3D11BufferCreator &SRV();
+  D3D11BufferCreator &RTV();
   D3D11BufferCreator &UAV();
 
   D3D11BufferCreator &Structured(UINT structStride);
@@ -113,6 +114,7 @@ public:
   D3D11BufferCreator &Mappable();
   D3D11BufferCreator &Staging();
   D3D11BufferCreator &Shared();
+  D3D11BufferCreator &Immutable();
 
   D3D11BufferCreator &Data(const void *data);
   D3D11BufferCreator &Size(UINT size);
@@ -132,7 +134,7 @@ public:
   operator ID3D11BufferPtr() const;
 
 private:
-  D3D11GraphicsTest *m_Test;
+  ID3D11DevicePtr m_Dev;
 
   D3D11_BUFFER_DESC m_BufDesc;
   D3D11_SUBRESOURCE_DATA m_Initdata = {};
@@ -141,8 +143,7 @@ private:
 class D3D11TextureCreator
 {
 public:
-  D3D11TextureCreator(D3D11GraphicsTest *test, DXGI_FORMAT format, UINT width, UINT height,
-                      UINT depth);
+  D3D11TextureCreator(ID3D11DevicePtr dev, DXGI_FORMAT format, UINT width, UINT height, UINT depth);
 
   D3D11TextureCreator &Mips(UINT mips);
   D3D11TextureCreator &Array(UINT size);
@@ -165,7 +166,7 @@ public:
   ID3D11Texture2DPtr Tex2D() const { return (ID3D11Texture2DPtr) * this; };
   ID3D11Texture3DPtr Tex3D() const { return (ID3D11Texture3DPtr) * this; };
 protected:
-  D3D11GraphicsTest *m_Test;
+  ID3D11DevicePtr m_Dev;
 
   UINT Width = 1;
   UINT Height = 1;
@@ -183,7 +184,7 @@ protected:
 class D3D11SamplerCreator
 {
 public:
-  D3D11SamplerCreator(D3D11GraphicsTest *test);
+  D3D11SamplerCreator(ID3D11DevicePtr dev);
 
   D3D11SamplerCreator &AddressU(D3D11_TEXTURE_ADDRESS_MODE addr)
   {
@@ -235,7 +236,7 @@ public:
   operator ID3D11SamplerStatePtr() const;
 
 protected:
-  D3D11GraphicsTest *m_Test;
+  ID3D11DevicePtr m_Dev;
 
   D3D11_SAMPLER_DESC m_Desc;
 };
@@ -243,10 +244,10 @@ protected:
 class D3D11ViewCreator
 {
 public:
-  D3D11ViewCreator(D3D11GraphicsTest *test, ViewType viewType, ID3D11Buffer *buf);
-  D3D11ViewCreator(D3D11GraphicsTest *test, ViewType viewType, ID3D11Texture1D *tex);
-  D3D11ViewCreator(D3D11GraphicsTest *test, ViewType viewType, ID3D11Texture2D *tex);
-  D3D11ViewCreator(D3D11GraphicsTest *test, ViewType viewType, ID3D11Texture3D *tex);
+  D3D11ViewCreator(ID3D11DevicePtr dev, ViewType viewType, ID3D11Buffer *buf);
+  D3D11ViewCreator(ID3D11DevicePtr dev, ViewType viewType, ID3D11Texture1D *tex);
+  D3D11ViewCreator(ID3D11DevicePtr dev, ViewType viewType, ID3D11Texture2D *tex);
+  D3D11ViewCreator(ID3D11DevicePtr dev, ViewType viewType, ID3D11Texture3D *tex);
 
   // common params
   D3D11ViewCreator &Format(DXGI_FORMAT format);
@@ -273,7 +274,7 @@ public:
 private:
   void SetupDescriptors();
 
-  D3D11GraphicsTest *m_Test;
+  ID3D11DevicePtr m_Dev;
   ID3D11ResourcePtr m_Res;
   ViewType m_ViewType;
   ResourceType m_ResType;
@@ -295,13 +296,6 @@ private:
   UINT *firstMip = NULL, *numMips = NULL;
   UINT *firstSlice = NULL, *numSlices = NULL;
 };
-
-#define GET_REFCOUNT(val, obj) \
-  do                           \
-  {                            \
-    obj->AddRef();             \
-    val = obj->Release();      \
-  } while(0)
 
 #define CHECK_HR(expr)                                                                    \
   {                                                                                       \

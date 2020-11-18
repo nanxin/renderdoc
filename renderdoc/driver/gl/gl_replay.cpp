@@ -26,6 +26,7 @@
 #include "gl_replay.h"
 #include "core/settings.h"
 #include "driver/ihv/amd/amd_counters.h"
+#include "driver/ihv/arm/arm_counters.h"
 #include "driver/ihv/intel/intel_gl_counters.h"
 #include "maths/matrix.h"
 #include "serialise/rdcfile.h"
@@ -67,6 +68,7 @@ void GLReplay::Shutdown()
 {
   SAFE_DELETE(m_pAMDCounters);
   SAFE_DELETE(m_pIntelCounters);
+  SAFE_DELETE(m_pARMCounters);
 
   DeleteDebugData();
 
@@ -235,6 +237,7 @@ void GLReplay::SetReplayData(GLWindowingData data)
   {
     AMDCounters *countersAMD = NULL;
     IntelGlCounters *countersIntel = NULL;
+    ARMCounters *countersARM = NULL;
 
     bool isMesa = false;
 
@@ -278,10 +281,20 @@ void GLReplay::SetReplayData(GLWindowingData data)
     }
     else
     {
-      if(m_DriverInfo.vendor == GPUVendor::AMD)
+      if(m_DriverInfo.vendor == GPUVendor::Intel)
+      {
+        RDCLOG("Intel GPU detected - trying to initialise Intel GL counters");
+        countersIntel = new IntelGlCounters();
+      }
+      else if(m_DriverInfo.vendor == GPUVendor::AMD)
       {
         RDCLOG("AMD GPU detected - trying to initialise AMD counters");
         countersAMD = new AMDCounters();
+      }
+      else if(m_DriverInfo.vendor == GPUVendor::ARM)
+      {
+        RDCLOG("ARM Mali GPU detected - trying to initialise ARM counters");
+        countersARM = new ARMCounters();
       }
       else
       {
@@ -307,6 +320,16 @@ void GLReplay::SetReplayData(GLWindowingData data)
     {
       delete countersIntel;
       m_pIntelCounters = NULL;
+    }
+
+    if(countersARM && countersARM->Init())
+    {
+      m_pARMCounters = countersARM;
+    }
+    else
+    {
+      delete countersARM;
+      m_pARMCounters = NULL;
     }
   }
 }
@@ -353,21 +376,6 @@ void GLReplay::GetBufferData(ResourceId buff, uint64_t offset, uint64_t len, byt
   drv.glGetBufferSubData(eGL_COPY_READ_BUFFER, (GLintptr)offset, (GLsizeiptr)len, &ret[0]);
 
   drv.glBindBuffer(eGL_COPY_READ_BUFFER, oldbuf);
-}
-
-bool GLReplay::IsRenderOutput(ResourceId id)
-{
-  for(const GLPipe::Attachment &att : m_CurPipelineState.framebuffer.drawFBO.colorAttachments)
-  {
-    if(att.resourceId == id)
-      return true;
-  }
-
-  if(m_CurPipelineState.framebuffer.drawFBO.depthAttachment.resourceId == id ||
-     m_CurPipelineState.framebuffer.drawFBO.stencilAttachment.resourceId == id)
-    return true;
-
-  return false;
 }
 
 void GLReplay::CacheTexture(ResourceId id)
@@ -655,15 +663,15 @@ BufferDescription GLReplay::GetBuffer(ResourceId id)
 
   ret.creationFlags = res.creationFlags;
 
-  GLint size = 0;
+  GLuint size = 0;
   // if the type is NONE it's probably a DSA created buffer
   if(res.curType == eGL_NONE)
   {
-    drv.glGetNamedBufferParameterivEXT(res.resource.name, eGL_BUFFER_SIZE, &size);
+    drv.glGetNamedBufferParameterivEXT(res.resource.name, eGL_BUFFER_SIZE, (GLint *)&size);
   }
   else
   {
-    drv.glGetBufferParameteriv(res.curType, eGL_BUFFER_SIZE, &size);
+    drv.glGetBufferParameteriv(res.curType, eGL_BUFFER_SIZE, (GLint *)&size);
   }
 
   ret.length = size;
@@ -763,7 +771,7 @@ ShaderReflection *GLReplay::GetShader(ResourceId pipeline, ResourceId shader, Sh
   return &shaderDetails.reflection;
 }
 
-rdcarray<rdcstr> GLReplay::GetDisassemblyTargets()
+rdcarray<rdcstr> GLReplay::GetDisassemblyTargets(bool withPipeline)
 {
   return {SPIRVDisassemblyTarget};
 }
@@ -808,11 +816,11 @@ void GLReplay::SavePipelineState(uint32_t eventId)
 
   GLuint vao = 0;
   drv.glGetIntegerv(eGL_VERTEX_ARRAY_BINDING, (GLint *)&vao);
-  pipe.vertexInput.vertexArrayObject = rm->GetOriginalID(rm->GetID(VertexArrayRes(ctx, vao)));
+  pipe.vertexInput.vertexArrayObject = rm->GetOriginalID(rm->GetResID(VertexArrayRes(ctx, vao)));
 
   GLuint ibuffer = 0;
   drv.glGetIntegerv(eGL_ELEMENT_ARRAY_BUFFER_BINDING, (GLint *)&ibuffer);
-  pipe.vertexInput.indexBuffer = rm->GetOriginalID(rm->GetID(BufferRes(ctx, ibuffer)));
+  pipe.vertexInput.indexBuffer = rm->GetOriginalID(rm->GetResID(BufferRes(ctx, ibuffer)));
 
   pipe.vertexInput.primitiveRestart = rs.Enabled[GLRenderState::eEnabled_PrimitiveRestart];
   pipe.vertexInput.restartIndex = rs.Enabled[GLRenderState::eEnabled_PrimitiveRestartFixedIndex]
@@ -834,7 +842,7 @@ void GLReplay::SavePipelineState(uint32_t eventId)
     GLuint buffer = GetBoundVertexBuffer(i);
 
     pipe.vertexInput.vertexBuffers[i].resourceId =
-        rm->GetOriginalID(rm->GetID(BufferRes(ctx, buffer)));
+        rm->GetOriginalID(rm->GetResID(BufferRes(ctx, buffer)));
 
     drv.glGetIntegeri_v(eGL_VERTEX_BINDING_STRIDE, i,
                         (GLint *)&pipe.vertexInput.vertexBuffers[i].byteStride);
@@ -874,34 +882,32 @@ void GLReplay::SavePipelineState(uint32_t eventId)
 
     fmt.compCount = (uint8_t)compCount;
 
-    bool intComponent = !normalized || integer;
-
     switch(type)
     {
       default:
       case eGL_BYTE:
         fmt.compByteWidth = 1;
-        fmt.compType = intComponent ? CompType::SInt : CompType::SNorm;
+        fmt.compType = CompType::SInt;
         break;
       case eGL_UNSIGNED_BYTE:
         fmt.compByteWidth = 1;
-        fmt.compType = intComponent ? CompType::UInt : CompType::UNorm;
+        fmt.compType = CompType::UInt;
         break;
       case eGL_SHORT:
         fmt.compByteWidth = 2;
-        fmt.compType = intComponent ? CompType::SInt : CompType::SNorm;
+        fmt.compType = CompType::SInt;
         break;
       case eGL_UNSIGNED_SHORT:
         fmt.compByteWidth = 2;
-        fmt.compType = intComponent ? CompType::UInt : CompType::UNorm;
+        fmt.compType = CompType::UInt;
         break;
       case eGL_INT:
         fmt.compByteWidth = 4;
-        fmt.compType = intComponent ? CompType::SInt : CompType::SNorm;
+        fmt.compType = CompType::SInt;
         break;
       case eGL_UNSIGNED_INT:
         fmt.compByteWidth = 4;
-        fmt.compType = intComponent ? CompType::UInt : CompType::UNorm;
+        fmt.compType = CompType::UInt;
         break;
       case eGL_FLOAT:
         fmt.compByteWidth = 4;
@@ -909,7 +915,7 @@ void GLReplay::SavePipelineState(uint32_t eventId)
         break;
       case eGL_DOUBLE:
         fmt.compByteWidth = 8;
-        fmt.compType = CompType::Double;
+        fmt.compType = CompType::Float;
         break;
       case eGL_HALF_FLOAT:
         fmt.compByteWidth = 2;
@@ -929,6 +935,8 @@ void GLReplay::SavePipelineState(uint32_t eventId)
         fmt.type = ResourceFormatType::R11G11B10;
         fmt.compCount = 3;
         fmt.compType = CompType::Float;
+        // spec says this format is never normalized regardless.
+        normalized = 0;
         break;
     }
 
@@ -938,6 +946,9 @@ void GLReplay::SavePipelineState(uint32_t eventId)
       fmt.compCount = 4;
       fmt.SetBGRAOrder(true);
       fmt.compType = CompType::UNorm;
+
+      // spec says BGRA inputs are ALWAYS normalised
+      normalized = 1;
 
       if(type == eGL_UNSIGNED_INT_2_10_10_10_REV || type == eGL_INT_2_10_10_10_REV)
       {
@@ -949,6 +960,24 @@ void GLReplay::SavePipelineState(uint32_t eventId)
         // haven't checked the other cases work properly
         RDCERR("Unexpected BGRA type");
       }
+    }
+
+    // normalized/floatCast flags are irrelevant for float formats
+    if(fmt.compType == CompType::SInt || fmt.compType == CompType::UInt)
+    {
+      // if it wasn't an integer, it's cast to float
+      pipe.vertexInput.attributes[i].floatCast = !integer;
+
+      // if we're casting, change the component type as appropriate
+      if(!integer)
+      {
+        if(normalized != 0)
+          fmt.compType = (fmt.compType == CompType::SInt) ? CompType::SNorm : CompType::UNorm;
+      }
+    }
+    else
+    {
+      pipe.vertexInput.attributes[i].floatCast = false;
     }
 
     pipe.vertexInput.attributes[i].format = fmt;
@@ -1016,7 +1045,7 @@ void GLReplay::SavePipelineState(uint32_t eventId)
     }
     else
     {
-      ResourceId id = rm->GetID(ProgramPipeRes(ctx, curProg));
+      ResourceId id = rm->GetResID(ProgramPipeRes(ctx, curProg));
       auto &pipeDetails = m_pDriver->m_Pipelines[id];
 
       pipe.pipelineResourceId = rm->GetUnreplacedOriginalID(id);
@@ -1060,7 +1089,7 @@ void GLReplay::SavePipelineState(uint32_t eventId)
   }
   else
   {
-    ResourceId id = rm->GetID(ProgramRes(ctx, curProg));
+    ResourceId id = rm->GetResID(ProgramRes(ctx, curProg));
     auto &progDetails = m_pDriver->m_Programs[id];
 
     pipe.pipelineResourceId = ResourceId();
@@ -1120,7 +1149,7 @@ void GLReplay::SavePipelineState(uint32_t eventId)
 
     if(feedback != 0)
       pipe.transformFeedback.feedbackResourceId =
-          rm->GetOriginalID(rm->GetID(FeedbackRes(ctx, feedback)));
+          rm->GetOriginalID(rm->GetResID(FeedbackRes(ctx, feedback)));
     else
       pipe.transformFeedback.feedbackResourceId = ResourceId();
 
@@ -1132,7 +1161,7 @@ void GLReplay::SavePipelineState(uint32_t eventId)
       GLuint buffer = 0;
       drv.glGetIntegeri_v(eGL_TRANSFORM_FEEDBACK_BUFFER_BINDING, i, (GLint *)&buffer);
       pipe.transformFeedback.bufferResourceId[i] =
-          rm->GetOriginalID(rm->GetID(BufferRes(ctx, buffer)));
+          rm->GetOriginalID(rm->GetResID(BufferRes(ctx, buffer)));
       drv.glGetInteger64i_v(eGL_TRANSFORM_FEEDBACK_BUFFER_START, i,
                             (GLint64 *)&pipe.transformFeedback.byteOffset[i]);
       drv.glGetInteger64i_v(eGL_TRANSFORM_FEEDBACK_BUFFER_SIZE, i,
@@ -1280,13 +1309,13 @@ void GLReplay::SavePipelineState(uint32_t eventId)
 
         if(target != eGL_TEXTURE_BUFFER)
         {
-          drv.glGetTexParameteriv(target, eGL_TEXTURE_BASE_LEVEL, &firstMip);
-          drv.glGetTexParameteriv(target, eGL_TEXTURE_MAX_LEVEL, &numMips);
+          drv.glGetTextureParameterivEXT(tex, target, eGL_TEXTURE_BASE_LEVEL, &firstMip);
+          drv.glGetTextureParameterivEXT(tex, target, eGL_TEXTURE_MAX_LEVEL, &numMips);
 
           numMips = numMips - firstMip + 1;
         }
 
-        pipe.textures[unit].resourceId = rm->GetOriginalID(rm->GetID(TextureRes(ctx, tex)));
+        pipe.textures[unit].resourceId = rm->GetOriginalID(rm->GetResID(TextureRes(ctx, tex)));
         pipe.textures[unit].firstMip = (uint32_t)firstMip;
         pipe.textures[unit].numMips = (uint32_t)numMips;
         pipe.textures[unit].type = resType;
@@ -1302,7 +1331,7 @@ void GLReplay::SavePipelineState(uint32_t eventId)
           GLint depthMode = eGL_DEPTH_COMPONENT;
 
           if(HasExt[ARB_stencil_texturing])
-            drv.glGetTexParameteriv(target, eGL_DEPTH_STENCIL_TEXTURE_MODE, &depthMode);
+            drv.glGetTextureParameterivEXT(tex, target, eGL_DEPTH_STENCIL_TEXTURE_MODE, &depthMode);
 
           if(depthMode == eGL_DEPTH_COMPONENT)
             pipe.textures[unit].depthReadChannel = 0;
@@ -1324,7 +1353,7 @@ void GLReplay::SavePipelineState(uint32_t eventId)
         if(HasExt[ARB_sampler_objects])
           drv.glGetIntegerv(eGL_SAMPLER_BINDING, (GLint *)&samp);
 
-        pipe.samplers[unit].resourceId = rm->GetOriginalID(rm->GetID(SamplerRes(ctx, samp)));
+        pipe.samplers[unit].resourceId = rm->GetOriginalID(rm->GetResID(SamplerRes(ctx, samp)));
 
         // checking texture completeness is a pretty expensive operation since it requires a lot of
         // queries against the driver's texture properties.
@@ -1349,29 +1378,29 @@ void GLReplay::SavePipelineState(uint32_t eventId)
             drv.glGetSamplerParameterfv(samp, eGL_TEXTURE_BORDER_COLOR,
                                         &pipe.samplers[unit].borderColor[0]);
           else
-            drv.glGetTexParameterfv(target, eGL_TEXTURE_BORDER_COLOR,
-                                    &pipe.samplers[unit].borderColor[0]);
+            drv.glGetTextureParameterfvEXT(tex, target, eGL_TEXTURE_BORDER_COLOR,
+                                           &pipe.samplers[unit].borderColor[0]);
 
           GLint v;
           v = 0;
           if(samp != 0)
             drv.glGetSamplerParameteriv(samp, eGL_TEXTURE_WRAP_S, &v);
           else
-            drv.glGetTexParameteriv(target, eGL_TEXTURE_WRAP_S, &v);
+            drv.glGetTextureParameterivEXT(tex, target, eGL_TEXTURE_WRAP_S, &v);
           pipe.samplers[unit].addressS = MakeAddressMode((GLenum)v);
 
           v = 0;
           if(samp != 0)
             drv.glGetSamplerParameteriv(samp, eGL_TEXTURE_WRAP_T, &v);
           else
-            drv.glGetTexParameteriv(target, eGL_TEXTURE_WRAP_T, &v);
+            drv.glGetTextureParameterivEXT(tex, target, eGL_TEXTURE_WRAP_T, &v);
           pipe.samplers[unit].addressT = MakeAddressMode((GLenum)v);
 
           v = 0;
           if(samp != 0)
             drv.glGetSamplerParameteriv(samp, eGL_TEXTURE_WRAP_R, &v);
           else
-            drv.glGetTexParameteriv(target, eGL_TEXTURE_WRAP_R, &v);
+            drv.glGetTextureParameterivEXT(tex, target, eGL_TEXTURE_WRAP_R, &v);
           pipe.samplers[unit].addressR = MakeAddressMode((GLenum)v);
 
           v = 0;
@@ -1380,7 +1409,7 @@ void GLReplay::SavePipelineState(uint32_t eventId)
             if(samp != 0)
               drv.glGetSamplerParameteriv(samp, eGL_TEXTURE_CUBE_MAP_SEAMLESS, &v);
             else
-              drv.glGetTexParameteriv(target, eGL_TEXTURE_CUBE_MAP_SEAMLESS, &v);
+              drv.glGetTextureParameterivEXT(tex, target, eGL_TEXTURE_CUBE_MAP_SEAMLESS, &v);
           }
           pipe.samplers[unit].seamlessCubeMap =
               (v != 0 || rs.Enabled[GLRenderState::eEnabled_TexCubeSeamless]);
@@ -1389,7 +1418,7 @@ void GLReplay::SavePipelineState(uint32_t eventId)
           if(samp != 0)
             drv.glGetSamplerParameteriv(samp, eGL_TEXTURE_COMPARE_FUNC, &v);
           else
-            drv.glGetTexParameteriv(target, eGL_TEXTURE_COMPARE_FUNC, &v);
+            drv.glGetTextureParameterivEXT(tex, target, eGL_TEXTURE_COMPARE_FUNC, &v);
           pipe.samplers[unit].compareFunction = MakeCompareFunc((GLenum)v);
 
           GLint minf = 0;
@@ -1397,12 +1426,12 @@ void GLReplay::SavePipelineState(uint32_t eventId)
           if(samp != 0)
             drv.glGetSamplerParameteriv(samp, eGL_TEXTURE_MIN_FILTER, &minf);
           else
-            drv.glGetTexParameteriv(target, eGL_TEXTURE_MIN_FILTER, &minf);
+            drv.glGetTextureParameterivEXT(tex, target, eGL_TEXTURE_MIN_FILTER, &minf);
 
           if(samp != 0)
             drv.glGetSamplerParameteriv(samp, eGL_TEXTURE_MAG_FILTER, &magf);
           else
-            drv.glGetTexParameteriv(target, eGL_TEXTURE_MAG_FILTER, &magf);
+            drv.glGetTextureParameterivEXT(tex, target, eGL_TEXTURE_MAG_FILTER, &magf);
 
           if(HasExt[ARB_texture_filter_anisotropic])
           {
@@ -1410,8 +1439,8 @@ void GLReplay::SavePipelineState(uint32_t eventId)
               drv.glGetSamplerParameterfv(samp, eGL_TEXTURE_MAX_ANISOTROPY,
                                           &pipe.samplers[unit].maxAnisotropy);
             else
-              drv.glGetTexParameterfv(target, eGL_TEXTURE_MAX_ANISOTROPY,
-                                      &pipe.samplers[unit].maxAnisotropy);
+              drv.glGetTextureParameterfvEXT(tex, target, eGL_TEXTURE_MAX_ANISOTROPY,
+                                             &pipe.samplers[unit].maxAnisotropy);
           }
           else
           {
@@ -1424,12 +1453,14 @@ void GLReplay::SavePipelineState(uint32_t eventId)
           if(samp != 0)
             drv.glGetSamplerParameterfv(samp, eGL_TEXTURE_MAX_LOD, &pipe.samplers[unit].maxLOD);
           else
-            drv.glGetTexParameterfv(target, eGL_TEXTURE_MAX_LOD, &pipe.samplers[unit].maxLOD);
+            drv.glGetTextureParameterfvEXT(tex, target, eGL_TEXTURE_MAX_LOD,
+                                           &pipe.samplers[unit].maxLOD);
 
           if(samp != 0)
             drv.glGetSamplerParameterfv(samp, eGL_TEXTURE_MIN_LOD, &pipe.samplers[unit].minLOD);
           else
-            drv.glGetTexParameterfv(target, eGL_TEXTURE_MIN_LOD, &pipe.samplers[unit].minLOD);
+            drv.glGetTextureParameterfvEXT(tex, target, eGL_TEXTURE_MIN_LOD,
+                                           &pipe.samplers[unit].minLOD);
 
           if(!IsGLES)
           {
@@ -1437,7 +1468,8 @@ void GLReplay::SavePipelineState(uint32_t eventId)
               drv.glGetSamplerParameterfv(samp, eGL_TEXTURE_LOD_BIAS,
                                           &pipe.samplers[unit].mipLODBias);
             else
-              drv.glGetTexParameterfv(target, eGL_TEXTURE_LOD_BIAS, &pipe.samplers[unit].mipLODBias);
+              drv.glGetTextureParameterfvEXT(tex, target, eGL_TEXTURE_LOD_BIAS,
+                                             &pipe.samplers[unit].mipLODBias);
           }
           else
           {
@@ -1480,7 +1512,7 @@ void GLReplay::SavePipelineState(uint32_t eventId)
     }
     else
     {
-      pipe.uniformBuffers[b].resourceId = rm->GetOriginalID(rm->GetID(rs.UniformBinding[b].res));
+      pipe.uniformBuffers[b].resourceId = rm->GetOriginalID(rm->GetResID(rs.UniformBinding[b].res));
       pipe.uniformBuffers[b].byteOffset = rs.UniformBinding[b].start;
       pipe.uniformBuffers[b].byteSize = rs.UniformBinding[b].size;
     }
@@ -1496,7 +1528,7 @@ void GLReplay::SavePipelineState(uint32_t eventId)
     }
     else
     {
-      pipe.atomicBuffers[b].resourceId = rm->GetOriginalID(rm->GetID(rs.AtomicCounter[b].res));
+      pipe.atomicBuffers[b].resourceId = rm->GetOriginalID(rm->GetResID(rs.AtomicCounter[b].res));
       pipe.atomicBuffers[b].byteOffset = rs.AtomicCounter[b].start;
       pipe.atomicBuffers[b].byteSize = rs.AtomicCounter[b].size;
     }
@@ -1512,7 +1544,8 @@ void GLReplay::SavePipelineState(uint32_t eventId)
     }
     else
     {
-      pipe.shaderStorageBuffers[b].resourceId = rm->GetOriginalID(rm->GetID(rs.ShaderStorage[b].res));
+      pipe.shaderStorageBuffers[b].resourceId =
+          rm->GetOriginalID(rm->GetResID(rs.ShaderStorage[b].res));
       pipe.shaderStorageBuffers[b].byteOffset = rs.ShaderStorage[b].start;
       pipe.shaderStorageBuffers[b].byteSize = rs.ShaderStorage[b].size;
     }
@@ -1527,7 +1560,7 @@ void GLReplay::SavePipelineState(uint32_t eventId)
     }
     else
     {
-      ResourceId id = rm->GetID(rs.Images[i].res);
+      ResourceId id = rm->GetResID(rs.Images[i].res);
       pipe.images[i].resourceId = rm->GetOriginalID(id);
       pipe.images[i].mipLevel = rs.Images[i].level;
       pipe.images[i].layered = rs.Images[i].layered;
@@ -1728,19 +1761,58 @@ void GLReplay::SavePipelineState(uint32_t eventId)
       rbStencil = true;
 
     pipe.framebuffer.drawFBO.resourceId =
-        rm->GetOriginalID(rm->GetID(FramebufferRes(ctx, curDrawFBO)));
+        rm->GetOriginalID(rm->GetResID(FramebufferRes(ctx, curDrawFBO)));
     pipe.framebuffer.drawFBO.colorAttachments.resize(numCols);
     for(GLint i = 0; i < numCols; i++)
     {
       ResourceId id =
-          rm->GetID(rbCol[i] ? RenderbufferRes(ctx, curCol[i]) : TextureRes(ctx, curCol[i]));
+          rm->GetResID(rbCol[i] ? RenderbufferRes(ctx, curCol[i]) : TextureRes(ctx, curCol[i]));
 
       pipe.framebuffer.drawFBO.colorAttachments[i].resourceId = rm->GetOriginalID(id);
 
+      GLenum attachment = GLenum(eGL_COLOR_ATTACHMENT0 + i);
+
       if(pipe.framebuffer.drawFBO.colorAttachments[i].resourceId != ResourceId() && !rbCol[i])
-        GetFramebufferMipAndLayer(curDrawFBO, GLenum(eGL_COLOR_ATTACHMENT0 + i),
+        GetFramebufferMipAndLayer(curDrawFBO, attachment,
                                   (GLint *)&pipe.framebuffer.drawFBO.colorAttachments[i].mipLevel,
                                   (GLint *)&pipe.framebuffer.drawFBO.colorAttachments[i].slice);
+
+      pipe.framebuffer.drawFBO.colorAttachments[i].numSlices = 1;
+
+      if(!rbCol[i] && id != ResourceId())
+      {
+        // desktop GL allows layered attachments which attach all slices from 0 to N
+        if(!IsGLES)
+        {
+          GLint layered = 0;
+          GL.glGetNamedFramebufferAttachmentParameterivEXT(
+              curDrawFBO, attachment, eGL_FRAMEBUFFER_ATTACHMENT_LAYERED, &layered);
+
+          if(layered)
+          {
+            pipe.framebuffer.drawFBO.colorAttachments[i].numSlices = m_pDriver->m_Textures[id].depth;
+          }
+        }
+        else
+        {
+          // on GLES there's an OVR extension that allows attaching multiple layers
+          if(HasExt[OVR_multiview])
+          {
+            GLint numViews = 0, startView = 0;
+            GL.glGetNamedFramebufferAttachmentParameterivEXT(
+                curDrawFBO, attachment, eGL_FRAMEBUFFER_ATTACHMENT_TEXTURE_NUM_VIEWS_OVR, &numViews);
+            GL.glGetNamedFramebufferAttachmentParameterivEXT(
+                curDrawFBO, attachment, eGL_FRAMEBUFFER_ATTACHMENT_TEXTURE_BASE_VIEW_INDEX_OVR,
+                &startView);
+
+            if(numViews > 1)
+            {
+              pipe.framebuffer.drawFBO.colorAttachments[i].numSlices = numViews;
+              pipe.framebuffer.drawFBO.colorAttachments[i].slice = startView;
+            }
+          }
+        }
+      }
 
       GLenum swizzles[4] = {eGL_RED, eGL_GREEN, eGL_BLUE, eGL_ALPHA};
       if(!rbCol[i] && id != ResourceId() &&
@@ -1757,9 +1829,9 @@ void GLReplay::SavePipelineState(uint32_t eventId)
     }
 
     pipe.framebuffer.drawFBO.depthAttachment.resourceId = rm->GetOriginalID(
-        rm->GetID(rbDepth ? RenderbufferRes(ctx, curDepth) : TextureRes(ctx, curDepth)));
+        rm->GetResID(rbDepth ? RenderbufferRes(ctx, curDepth) : TextureRes(ctx, curDepth)));
     pipe.framebuffer.drawFBO.stencilAttachment.resourceId = rm->GetOriginalID(
-        rm->GetID(rbStencil ? RenderbufferRes(ctx, curStencil) : TextureRes(ctx, curStencil)));
+        rm->GetResID(rbStencil ? RenderbufferRes(ctx, curStencil) : TextureRes(ctx, curStencil)));
 
     if(pipe.framebuffer.drawFBO.depthAttachment.resourceId != ResourceId() && !rbDepth)
       GetFramebufferMipAndLayer(curDrawFBO, eGL_DEPTH_ATTACHMENT,
@@ -1770,6 +1842,55 @@ void GLReplay::SavePipelineState(uint32_t eventId)
       GetFramebufferMipAndLayer(curDrawFBO, eGL_STENCIL_ATTACHMENT,
                                 (GLint *)&pipe.framebuffer.drawFBO.stencilAttachment.mipLevel,
                                 (GLint *)&pipe.framebuffer.drawFBO.stencilAttachment.slice);
+
+    pipe.framebuffer.drawFBO.depthAttachment.numSlices = 1;
+    pipe.framebuffer.drawFBO.stencilAttachment.numSlices = 1;
+
+    ResourceId id = pipe.framebuffer.drawFBO.depthAttachment.resourceId;
+    if(!rbDepth && id != ResourceId())
+    {
+      // desktop GL allows layered attachments which attach all slices from 0 to N
+      if(!IsGLES)
+      {
+        GLint layered = 0;
+        GL.glGetNamedFramebufferAttachmentParameterivEXT(
+            curDrawFBO, eGL_DEPTH_ATTACHMENT, eGL_FRAMEBUFFER_ATTACHMENT_LAYERED, &layered);
+
+        if(layered)
+        {
+          pipe.framebuffer.drawFBO.depthAttachment.numSlices = m_pDriver->m_Textures[id].depth;
+        }
+      }
+      else
+      {
+        // on GLES there's an OVR extension that allows attaching multiple layers
+        if(HasExt[OVR_multiview])
+        {
+          GLint numViews = 0, startView = 0;
+          GL.glGetNamedFramebufferAttachmentParameterivEXT(
+              curDrawFBO, eGL_DEPTH_ATTACHMENT, eGL_FRAMEBUFFER_ATTACHMENT_TEXTURE_NUM_VIEWS_OVR,
+              &numViews);
+          GL.glGetNamedFramebufferAttachmentParameterivEXT(
+              curDrawFBO, eGL_DEPTH_ATTACHMENT,
+              eGL_FRAMEBUFFER_ATTACHMENT_TEXTURE_BASE_VIEW_INDEX_OVR, &startView);
+
+          if(numViews > 1)
+          {
+            pipe.framebuffer.drawFBO.depthAttachment.numSlices = numViews;
+            pipe.framebuffer.drawFBO.depthAttachment.slice = startView;
+          }
+        }
+      }
+
+      if(pipe.framebuffer.drawFBO.stencilAttachment.resourceId ==
+         pipe.framebuffer.drawFBO.depthAttachment.resourceId)
+      {
+        pipe.framebuffer.drawFBO.stencilAttachment.slice =
+            pipe.framebuffer.drawFBO.depthAttachment.slice;
+        pipe.framebuffer.drawFBO.stencilAttachment.numSlices =
+            pipe.framebuffer.drawFBO.depthAttachment.numSlices;
+      }
+    }
 
     pipe.framebuffer.drawFBO.drawBuffers.resize(numCols);
     for(GLint i = 0; i < numCols; i++)
@@ -1815,12 +1936,12 @@ void GLReplay::SavePipelineState(uint32_t eventId)
       rbStencil = true;
 
     pipe.framebuffer.readFBO.resourceId =
-        rm->GetOriginalID(rm->GetID(FramebufferRes(ctx, curReadFBO)));
+        rm->GetOriginalID(rm->GetResID(FramebufferRes(ctx, curReadFBO)));
     pipe.framebuffer.readFBO.colorAttachments.resize(numCols);
     for(GLint i = 0; i < numCols; i++)
     {
       pipe.framebuffer.readFBO.colorAttachments[i].resourceId = rm->GetOriginalID(
-          rm->GetID(rbCol[i] ? RenderbufferRes(ctx, curCol[i]) : TextureRes(ctx, curCol[i])));
+          rm->GetResID(rbCol[i] ? RenderbufferRes(ctx, curCol[i]) : TextureRes(ctx, curCol[i])));
 
       if(pipe.framebuffer.readFBO.colorAttachments[i].resourceId != ResourceId() && !rbCol[i])
         GetFramebufferMipAndLayer(curReadFBO, GLenum(eGL_COLOR_ATTACHMENT0 + i),
@@ -1829,9 +1950,9 @@ void GLReplay::SavePipelineState(uint32_t eventId)
     }
 
     pipe.framebuffer.readFBO.depthAttachment.resourceId = rm->GetOriginalID(
-        rm->GetID(rbDepth ? RenderbufferRes(ctx, curDepth) : TextureRes(ctx, curDepth)));
+        rm->GetResID(rbDepth ? RenderbufferRes(ctx, curDepth) : TextureRes(ctx, curDepth)));
     pipe.framebuffer.readFBO.stencilAttachment.resourceId = rm->GetOriginalID(
-        rm->GetID(rbStencil ? RenderbufferRes(ctx, curStencil) : TextureRes(ctx, curStencil)));
+        rm->GetResID(rbStencil ? RenderbufferRes(ctx, curStencil) : TextureRes(ctx, curStencil)));
 
     if(pipe.framebuffer.readFBO.depthAttachment.resourceId != ResourceId() && !rbDepth)
       GetFramebufferMipAndLayer(curReadFBO, eGL_DEPTH_ATTACHMENT,
@@ -2196,7 +2317,7 @@ void GLReplay::FillCBufferVariables(ResourceId pipeline, ResourceId shader, rdcs
     else
     {
       ResourceId id =
-          m_pDriver->GetResourceManager()->GetID(ProgramPipeRes(m_pDriver->GetCtx(), curProg));
+          m_pDriver->GetResourceManager()->GetResID(ProgramPipeRes(m_pDriver->GetCtx(), curProg));
       auto &pipeDetails = m_pDriver->m_Pipelines[id];
 
       size_t s = ShaderIdx(shaderDetails.type);
@@ -2281,7 +2402,8 @@ void GLReplay::GetTextureData(ResourceId tex, const Subresource &sub,
     GLuint bufName = 0;
     drv.glGetTextureLevelParameterivEXT(texname, texType, 0, eGL_TEXTURE_BUFFER_DATA_STORE_BINDING,
                                         (GLint *)&bufName);
-    ResourceId id = m_pDriver->GetResourceManager()->GetID(BufferRes(m_pDriver->GetCtx(), bufName));
+    ResourceId id =
+        m_pDriver->GetResourceManager()->GetResID(BufferRes(m_pDriver->GetCtx(), bufName));
 
     GLuint offs = 0, size = 0;
     drv.glGetTextureLevelParameterivEXT(texname, texType, 0, eGL_TEXTURE_BUFFER_OFFSET,
@@ -2303,6 +2425,10 @@ void GLReplay::GetTextureData(ResourceId tex, const Subresource &sub,
     {
       height = 1;
       arraysize = texDetails.height;
+    }
+    if(texType == eGL_TEXTURE_CUBE_MAP)
+    {
+      arraysize = 6;
     }
   }
 
@@ -2341,18 +2467,18 @@ void GLReplay::GetTextureData(ResourceId tex, const Subresource &sub,
       else
         drv.glTextureImage2DEXT(tempTex, newtarget, 0, finalFormat, width, height, 0,
                                 GetBaseFormat(finalFormat), GetDataType(finalFormat), NULL);
-      drv.glTexParameteri(newtarget, eGL_TEXTURE_MAX_LEVEL, 0);
+      drv.glTextureParameteriEXT(tempTex, newtarget, eGL_TEXTURE_MAX_LEVEL, 0);
 
       // create temp framebuffer
       GLuint fbo = 0;
       drv.glGenFramebuffers(1, &fbo);
       drv.glBindFramebuffer(eGL_FRAMEBUFFER, fbo);
 
-      drv.glTexParameteri(newtarget, eGL_TEXTURE_MIN_FILTER, eGL_NEAREST);
-      drv.glTexParameteri(newtarget, eGL_TEXTURE_MAG_FILTER, eGL_NEAREST);
-      drv.glTexParameteri(newtarget, eGL_TEXTURE_WRAP_S, eGL_CLAMP_TO_EDGE);
-      drv.glTexParameteri(newtarget, eGL_TEXTURE_WRAP_T, eGL_CLAMP_TO_EDGE);
-      drv.glTexParameteri(newtarget, eGL_TEXTURE_WRAP_R, eGL_CLAMP_TO_EDGE);
+      drv.glTextureParameteriEXT(tempTex, newtarget, eGL_TEXTURE_MIN_FILTER, eGL_NEAREST);
+      drv.glTextureParameteriEXT(tempTex, newtarget, eGL_TEXTURE_MAG_FILTER, eGL_NEAREST);
+      drv.glTextureParameteriEXT(tempTex, newtarget, eGL_TEXTURE_WRAP_S, eGL_CLAMP_TO_EDGE);
+      drv.glTextureParameteriEXT(tempTex, newtarget, eGL_TEXTURE_WRAP_T, eGL_CLAMP_TO_EDGE);
+      drv.glTextureParameteriEXT(tempTex, newtarget, eGL_TEXTURE_WRAP_R, eGL_CLAMP_TO_EDGE);
       if(newtarget == eGL_TEXTURE_3D)
         drv.glFramebufferTexture3D(eGL_FRAMEBUFFER, eGL_COLOR_ATTACHMENT0, eGL_TEXTURE_3D, tempTex,
                                    0, 0);
@@ -2495,7 +2621,7 @@ void GLReplay::GetTextureData(ResourceId tex, const Subresource &sub,
     drv.glBindTexture(eGL_TEXTURE_2D, tempTex);
     drv.glTextureImage2DEXT(tempTex, eGL_TEXTURE_2D, 0, intFormat, width, height, 0,
                             GetBaseFormat(intFormat), GetDataType(intFormat), NULL);
-    drv.glTexParameteri(eGL_TEXTURE_2D, eGL_TEXTURE_MAX_LEVEL, 0);
+    drv.glTextureParameteriEXT(tempTex, eGL_TEXTURE_2D, eGL_TEXTURE_MAX_LEVEL, 0);
 
     // create temp framebuffers
     GLuint fbos[2] = {0};
@@ -2621,6 +2747,10 @@ void GLReplay::GetTextureData(ResourceId tex, const Subresource &sub,
 
       RDCASSERT(s.slice < ARRAY_COUNT(targets));
       target = targets[s.slice];
+
+      // we've "used" the slice, it's not actually a real slice anymore...
+      s.slice = 0;
+      arraysize = 1;
     }
 
     size_t dataSize = 0;
@@ -2905,15 +3035,20 @@ void GLReplay::CreateCustomShaderTex(uint32_t w, uint32_t h)
                                    (GLsizei)RDCMAX(1U, w >> i), (GLsizei)RDCMAX(1U, h >> i), 0,
                                    eGL_RGBA, eGL_FLOAT, NULL);
   }
-  m_pDriver->glTexParameteri(eGL_TEXTURE_2D, eGL_TEXTURE_MIN_FILTER, eGL_NEAREST);
-  m_pDriver->glTexParameteri(eGL_TEXTURE_2D, eGL_TEXTURE_MAG_FILTER, eGL_NEAREST);
-  m_pDriver->glTexParameteri(eGL_TEXTURE_2D, eGL_TEXTURE_BASE_LEVEL, 0);
-  m_pDriver->glTexParameteri(eGL_TEXTURE_2D, eGL_TEXTURE_MAX_LEVEL, mips - 1);
-  m_pDriver->glTexParameteri(eGL_TEXTURE_2D, eGL_TEXTURE_WRAP_S, eGL_CLAMP_TO_EDGE);
-  m_pDriver->glTexParameteri(eGL_TEXTURE_2D, eGL_TEXTURE_WRAP_T, eGL_CLAMP_TO_EDGE);
+  m_pDriver->glTextureParameteriEXT(DebugData.customTex, eGL_TEXTURE_2D, eGL_TEXTURE_MIN_FILTER,
+                                    eGL_NEAREST);
+  m_pDriver->glTextureParameteriEXT(DebugData.customTex, eGL_TEXTURE_2D, eGL_TEXTURE_MAG_FILTER,
+                                    eGL_NEAREST);
+  m_pDriver->glTextureParameteriEXT(DebugData.customTex, eGL_TEXTURE_2D, eGL_TEXTURE_BASE_LEVEL, 0);
+  m_pDriver->glTextureParameteriEXT(DebugData.customTex, eGL_TEXTURE_2D, eGL_TEXTURE_MAX_LEVEL,
+                                    mips - 1);
+  m_pDriver->glTextureParameteriEXT(DebugData.customTex, eGL_TEXTURE_2D, eGL_TEXTURE_WRAP_S,
+                                    eGL_CLAMP_TO_EDGE);
+  m_pDriver->glTextureParameteriEXT(DebugData.customTex, eGL_TEXTURE_2D, eGL_TEXTURE_WRAP_T,
+                                    eGL_CLAMP_TO_EDGE);
 
   DebugData.CustomShaderTexID =
-      m_pDriver->GetResourceManager()->GetID(TextureRes(m_pDriver->GetCtx(), DebugData.customTex));
+      m_pDriver->GetResourceManager()->GetResID(TextureRes(m_pDriver->GetCtx(), DebugData.customTex));
 }
 
 void GLReplay::FreeCustomShader(ResourceId id)
@@ -2971,7 +3106,7 @@ void GLReplay::BuildTargetShader(ShaderEncoding sourceEncoding, const bytebuf &s
   if(status == 0)
     id = ResourceId();
   else
-    id = m_pDriver->GetResourceManager()->GetID(ShaderRes(m_pDriver->GetCtx(), shader));
+    id = m_pDriver->GetResourceManager()->GetResID(ShaderRes(m_pDriver->GetCtx(), shader));
 }
 
 void GLReplay::ReplaceResource(ResourceId from, ResourceId to)
@@ -3126,7 +3261,7 @@ ResourceId GLReplay::CreateProxyTexture(const TextureDescription &templateTex)
       }
     }
 
-    drv.glTexParameteri(target, eGL_TEXTURE_MAX_LEVEL, templateTex.mips - 1);
+    drv.glTextureParameteriEXT(tex, target, eGL_TEXTURE_MAX_LEVEL, templateTex.mips - 1);
   }
 
   // Swizzle R/B channels only for non BGRA textures
@@ -3150,7 +3285,7 @@ ResourceId GLReplay::CreateProxyTexture(const TextureDescription &templateTex)
     }
   }
 
-  ResourceId id = m_pDriver->GetResourceManager()->GetID(TextureRes(m_pDriver->GetCtx(), tex));
+  ResourceId id = m_pDriver->GetResourceManager()->GetResID(TextureRes(m_pDriver->GetCtx(), tex));
 
   return id;
 }
@@ -3359,7 +3494,7 @@ void GLReplay::SetProxyTextureData(ResourceId texid, const Subresource &sub, byt
       drv.glBindTexture(eGL_TEXTURE_2D_ARRAY, uploadTex);
       drv.glTextureStorage3DEXT(uploadTex, eGL_TEXTURE_2D_ARRAY, 1, texdetails.internalFormat,
                                 width, height, texdetails.samples * RDCMAX(1, texdetails.depth));
-      drv.glTexParameteri(eGL_TEXTURE_2D_ARRAY, eGL_TEXTURE_MAX_LEVEL, 0);
+      drv.glTextureParameteriEXT(uploadTex, eGL_TEXTURE_2D_ARRAY, eGL_TEXTURE_MAX_LEVEL, 0);
 
       GLint unpackedSlice = slice * texdetails.samples + sample;
 
@@ -3503,7 +3638,7 @@ ResourceId GLReplay::CreateProxyBuffer(const BufferDescription &templateBuf)
   drv.glBindBuffer(target, buf);
   drv.glNamedBufferDataEXT(buf, (GLsizeiptr)templateBuf.length, NULL, eGL_DYNAMIC_DRAW);
 
-  ResourceId id = m_pDriver->GetResourceManager()->GetID(BufferRes(m_pDriver->GetCtx(), buf));
+  ResourceId id = m_pDriver->GetResourceManager()->GetResID(BufferRes(m_pDriver->GetCtx(), buf));
 
   return id;
 }

@@ -28,7 +28,9 @@
 #include <QMainWindow>
 #include <QMutex>
 #include <QSemaphore>
+#include <QThread>
 #include <QTimer>
+#include <QUrl>
 #include "Code/Interface/QRDInterface.h"
 #include "toolwindowmanager/ToolWindowManager.h"
 
@@ -47,6 +49,25 @@ class QToolButton;
 class CaptureDialog;
 class LiveCapture;
 class QNetworkAccessManager;
+
+class NetworkWorker : public QObject
+{
+private:
+  Q_OBJECT
+public:
+  explicit NetworkWorker();
+  ~NetworkWorker();
+
+signals:
+  void requestFailed(QUrl url, QString error);
+  void requestCompleted(QUrl url, QByteArray replyData);
+
+public slots:
+  void get(QUrl url);
+
+private:
+  QNetworkAccessManager *manager = NULL;
+};
 
 class MainWindow : public QMainWindow, public IMainWindow, public ICaptureViewer
 {
@@ -71,7 +92,7 @@ public:
   ToolWindowManager::AreaReference mainToolArea();
   ToolWindowManager::AreaReference leftToolArea();
 
-  void show();
+  void LoadInitialLayout();
 
   void setProgress(float val);
   void setRemoteHost(int hostIdx);
@@ -170,6 +191,12 @@ private slots:
   void ClearRecentCaptureFiles();
   void ClearRecentCaptureSettings();
 
+  void networkRequestFailed(QUrl url, QString error);
+  void networkRequestCompleted(QUrl url, QByteArray data);
+
+signals:
+  void networkRequestGet(QUrl url);
+
 private:
   void closeEvent(QCloseEvent *event) override;
   void changeEvent(QEvent *event) override;
@@ -183,6 +210,9 @@ private:
   void exportCapture(const CaptureFileFormat &fmt);
 
   QString dragFilename(const QMimeData *mimeData);
+
+  void MakeNetworkRequest(QUrl url, std::function<void(QByteArray)> success,
+                          std::function<void(QString)> failure = {});
 
   enum class UpdateResult
   {
@@ -221,7 +251,10 @@ private:
   rdcarray<RemoteHost> m_ProbeRemoteHosts;
   QMutex m_ProbeRemoteHostsLock;
 
-  QNetworkAccessManager *m_NetManager;
+  NetworkWorker *m_NetWorker;
+  LambdaThread *m_NetManagerThread;
+  QMap<QUrl, std::function<void(QString)>> m_NetworkFailCallbacks;
+  QMap<QUrl, std::function<void(QByteArray)>> m_NetworkCompleteCallbacks;
 
   bool m_messageAlternate = false;
 

@@ -164,7 +164,7 @@ struct CachedHookData
 
   bool missedOrdinals;
 
-  volatile int32_t posthooking = 0;
+  int32_t posthooking = 0;
 
   void ApplyHooks(const char *modName, HMODULE module)
   {
@@ -272,11 +272,11 @@ struct CachedHookData
        !_stricmp(modName, "CoreMessaging.dll") || !_stricmp(modName, "opengl32.dll") ||
        !_stricmp(modName, "gdi32.dll") || !_stricmp(modName, "gdi32full.dll") ||
        !_stricmp(modName, "nvoglv32.dll") || !_stricmp(modName, "nvoglv64.dll") ||
-       !_stricmp(modName, "nvcuda.dll") || strstr(lowername, "cudart") == lowername ||
-       strstr(lowername, "msvcr") == lowername || strstr(lowername, "msvcp") == lowername ||
-       strstr(lowername, "nv-vk") == lowername || strstr(lowername, "amdvlk") == lowername ||
-       strstr(lowername, "igvk") == lowername || strstr(lowername, "nvopencl") == lowername ||
-       strstr(lowername, "nvapi") == lowername)
+       !_stricmp(modName, "vulkan-1.dll") || !_stricmp(modName, "nvcuda.dll") ||
+       strstr(lowername, "cudart") == lowername || strstr(lowername, "msvcr") == lowername ||
+       strstr(lowername, "msvcp") == lowername || strstr(lowername, "nv-vk") == lowername ||
+       strstr(lowername, "amdvlk") == lowername || strstr(lowername, "igvk") == lowername ||
+       strstr(lowername, "nvopencl") == lowername || strstr(lowername, "nvapi") == lowername)
       return;
 
     if(ignores.find(lowername) != ignores.end())
@@ -663,6 +663,9 @@ HMODULE WINAPI Hooked_LoadLibraryExW(LPCWSTR lpLibFileName, HANDLE fileHandle, D
 {
   bool dohook = true;
   if(flags == 0 && GetModuleHandleW(lpLibFileName))
+    dohook = false;
+
+  if(flags & (LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE))
     dohook = false;
 
   SetLastError(S_OK);

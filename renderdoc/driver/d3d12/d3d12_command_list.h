@@ -161,12 +161,12 @@ private:
     D3D12_COMMAND_LIST_TYPE type;
   } m_Init;
 
+  bool m_FakeCreationReset = false;
+
   static rdcstr GetChunkName(uint32_t idx);
   D3D12ResourceManager *GetResourceManager() { return m_pDevice->GetResourceManager(); }
 public:
-  static const int AllocPoolCount = 8192;
-  static const int AllocMaxByteSize = 2 * 1024 * 1024;
-  ALLOCATE_WITH_WRAPPED_POOL(WrappedID3D12GraphicsCommandList, AllocPoolCount, AllocMaxByteSize);
+  ALLOCATE_WITH_WRAPPED_POOL(WrappedID3D12GraphicsCommandList);
 
   WrappedID3D12GraphicsCommandList(ID3D12GraphicsCommandList *real, WrappedID3D12Device *device,
                                    CaptureState &state);
@@ -198,6 +198,8 @@ public:
     m_Init.nodeMask = nodeMask;
     m_Init.type = type;
   }
+  HRESULT ResetInternal(ID3D12CommandAllocator *pAllocator, ID3D12PipelineState *pInitialState,
+                        bool fakeCreationReset);
 
   bool ValidateRootGPUVA(D3D12_GPU_VIRTUAL_ADDRESS buffer);
 

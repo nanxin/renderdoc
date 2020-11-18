@@ -23,6 +23,10 @@
  ******************************************************************************/
 
 #include "../vk_core.h"
+#include "core/settings.h"
+
+RDOC_DEBUG_CONFIG(bool, Vulkan_Debug_AllowDescriptorSetReuse, true,
+                  "Allow the re-use of descriptor sets via vkResetDescriptorPool.");
 
 template <>
 VkDescriptorSetLayoutCreateInfo WrappedVulkan::UnwrapInfo(const VkDescriptorSetLayoutCreateInfo *info)
@@ -95,6 +99,10 @@ template <>
 VkWriteDescriptorSet WrappedVulkan::UnwrapInfo(const VkWriteDescriptorSet *writeDesc)
 {
   VkWriteDescriptorSet ret = *writeDesc;
+
+  // nothing to unwrap for inline uniform block
+  if(ret.descriptorType == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT)
+    return ret;
 
   byte *memory = GetTempMemory(sizeof(VkDescriptorBufferInfo) * writeDesc->descriptorCount);
 
@@ -239,6 +247,8 @@ VkResult WrappedVulkan::vkCreateDescriptorPool(VkDevice device,
 
       VkResourceRecord *record = GetResourceManager()->AddResourceRecord(*pDescriptorPool);
       record->AddChunk(chunk);
+
+      record->descPoolInfo = new DescPoolInfo;
     }
     else
     {
@@ -447,8 +457,29 @@ bool WrappedVulkan::Serialise_vkAllocateDescriptorSets(SerialiserType &ser, VkDe
 
       // this is stored in the resource record on capture, we need to be able to look to up
       m_DescriptorSetState[live].layout = layoutId;
-      m_CreationInfo.m_DescSetLayout[layoutId].CreateBindingsArray(
-          m_DescriptorSetState[live].currentBindings);
+
+      // If descriptorSetCount is zero or this structure is not included in the pNext chain,
+      // then the variable lengths are considered to be zero.
+      uint32_t variableDescriptorAlloc = 0;
+
+      if(!m_CreationInfo.m_DescSetLayout[layoutId].bindings.empty() &&
+         m_CreationInfo.m_DescSetLayout[layoutId].bindings.back().variableSize)
+      {
+        VkDescriptorSetVariableDescriptorCountAllocateInfo *variableAlloc =
+            (VkDescriptorSetVariableDescriptorCountAllocateInfo *)FindNextStruct(
+                &AllocateInfo,
+                VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO);
+
+        if(variableAlloc)
+        {
+          // this struct will have been patched similar to VkDescriptorSetAllocateInfo so we look up
+          // the [0]th element
+          variableDescriptorAlloc = variableAlloc->pDescriptorCounts[0];
+        }
+      }
+
+      m_CreationInfo.m_DescSetLayout[layoutId].CreateBindingsArray(m_DescriptorSetState[live].data,
+                                                                   variableDescriptorAlloc);
     }
 
     AddResource(DescriptorSet, ResourceType::ShaderBinding, "Descriptor Set");
@@ -472,56 +503,139 @@ VkResult WrappedVulkan::vkAllocateDescriptorSets(VkDevice device,
   if(ret != VK_SUCCESS)
     return ret;
 
+  VkDescriptorSetVariableDescriptorCountAllocateInfo *variableAlloc =
+      (VkDescriptorSetVariableDescriptorCountAllocateInfo *)FindNextStruct(
+          pAllocateInfo, VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO);
+
+  VkDescriptorSetAllocateInfo mutableInfo = *pAllocateInfo;
+
+  {
+    byte *tempMem = GetTempMemory(GetNextPatchSize(mutableInfo.pNext));
+    CopyNextChainForPatching("VkDescriptorSetAllocateInfo", tempMem,
+                             (VkBaseInStructure *)&mutableInfo);
+  }
+
+  VkDescriptorSetVariableDescriptorCountAllocateInfo *mutableVariableInfo =
+      (VkDescriptorSetVariableDescriptorCountAllocateInfo *)FindNextStruct(
+          &mutableInfo, VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO);
+
   for(uint32_t i = 0; i < pAllocateInfo->descriptorSetCount; i++)
   {
-    ResourceId id = GetResourceManager()->WrapResource(Unwrap(device), pDescriptorSets[i]);
+    VkResourceRecord *poolrecord = NULL;
+    VkResourceRecord *layoutRecord = NULL;
+
+    ResourceId id;
+    VkResourceRecord *record = NULL;
+    bool exactReuse = false;
+    uint32_t variableDescriptorAlloc = 0;
 
     if(IsCaptureMode(m_State))
     {
-      Chunk *chunk = NULL;
+      layoutRecord = GetRecord(pAllocateInfo->pSetLayouts[i]);
+      poolrecord = GetRecord(pAllocateInfo->descriptorPool);
 
+      if(!layoutRecord->descInfo->layout->bindings.empty() &&
+         layoutRecord->descInfo->layout->bindings.back().variableSize && variableAlloc)
       {
-        CACHE_THREAD_SERIALISER();
-
-        VkDescriptorSetAllocateInfo info = *pAllocateInfo;
-        info.descriptorSetCount = 1;
-        info.pSetLayouts += i;
-
-        SCOPED_SERIALISE_CHUNK(VulkanChunk::vkAllocateDescriptorSets);
-        Serialise_vkAllocateDescriptorSets(ser, device, &info, &pDescriptorSets[i]);
-
-        chunk = scope.Get();
+        variableDescriptorAlloc = variableAlloc->pDescriptorCounts[i];
       }
 
-      VkResourceRecord *record = GetResourceManager()->AddResourceRecord(pDescriptorSets[i]);
-      record->AddChunk(chunk);
-
-      ResourceId layoutID = GetResID(pAllocateInfo->pSetLayouts[i]);
-      VkResourceRecord *layoutRecord = GetRecord(pAllocateInfo->pSetLayouts[i]);
-
-      VkResourceRecord *poolrecord = GetRecord(pAllocateInfo->descriptorPool);
-
+      if(Atomic::CmpExch32(&m_ReuseEnabled, 1, 1) == 1)
       {
+        rdcarray<VkResourceRecord *> &freelist = poolrecord->descPoolInfo->freelist;
+
+        if(!freelist.empty())
+        {
+          DescSetLayout *search = layoutRecord->descInfo->layout;
+
+          // try to find an exact layout match, then we don't need to re-initialise the descriptor
+          // set.
+          auto it = std::lower_bound(freelist.begin(), freelist.end(), search,
+                                     [](VkResourceRecord *a, DescSetLayout *search) {
+                                       return a->descInfo->layout < search;
+                                     });
+
+          if(it != freelist.end() && (*it)->descInfo->layout == layoutRecord->descInfo->layout &&
+             (*it)->descInfo->data.variableDescriptorCount == variableDescriptorAlloc)
+          {
+            record = freelist.takeAt(it - freelist.begin());
+            exactReuse = true;
+          }
+          else
+          {
+            record = freelist.back();
+            freelist.pop_back();
+          }
+
+          if(!exactReuse)
+            record->DeleteChunks();
+        }
+      }
+    }
+
+    if(record)
+      id = GetResourceManager()->WrapReusedResource(record, pDescriptorSets[i]);
+    else
+      id = GetResourceManager()->WrapResource(Unwrap(device), pDescriptorSets[i]);
+
+    if(IsCaptureMode(m_State))
+    {
+      if(record == NULL)
+      {
+        record = GetResourceManager()->AddResourceRecord(pDescriptorSets[i]);
+
         poolrecord->LockChunks();
         poolrecord->pooledChildren.push_back(record);
         poolrecord->UnlockChunks();
+
+        record->pool = poolrecord;
+
+        // only mark descriptor set as dirty if it's not a push descriptor layout
+        if((layoutRecord->descInfo->layout->flags &
+            VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR) == 0)
+        {
+          GetResourceManager()->MarkDirtyResource(id);
+        }
+
+        record->descInfo = new DescriptorSetData();
       }
 
-      record->pool = poolrecord;
-
-      record->AddParent(poolrecord);
-      record->AddParent(GetResourceManager()->GetResourceRecord(layoutID));
-
-      // only mark descriptor set as dirty if it's not a push descriptor layout
-      if((layoutRecord->descInfo->layout->flags &
-          VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR) == 0)
+      if(!exactReuse)
       {
-        GetResourceManager()->MarkDirtyResource(id);
-      }
+        Chunk *chunk = NULL;
 
-      record->descInfo = new DescriptorSetData();
-      record->descInfo->layout = layoutRecord->descInfo->layout;
-      record->descInfo->layout->CreateBindingsArray(record->descInfo->descBindings);
+        {
+          CACHE_THREAD_SERIALISER();
+
+          VkDescriptorSetAllocateInfo info = mutableInfo;
+          info.descriptorSetCount = 1;
+          info.pSetLayouts = mutableInfo.pSetLayouts + i;
+
+          if(mutableVariableInfo)
+          {
+            mutableVariableInfo->descriptorSetCount = 1;
+            mutableVariableInfo->pDescriptorCounts = variableAlloc->pDescriptorCounts + i;
+          }
+
+          SCOPED_SERIALISE_CHUNK(VulkanChunk::vkAllocateDescriptorSets);
+          Serialise_vkAllocateDescriptorSets(ser, device, &info, &pDescriptorSets[i]);
+
+          chunk = scope.Get();
+        }
+        record->AddChunk(chunk);
+
+        record->FreeParents(GetResourceManager());
+        record->AddParent(poolrecord);
+        record->AddParent(layoutRecord);
+
+        record->descInfo->layout = layoutRecord->descInfo->layout;
+        record->descInfo->layout->CreateBindingsArray(record->descInfo->data,
+                                                      variableDescriptorAlloc);
+      }
+      else
+      {
+        record->descInfo->data.reset();
+      }
     }
     else
     {
@@ -542,7 +656,10 @@ VkResult WrappedVulkan::vkFreeDescriptorSets(VkDevice device, VkDescriptorPool d
     unwrapped[i] = Unwrap(pDescriptorSets[i]);
 
   for(uint32_t i = 0; i < count; i++)
-    GetResourceManager()->ReleaseWrappedResource(pDescriptorSets[i]);
+  {
+    if(pDescriptorSets[i] != VK_NULL_HANDLE)
+      GetResourceManager()->ReleaseWrappedResource(pDescriptorSets[i]);
+  }
 
   VkResult ret =
       ObjDisp(device)->FreeDescriptorSets(Unwrap(device), Unwrap(descriptorPool), count, unwrapped);
@@ -556,16 +673,52 @@ VkResult WrappedVulkan::vkResetDescriptorPool(VkDevice device, VkDescriptorPool 
   // need to free all child descriptor pools. Application is responsible for
   // ensuring no concurrent use with alloc/free from this pool, the same as
   // for DestroyDescriptorPool.
-  VkResourceRecord *record = GetRecord(descriptorPool);
-
-  // delete all of the children
-  for(auto it = record->pooledChildren.begin(); it != record->pooledChildren.end(); ++it)
   {
-    // unset record->pool so we don't recurse
-    (*it)->pool = NULL;
-    GetResourceManager()->ReleaseWrappedResource((VkDescriptorSet)(uint64_t)(*it)->Resource, true);
+    // don't reset while capture transition lock is held, so that we can't reset and potentially
+    // reuse a record we might be preparing. We do this here rather than in vkAllocateDescriptorSets
+    // where we actually modify the record, since that's much higher frequency
+    SCOPED_READLOCK(m_CapTransitionLock);
+
+    if(IsCaptureMode(m_State))
+    {
+      VkResourceRecord *record = GetRecord(descriptorPool);
+
+      if(Vulkan_Debug_AllowDescriptorSetReuse())
+      {
+        for(auto it = record->pooledChildren.begin(); it != record->pooledChildren.end(); ++it)
+        {
+          ((WrappedVkNonDispRes *)(*it)->Resource)->real = RealVkRes(0x123456);
+          (*it)->descInfo->data.reset();
+          (*it)->descInfo->bindFrameRefs.clear();
+          (*it)->descInfo->bindMemRefs.clear();
+          (*it)->descInfo->bindImageStates.clear();
+          (*it)->descInfo->backgroundFrameRefs.clear();
+        }
+
+        record->descPoolInfo->freelist.assign(record->pooledChildren);
+
+        // sort by layout
+        std::sort(record->descPoolInfo->freelist.begin(), record->descPoolInfo->freelist.end(),
+                  [](VkResourceRecord *a, VkResourceRecord *b) {
+                    return a->descInfo->layout < b->descInfo->layout;
+                  });
+      }
+      else
+      {
+        // if descriptor set re-use is banned, we can simply free all the sets immediately without
+        // adding them to the free list and that will effectively disallow re-use.
+        for(auto it = record->pooledChildren.begin(); it != record->pooledChildren.end(); ++it)
+        {
+          // unset record->pool so we don't recurse
+          (*it)->pool = NULL;
+          GetResourceManager()->ReleaseWrappedResource((VkDescriptorSet)(uint64_t)(*it)->Resource,
+                                                       true);
+        }
+
+        record->pooledChildren.clear();
+      }
+    }
   }
-  record->pooledChildren.clear();
 
   return ObjDisp(device)->ResetDescriptorPool(Unwrap(device), Unwrap(descriptorPool), flags);
 }
@@ -616,7 +769,9 @@ void WrappedVulkan::ReplayDescriptorSetWrite(VkDevice device, const VkWriteDescr
         valid &= (writeDesc.pImageInfo[i].sampler != VK_NULL_HANDLE) ||
                  (layoutBinding->immutableSampler &&
                   layoutBinding->immutableSampler[curIdx] != ResourceId());
-        valid &= (writeDesc.pImageInfo[i].imageView != VK_NULL_HANDLE);
+
+        if(!NULLDescriptorsAllowed())
+          valid &= (writeDesc.pImageInfo[i].imageView != VK_NULL_HANDLE);
       }
       break;
     }
@@ -624,14 +779,14 @@ void WrappedVulkan::ReplayDescriptorSetWrite(VkDevice device, const VkWriteDescr
     case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
     case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
     {
-      for(uint32_t i = 0; i < writeDesc.descriptorCount; i++)
+      for(uint32_t i = 0; !NULLDescriptorsAllowed() && i < writeDesc.descriptorCount; i++)
         valid &= (writeDesc.pImageInfo[i].imageView != VK_NULL_HANDLE);
       break;
     }
     case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
     case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
     {
-      for(uint32_t i = 0; i < writeDesc.descriptorCount; i++)
+      for(uint32_t i = 0; !NULLDescriptorsAllowed() && i < writeDesc.descriptorCount; i++)
         valid &= (writeDesc.pTexelBufferView[i] != VK_NULL_HANDLE);
       break;
     }
@@ -640,10 +795,11 @@ void WrappedVulkan::ReplayDescriptorSetWrite(VkDevice device, const VkWriteDescr
     case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
     case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
     {
-      for(uint32_t i = 0; i < writeDesc.descriptorCount; i++)
+      for(uint32_t i = 0; !NULLDescriptorsAllowed() && i < writeDesc.descriptorCount; i++)
         valid &= (writeDesc.pBufferInfo[i].buffer != VK_NULL_HANDLE);
       break;
     }
+    case VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT: break;
     default: RDCERR("Unexpected descriptor type %d", writeDesc.descriptorType);
   }
 
@@ -654,7 +810,8 @@ void WrappedVulkan::ReplayDescriptorSetWrite(VkDevice device, const VkWriteDescr
 
     // update our local tracking
     rdcarray<DescriptorSetSlot *> &bindings =
-        m_DescriptorSetState[GetResID(writeDesc.dstSet)].currentBindings;
+        m_DescriptorSetState[GetResID(writeDesc.dstSet)].data.binds;
+    bytebuf &inlineData = m_DescriptorSetState[GetResID(writeDesc.dstSet)].data.inlineBytes;
 
     {
       RDCASSERT(writeDesc.dstBinding < bindings.size());
@@ -712,6 +869,14 @@ void WrappedVulkan::ReplayDescriptorSetWrite(VkDevice device, const VkWriteDescr
           (*bind)[curIdx].imageInfo.SetFrom(writeDesc.pImageInfo[d], sampler, imageView);
         }
       }
+      else if(writeDesc.descriptorType == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT)
+      {
+        VkWriteDescriptorSetInlineUniformBlockEXT *inlineWrite =
+            (VkWriteDescriptorSetInlineUniformBlockEXT *)FindNextStruct(
+                &writeDesc, VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_INLINE_UNIFORM_BLOCK_EXT);
+        memcpy(inlineData.data() + (*bind)->inlineOffset + writeDesc.dstArrayElement,
+               inlineWrite->pData, inlineWrite->dataSize);
+      }
       else
       {
         for(uint32_t d = 0; d < writeDesc.descriptorCount; d++, curIdx++)
@@ -745,8 +910,8 @@ void WrappedVulkan::ReplayDescriptorSetCopy(VkDevice device, const VkCopyDescrip
   ResourceId srcSetId = GetResID(copyDesc.srcSet);
 
   // update our local tracking
-  rdcarray<DescriptorSetSlot *> &dstbindings = m_DescriptorSetState[dstSetId].currentBindings;
-  rdcarray<DescriptorSetSlot *> &srcbindings = m_DescriptorSetState[srcSetId].currentBindings;
+  rdcarray<DescriptorSetSlot *> &dstbindings = m_DescriptorSetState[dstSetId].data.binds;
+  rdcarray<DescriptorSetSlot *> &srcbindings = m_DescriptorSetState[srcSetId].data.binds;
 
   {
     RDCASSERT(copyDesc.dstBinding < dstbindings.size());
@@ -768,6 +933,21 @@ void WrappedVulkan::ReplayDescriptorSetCopy(VkDevice device, const VkCopyDescrip
 
     for(uint32_t d = 0; d < copyDesc.descriptorCount; d++, curSrcIdx++, curDstIdx++)
     {
+      if(layoutSrcBinding->descriptorType == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT)
+      {
+        // inline uniform blocks are special, the descriptor count is a byte count. The layouts may
+        // not match so inline offsets might not match, so we just copy the data and break.
+
+        bytebuf &dstInlineData = m_DescriptorSetState[dstSetId].data.inlineBytes;
+        bytebuf &srcInlineData = m_DescriptorSetState[srcSetId].data.inlineBytes;
+
+        memcpy(dstInlineData.data() + (*dstbind)[0].inlineOffset + copyDesc.dstArrayElement,
+               srcInlineData.data() + (*srcbind)[0].inlineOffset + copyDesc.srcArrayElement,
+               copyDesc.descriptorCount);
+
+        break;
+      }
+
       // allow consecutive descriptor bind updates. See vkUpdateDescriptorSets for more
       // explanation
       if(curSrcIdx >= layoutSrcBinding->descriptorCount)
@@ -859,7 +1039,7 @@ void WrappedVulkan::vkUpdateDescriptorSets(VkDevice device, uint32_t writeCount,
         RDCASSERT(record->descInfo && record->descInfo->layout);
         const DescSetLayout &layout = *record->descInfo->layout;
 
-        RDCASSERT(unwrappedWrites[i].dstBinding < record->descInfo->descBindings.size());
+        RDCASSERT(unwrappedWrites[i].dstBinding < record->descInfo->data.binds.size());
         const DescSetLayout::Binding *layoutBinding = &layout.bindings[unwrappedWrites[i].dstBinding];
 
         hasImmutable = layoutBinding->immutableSampler != NULL;
@@ -921,6 +1101,10 @@ void WrappedVulkan::vkUpdateDescriptorSets(VkDevice device, uint32_t writeCount,
           imInfos[j].imageLayout = pDescriptorWrites[i].pImageInfo[j].imageLayout;
         }
       }
+      else if(pDescriptorWrites[i].descriptorType == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT)
+      {
+        // nothing to unwrap, the next chain contains the data which we can leave as-is
+      }
       else
       {
         unwrappedWrites[i].pBufferInfo = bufInfos;
@@ -929,6 +1113,11 @@ void WrappedVulkan::vkUpdateDescriptorSets(VkDevice device, uint32_t writeCount,
           bufInfos[j].buffer = Unwrap(pDescriptorWrites[i].pBufferInfo[j].buffer);
           bufInfos[j].offset = pDescriptorWrites[i].pBufferInfo[j].offset;
           bufInfos[j].range = pDescriptorWrites[i].pBufferInfo[j].range;
+          if(bufInfos[j].buffer == VK_NULL_HANDLE)
+          {
+            bufInfos[j].offset = 0;
+            bufInfos[j].range = VK_WHOLE_SIZE;
+          }
         }
       }
     }
@@ -1015,6 +1204,11 @@ void WrappedVulkan::vkUpdateDescriptorSets(VkDevice device, uint32_t writeCount,
   // need to track descriptor set contents whether capframing or idle
   if(IsCaptureMode(m_State))
   {
+    rdcarray<ResourceId> ids;
+    VkResourceRecord *setrecord = NULL;
+
+    ids.reserve(128);
+
     for(uint32_t i = 0; i < writeCount; i++)
     {
       const VkWriteDescriptorSet &descWrite = pDescriptorWrites[i];
@@ -1023,9 +1217,21 @@ void WrappedVulkan::vkUpdateDescriptorSets(VkDevice device, uint32_t writeCount,
       RDCASSERT(record->descInfo && record->descInfo->layout);
       const DescSetLayout &layout = *record->descInfo->layout;
 
-      RDCASSERT(descWrite.dstBinding < record->descInfo->descBindings.size());
+      if(setrecord && setrecord != record)
+      {
+        std::sort(ids.begin(), ids.end());
 
-      DescriptorSetSlot **binding = &record->descInfo->descBindings[descWrite.dstBinding];
+        setrecord->descInfo->UpdateBackgroundRefCache(ids);
+
+        ids.clear();
+      }
+
+      setrecord = record;
+
+      RDCASSERT(descWrite.dstBinding < record->descInfo->data.binds.size());
+
+      DescriptorSetSlot **binding = &record->descInfo->data.binds[descWrite.dstBinding];
+      bytebuf &inlineData = record->descInfo->data.inlineBytes;
 
       const DescSetLayout::Binding *layoutBinding = &layout.bindings[descWrite.dstBinding];
 
@@ -1061,22 +1267,30 @@ void WrappedVulkan::vkUpdateDescriptorSets(VkDevice device, uint32_t writeCount,
         // descriptors. All consecutive bindings updated via a single VkWriteDescriptorSet structure
         // must have identical descriptorType and stageFlags, and must all either use immutable
         // samplers or must all not use immutable samplers.
+        //
+        // Note we don't have to worry about this interacting with variable descriptor counts
+        // because the variable descriptor must be the last one, so there's no more overlap.
 
         if(curIdx >= layoutBinding->descriptorCount)
         {
           layoutBinding++;
           binding++;
           curIdx = 0;
+
+          ref = GetRefType(layoutBinding->descriptorType);
         }
 
         DescriptorSetSlot &bind = (*binding)[curIdx];
 
-        bind.RemoveBindRefs(GetResourceManager(), record);
+        bind.RemoveBindRefs(ids, GetResourceManager(), record);
+
+        VkResourceRecord *bufView = NULL, *imgView = NULL, *buffer = NULL;
 
         if(descWrite.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER ||
            descWrite.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)
         {
           bind.texelBufferView = GetResID(descWrite.pTexelBufferView[d]);
+          bufView = GetRecord(descWrite.pTexelBufferView[d]);
         }
         else if(descWrite.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER ||
                 descWrite.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
@@ -1097,15 +1311,38 @@ void WrappedVulkan::vkUpdateDescriptorSets(VkDevice device, uint32_t writeCount,
             imageView = false;
 
           bind.imageInfo.SetFrom(descWrite.pImageInfo[d], sampler, imageView);
+
+          if(imageView)
+            imgView = GetRecord(descWrite.pImageInfo[d].imageView);
+        }
+        else if(descWrite.descriptorType == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT)
+        {
+          VkWriteDescriptorSetInlineUniformBlockEXT *inlineWrite =
+              (VkWriteDescriptorSetInlineUniformBlockEXT *)FindNextStruct(
+                  &descWrite, VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_INLINE_UNIFORM_BLOCK_EXT);
+          memcpy(inlineData.data() + bind.inlineOffset + descWrite.dstArrayElement,
+                 inlineWrite->pData, inlineWrite->dataSize);
+
+          // break now because the descriptorCount is not the number of descriptors
+          break;
         }
         else
         {
           bind.bufferInfo.SetFrom(descWrite.pBufferInfo[d]);
+          buffer = GetRecord(descWrite.pBufferInfo[d].buffer);
         }
 
-        bind.AddBindRefs(GetResourceManager(), record, ref);
+        bind.AddBindRefs(ids, bufView, imgView, buffer, record, ref);
       }
     }
+
+    if(setrecord)
+    {
+      std::sort(ids.begin(), ids.end());
+
+      setrecord->descInfo->UpdateBackgroundRefCache(ids);
+    }
+    setrecord = NULL;
 
     // this is almost identical to the above loop, except that instead of sourcing the descriptors
     // from the writedescriptor struct, we source it from our stored bindings on the source
@@ -1121,13 +1358,13 @@ void WrappedVulkan::vkUpdateDescriptorSets(VkDevice device, uint32_t writeCount,
       RDCASSERT(srcrecord->descInfo && srcrecord->descInfo->layout);
       const DescSetLayout &srclayout = *srcrecord->descInfo->layout;
 
-      RDCASSERT(pDescriptorCopies[i].dstBinding < dstrecord->descInfo->descBindings.size());
-      RDCASSERT(pDescriptorCopies[i].srcBinding < srcrecord->descInfo->descBindings.size());
+      RDCASSERT(pDescriptorCopies[i].dstBinding < dstrecord->descInfo->data.binds.size());
+      RDCASSERT(pDescriptorCopies[i].srcBinding < srcrecord->descInfo->data.binds.size());
 
       DescriptorSetSlot **dstbinding =
-          &dstrecord->descInfo->descBindings[pDescriptorCopies[i].dstBinding];
+          &dstrecord->descInfo->data.binds[pDescriptorCopies[i].dstBinding];
       DescriptorSetSlot **srcbinding =
-          &srcrecord->descInfo->descBindings[pDescriptorCopies[i].srcBinding];
+          &srcrecord->descInfo->data.binds[pDescriptorCopies[i].srcBinding];
 
       const DescSetLayout::Binding *dstlayoutBinding =
           &dstlayout.bindings[pDescriptorCopies[i].dstBinding];
@@ -1141,13 +1378,43 @@ void WrappedVulkan::vkUpdateDescriptorSets(VkDevice device, uint32_t writeCount,
       uint32_t curSrcIdx = pDescriptorCopies[i].srcArrayElement;
       uint32_t curDstIdx = pDescriptorCopies[i].dstArrayElement;
 
+      if(setrecord && setrecord != dstrecord)
+      {
+        std::sort(ids.begin(), ids.end());
+
+        setrecord->descInfo->UpdateBackgroundRefCache(ids);
+
+        ids.clear();
+      }
+
+      setrecord = dstrecord;
+
       for(uint32_t d = 0; d < pDescriptorCopies[i].descriptorCount; d++, curSrcIdx++, curDstIdx++)
       {
+        if(srclayoutBinding->descriptorType == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT)
+        {
+          // inline uniform blocks are special, the descriptor count is a byte count. The layouts
+          // may not match so inline offsets might not match, so we just copy the data and break.
+
+          bytebuf &dstInlineData = dstrecord->descInfo->data.inlineBytes;
+          bytebuf &srcInlineData = srcrecord->descInfo->data.inlineBytes;
+
+          memcpy(dstInlineData.data() + (*dstbinding)[0].inlineOffset +
+                     pDescriptorCopies[i].dstArrayElement,
+                 srcInlineData.data() + (*srcbinding)[0].inlineOffset +
+                     pDescriptorCopies[i].srcArrayElement,
+                 pDescriptorCopies[i].descriptorCount);
+
+          break;
+        }
+
         if(curDstIdx >= dstlayoutBinding->descriptorCount)
         {
           dstlayoutBinding++;
           dstbinding++;
           curDstIdx = 0;
+
+          ref = GetRefType(dstlayoutBinding->descriptorType);
         }
 
         // dst and src indices must roll-over independently
@@ -1160,10 +1427,19 @@ void WrappedVulkan::vkUpdateDescriptorSets(VkDevice device, uint32_t writeCount,
 
         DescriptorSetSlot &bind = (*dstbinding)[curDstIdx];
 
-        bind.RemoveBindRefs(GetResourceManager(), dstrecord);
+        bind.RemoveBindRefs(ids, GetResourceManager(), dstrecord);
         bind = (*srcbinding)[curSrcIdx];
-        bind.AddBindRefs(GetResourceManager(), dstrecord, ref);
+        bind.AddBindRefs(ids, GetResourceManager(), dstrecord, ref);
       }
+    }
+
+    if(setrecord)
+    {
+      std::sort(ids.begin(), ids.end());
+
+      setrecord->descInfo->UpdateBackgroundRefCache(ids);
+      setrecord = NULL;
+      ids.clear();
     }
   }
 }
@@ -1307,7 +1583,7 @@ void WrappedVulkan::vkUpdateDescriptorSetWithTemplate(
 
   {
     // allocate the whole blob of memory
-    byte *memory = GetTempMemory(tempInfo->dataByteSize);
+    byte *memory = GetTempMemory(tempInfo->unwrapByteSize);
 
     // iterate the entries, copy the descriptor data and unwrap
     for(const VkDescriptorUpdateTemplateEntry &entry : tempInfo->updates)
@@ -1358,6 +1634,11 @@ void WrappedVulkan::vkUpdateDescriptorSetWithTemplate(
           src += entry.stride;
         }
       }
+      else if(entry.descriptorType == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT)
+      {
+        // memcpy the data
+        memcpy(dst, src, entry.descriptorCount);
+      }
       else
       {
         for(uint32_t d = 0; d < entry.descriptorCount; d++)
@@ -1402,15 +1683,33 @@ void WrappedVulkan::vkUpdateDescriptorSetWithTemplate(
   // need to track descriptor set contents whether capframing or idle
   if(IsCaptureMode(m_State))
   {
+    rdcarray<ResourceId> ids;
+    VkResourceRecord *setrecord = NULL;
+
+    ids.reserve(128);
+
     for(const VkDescriptorUpdateTemplateEntry &entry : tempInfo->updates)
     {
       VkResourceRecord *record = GetRecord(descriptorSet);
+
+      if(setrecord && setrecord != record)
+      {
+        std::sort(ids.begin(), ids.end());
+
+        setrecord->descInfo->UpdateBackgroundRefCache(ids);
+
+        ids.clear();
+      }
+
+      setrecord = record;
+
       RDCASSERT(record->descInfo && record->descInfo->layout);
       const DescSetLayout &layout = *record->descInfo->layout;
 
-      RDCASSERT(entry.dstBinding < record->descInfo->descBindings.size());
+      RDCASSERT(entry.dstBinding < record->descInfo->data.binds.size());
 
-      DescriptorSetSlot **binding = &record->descInfo->descBindings[entry.dstBinding];
+      DescriptorSetSlot **binding = &record->descInfo->data.binds[entry.dstBinding];
+      bytebuf &inlineData = record->descInfo->data.inlineBytes;
 
       const DescSetLayout::Binding *layoutBinding = &layout.bindings[entry.dstBinding];
 
@@ -1431,19 +1730,24 @@ void WrappedVulkan::vkUpdateDescriptorSetWithTemplate(
         // descriptors. All consecutive bindings updated via a single VkWriteDescriptorSet structure
         // must have identical descriptorType and stageFlags, and must all either use immutable
         // samplers or must all not use immutable samplers.
+        //
+        // Note we don't have to worry about this interacting with variable descriptor counts
+        // because the variable descriptor must be the last one, so there's no more overlap.
 
         if(curIdx >= layoutBinding->descriptorCount)
         {
           layoutBinding++;
           binding++;
           curIdx = 0;
+
+          ref = GetRefType(layoutBinding->descriptorType);
         }
 
         const byte *src = (const byte *)pData + entry.offset + entry.stride * d;
 
         DescriptorSetSlot &bind = (*binding)[curIdx];
 
-        bind.RemoveBindRefs(GetResourceManager(), record);
+        bind.RemoveBindRefs(ids, GetResourceManager(), record);
 
         if(entry.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER ||
            entry.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)
@@ -1472,13 +1776,28 @@ void WrappedVulkan::vkUpdateDescriptorSetWithTemplate(
 
           bind.imageInfo.SetFrom(srcInfo, sampler, imageView);
         }
+        else if(entry.descriptorType == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT)
+        {
+          memcpy(inlineData.data() + bind.inlineOffset + entry.dstArrayElement, src,
+                 entry.descriptorCount);
+
+          // break now because the descriptorCount is not the number of descriptors
+          break;
+        }
         else
         {
           bind.bufferInfo.SetFrom(*(const VkDescriptorBufferInfo *)src);
         }
 
-        bind.AddBindRefs(GetResourceManager(), record, ref);
+        bind.AddBindRefs(ids, GetResourceManager(), record, ref);
       }
+    }
+
+    if(setrecord)
+    {
+      std::sort(ids.begin(), ids.end());
+
+      setrecord->descInfo->UpdateBackgroundRefCache(ids);
     }
   }
 }

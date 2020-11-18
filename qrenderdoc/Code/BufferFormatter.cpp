@@ -229,7 +229,7 @@ ShaderConstant BufferFormatter::ParseFormatString(const QString &formatString, u
     QString arrayDim = !match.captured(7).isEmpty() ? match.captured(7).trimmed() : lit("[1]");
     arrayDim = arrayDim.mid(1, arrayDim.count() - 2);
 
-    if(!match.captured(5).isEmpty())
+    if(!match.captured(5).isEmpty() && basetype != lit("mat"))
       firstDim.swap(secondDim);
 
     el.type.descriptor.name = match.captured(1) + match.captured(2) + match.captured(3) +
@@ -539,7 +539,7 @@ QString BufferFormatter::GetTextureFormatString(const TextureDescription &tex)
       }
       else
       {
-        if(tex.format.compType == CompType::Float || tex.format.compType == CompType::Double)
+        if(tex.format.compType == CompType::Float)
           baseType = lit("double");
         else if(tex.format.compType == CompType::SInt)
           baseType = lit("long");
@@ -625,7 +625,8 @@ QString BufferFormatter::GetBufferFormatString(const ShaderResource &res,
 
         if(i + 1 == members.count())
         {
-          comment = arraySize = QString();
+          comment.clear();
+          arraySize.clear();
 
           if(members.count() > 1)
             format +=
@@ -755,6 +756,27 @@ QString BufferFormatter::GetBufferFormatString(const ShaderResource &res,
   return format;
 }
 
+uint32_t BufferFormatter::GetVarSize(const ShaderConstant &var)
+{
+  uint32_t size = var.type.descriptor.rows * var.type.descriptor.columns;
+  uint32_t typeSize = VarTypeByteSize(var.type.descriptor.type);
+  if(typeSize > 1)
+    size *= typeSize;
+
+  if(var.type.descriptor.rows > 1)
+  {
+    if(var.type.descriptor.rowMajorStorage)
+      size = var.type.descriptor.matrixByteStride * var.type.descriptor.rows;
+    else
+      size = var.type.descriptor.matrixByteStride * var.type.descriptor.columns;
+  }
+
+  if(var.type.descriptor.elements > 1)
+    size *= var.type.descriptor.elements;
+
+  return size;
+}
+
 QString BufferFormatter::DeclarePaddingBytes(uint32_t bytes)
 {
   if(bytes == 0)
@@ -789,8 +811,18 @@ QString BufferFormatter::DeclareStruct(QList<QString> &declaredStructs, const QS
 
   ret = lit("struct %1\n{\n").arg(name);
 
+  uint32_t offset = 0;
+
   for(int i = 0; i < members.count(); i++)
   {
+    if(offset < members[i].byteOffset)
+      ret += lit("    ") + DeclarePaddingBytes(members[i].byteOffset - offset);
+    else if(offset > members[i].byteOffset)
+      qCritical() << "Unexpected offset overlow at" << QString(members[i].name) << "in"
+                  << QString(name);
+
+    offset = members[i].byteOffset + GetVarSize(members[i]);
+
     QString arraySize;
     if(members[i].type.descriptor.elements > 1)
       arraySize = QFormatStr("[%1]").arg(members[i].type.descriptor.elements);
@@ -871,7 +903,7 @@ QString BufferFormatter::DeclareStruct(QList<QString> &declaredStructs, const QS
           uint32_t padSize = members[i].type.descriptor.matrixByteStride - tightStride;
           for(uint32_t c = 0; c < members[i].type.descriptor.columns; c++)
           {
-            ret += QFormatStr("    %1%2 %2_col%4; %5")
+            ret += QFormatStr("    %1%2 %3_col%4; %5")
                        .arg(ToQStr(members[i].type.descriptor.type))
                        .arg(members[i].type.descriptor.rows)
                        .arg(varName)
@@ -889,39 +921,25 @@ QString BufferFormatter::DeclareStruct(QList<QString> &declaredStructs, const QS
 
   if(requiredByteStride > 0)
   {
-    uint32_t structStart = 0;
+    uint32_t lastMemberStart = 0;
 
     const ShaderConstant *lastChild = &members.back();
 
-    structStart += lastChild->byteOffset;
+    lastMemberStart += lastChild->byteOffset;
     while(!lastChild->type.members.isEmpty())
     {
-      structStart += (qMax(lastChild->type.descriptor.elements, 1U) - 1) *
-                     lastChild->type.descriptor.arrayByteStride;
+      lastMemberStart += (qMax(lastChild->type.descriptor.elements, 1U) - 1) *
+                         lastChild->type.descriptor.arrayByteStride;
       lastChild = &lastChild->type.members.back();
-      structStart += lastChild->byteOffset;
+      lastMemberStart += lastChild->byteOffset;
     }
 
-    uint32_t size = lastChild->type.descriptor.rows * lastChild->type.descriptor.columns;
-    uint32_t typeSize = VarTypeByteSize(lastChild->type.descriptor.type);
-    if(typeSize > 1)
-      size *= typeSize;
+    const uint32_t structEnd = lastMemberStart + GetVarSize(*lastChild);
 
-    if(lastChild->type.descriptor.rows > 1)
-    {
-      if(lastChild->type.descriptor.rowMajorStorage)
-        size = lastChild->type.descriptor.matrixByteStride * lastChild->type.descriptor.columns;
-      else
-        size = lastChild->type.descriptor.matrixByteStride * lastChild->type.descriptor.rows;
-    }
-
-    if(lastChild->type.descriptor.elements > 1)
-      size *= lastChild->type.descriptor.elements;
-
-    uint32_t padBytes = requiredByteStride - (structStart + size);
-
-    if(padBytes > 0)
-      ret += lit("    ") + DeclarePaddingBytes(padBytes);
+    if(requiredByteStride > structEnd)
+      ret += lit("    ") + DeclarePaddingBytes(requiredByteStride - structEnd);
+    else if(requiredByteStride != structEnd)
+      qCritical() << "Unexpected stride overlow at struct" << name;
   }
 
   ret += lit("}\n");
@@ -1509,10 +1527,6 @@ QVariantList GetVariants(ResourceFormat format, const ShaderVariableDescriptor &
             float f = (float)readObj<uint16_t>(data, end, ok);
             ret.push_back(f / (float)0x0000ffff);
           }
-        }
-        else if(format.compType == CompType::Double)
-        {
-          ret.push_back(readObj<double>(data, end, ok));
         }
         else
         {

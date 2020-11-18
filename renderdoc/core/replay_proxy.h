@@ -130,8 +130,8 @@ public:
         m_Replay(NULL),
         m_RemoteServer(false)
   {
-    GetAPIProperties();
-    FetchStructuredFile();
+    ReplayProxy::GetAPIProperties();
+    ReplayProxy::FetchStructuredFile();
   }
 
   ReplayProxy(ReadSerialiser &reader, WriteSerialiser &writer, IRemoteDriver *remoteDriver,
@@ -236,10 +236,10 @@ public:
       return m_Proxy->FlipOutputWindow(id);
   }
 
-  void RenderCheckerboard()
+  void RenderCheckerboard(FloatVector dark, FloatVector light)
   {
     if(m_Proxy)
-      return m_Proxy->RenderCheckerboard();
+      return m_Proxy->RenderCheckerboard(dark, light);
   }
 
   void RenderHighlightBox(float w, float h, float scale)
@@ -506,15 +506,15 @@ public:
   IMPLEMENT_FUNCTION_PROXIED(MeshFormat, GetPostVSBuffers, uint32_t eventId, uint32_t instID,
                              uint32_t viewID, MeshDataStage stage);
 
-  IMPLEMENT_FUNCTION_PROXIED(ResourceId, RenderOverlay, ResourceId texid, const Subresource &sub,
-                             CompType typeCast, FloatVector clearCol, DebugOverlay overlay,
-                             uint32_t eventId, const rdcarray<uint32_t> &passEvents);
+  IMPLEMENT_FUNCTION_PROXIED(ResourceId, RenderOverlay, ResourceId texid, FloatVector clearCol,
+                             DebugOverlay overlay, uint32_t eventId,
+                             const rdcarray<uint32_t> &passEvents);
 
   IMPLEMENT_FUNCTION_PROXIED(rdcarray<ShaderEntryPoint>, GetShaderEntryPoints, ResourceId shader);
   IMPLEMENT_FUNCTION_PROXIED(ShaderReflection *, GetShader, ResourceId pipeline, ResourceId,
                              ShaderEntryPoint entry);
 
-  IMPLEMENT_FUNCTION_PROXIED(rdcarray<rdcstr>, GetDisassemblyTargets);
+  IMPLEMENT_FUNCTION_PROXIED(rdcarray<rdcstr>, GetDisassemblyTargets, bool withPipeline);
   IMPLEMENT_FUNCTION_PROXIED(rdcstr, DisassembleShader, ResourceId pipeline,
                              const ShaderReflection *refl, const rdcstr &target);
 
@@ -696,8 +696,8 @@ private:
     RemoteExecution_ThreadActive = 2,
   };
 
-  volatile int32_t m_RemoteExecutionKill = 0;
-  volatile int32_t m_RemoteExecutionState = RemoteExecution_Inactive;
+  int32_t m_RemoteExecutionKill = 0;
+  int32_t m_RemoteExecutionState = RemoteExecution_Inactive;
 
   bool IsThreadIdle()
   {

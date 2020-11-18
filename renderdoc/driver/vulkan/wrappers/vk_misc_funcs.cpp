@@ -53,8 +53,55 @@ static void MakeSubpassLoadRP(RPCreateInfo &info, const RPCreateInfo *origInfo, 
   info.subpassCount = 1;
   info.pSubpasses = origInfo->pSubpasses + s;
 
-  // remove any dependencies
+  // VK_KHR_multiview
+  const VkRenderPassMultiviewCreateInfo *multiview =
+      (const VkRenderPassMultiviewCreateInfo *)FindNextStruct(
+          origInfo, VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO);
+
+  static VkRenderPassMultiviewCreateInfo patched;
+
+  if(multiview)
+  {
+    // remove from the chain, the caller ensured we have a mutable chain so we won't be trashing the
+    // pNext chain we'll look up for any subsequent subpasses
+    RemoveNextStruct(&info, VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO);
+    patched = *multiview;
+
+    // keep the view mask for our target subpass
+    patched.subpassCount = 1;
+    patched.pViewMasks = patched.pViewMasks + s;
+
+    // view offsets are not allowed for self-dependencies, and we remove all other dependencies.
+    patched.dependencyCount = 0;
+    patched.pViewOffsets = NULL;
+
+    // add onto the chain
+    patched.pNext = info.pNext;
+    info.pNext = &patched;
+  }
+
+  // remove any non-self dependencies
   info.dependencyCount = 0;
+  for(uint32_t i = 0; i < origInfo->dependencyCount; i++)
+  {
+    // if this dependency is a self-dependency for the target subpass, keep it
+    if(origInfo->pDependencies[i].srcSubpass == origInfo->pDependencies[i].dstSubpass &&
+       origInfo->pDependencies[i].srcSubpass == s)
+    {
+      uint32_t d = info.dependencyCount;
+      info.dependencyCount++;
+
+      // copy the dependency
+      memcpy((void *)&info.pDependencies[d], &origInfo->pDependencies[i],
+             sizeof(origInfo->pDependencies[i]));
+
+      // set the srcSubpass/dstSubpass to 0 since we're rewriting this renderpass to contain one
+      // subpass only
+      RDCEraseEl(info.pDependencies[d].srcSubpass);
+      RDCEraseEl(info.pDependencies[d].dstSubpass);
+      break;
+    }
+  }
 
   // we use decltype here because this is templated to work for regular and create_renderpass2
   // structs
@@ -132,7 +179,6 @@ VkFramebufferCreateInfo WrappedVulkan::UnwrapInfo(const VkFramebufferCreateInfo 
     ObjDisp(device)->func(Unwrap(device), unwrappedObj, pAllocator);                               \
   }
 
-DESTROY_IMPL(VkBuffer, DestroyBuffer)
 DESTROY_IMPL(VkBufferView, DestroyBufferView)
 DESTROY_IMPL(VkImageView, DestroyImageView)
 DESTROY_IMPL(VkShaderModule, DestroyShaderModule)
@@ -154,6 +200,38 @@ DESTROY_IMPL(VkSamplerYcbcrConversion, DestroySamplerYcbcrConversion)
 
 #undef DESTROY_IMPL
 
+void WrappedVulkan::vkDestroyBuffer(VkDevice device, VkBuffer buffer,
+                                    const VkAllocationCallbacks *pAllocator)
+{
+  if(buffer == VK_NULL_HANDLE)
+    return;
+
+  // artificially extend the lifespan of buffer device address memory or buffers, to ensure their
+  // opaque capture address isn't re-used before the capture completes
+  {
+    SCOPED_READLOCK(m_CapTransitionLock);
+    if(IsActiveCapturing(m_State) && m_DeviceAddressResources.IDs.contains(GetResID(buffer)))
+    {
+      // we can't hold onto the user callback so we'll be freeing with NULL.
+      RDCASSERT(pAllocator == NULL);
+      m_DeviceAddressResources.DeadBuffers.push_back(buffer);
+      return;
+    }
+    m_DeviceAddressResources.IDs.removeOne(GetResID(buffer));
+  }
+
+  VkBuffer unwrappedObj = Unwrap(buffer);
+
+  m_ForcedReferences.removeOne(GetRecord(buffer));
+
+  if(IsReplayMode(m_State))
+    m_CreationInfo.erase(GetResID(buffer));
+
+  GetResourceManager()->ReleaseWrappedResource(buffer, true);
+
+  ObjDisp(device)->DestroyBuffer(Unwrap(device), unwrappedObj, pAllocator);
+}
+
 // needs to be separate because it releases internal resources
 void WrappedVulkan::vkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR obj,
                                           const VkAllocationCallbacks *pAllocator)
@@ -165,7 +243,7 @@ void WrappedVulkan::vkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR obj,
   {
     SwapchainInfo &info = *GetRecord(obj)->swapInfo;
 
-    RenderDoc::Inst().RemoveFrameCapturer(LayerDisp(m_Instance), info.wndHandle);
+    ObjDisp(device)->DeviceWaitIdle(Unwrap(device));
 
     VkRenderPass unwrappedRP = Unwrap(info.rp);
     GetResourceManager()->ReleaseWrappedResource(info.rp, true);
@@ -175,12 +253,21 @@ void WrappedVulkan::vkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR obj,
     {
       VkFramebuffer unwrappedFB = Unwrap(info.images[i].fb);
       VkImageView unwrappedView = Unwrap(info.images[i].view);
+      VkSemaphore unwrappedSem = Unwrap(info.images[i].overlaydone);
+      VkFence unwrappedFence = Unwrap(info.images[i].fence);
       GetResourceManager()->ReleaseWrappedResource(info.images[i].fb, true);
       // note, image doesn't have to be destroyed, just untracked
       GetResourceManager()->ReleaseWrappedResource(info.images[i].im, true);
       GetResourceManager()->ReleaseWrappedResource(info.images[i].view, true);
+      GetResourceManager()->ReleaseWrappedResource(info.images[i].overlaydone);
+      GetResourceManager()->ReleaseWrappedResource(info.images[i].fence);
       ObjDisp(device)->DestroyFramebuffer(Unwrap(device), unwrappedFB, NULL);
       ObjDisp(device)->DestroyImageView(Unwrap(device), unwrappedView, NULL);
+      ObjDisp(device)->DestroySemaphore(Unwrap(device), unwrappedSem, NULL);
+      ObjDisp(device)->DestroyFence(Unwrap(device), unwrappedFence, NULL);
+
+      // return the command buffers to the pool
+      AddFreeCommandBuffer(info.images[i].cmd);
     }
   }
 
@@ -196,10 +283,11 @@ void WrappedVulkan::vkDestroyImage(VkDevice device, VkImage obj,
   if(obj == VK_NULL_HANDLE)
     return;
 
-  EraseImageState(GetResID(obj));
-
   VkImage unwrappedObj = Unwrap(obj);
   GetResourceManager()->ReleaseWrappedResource(obj, true);
+
+  EraseImageState(GetResID(obj));
+
   return ObjDisp(device)->DestroyImage(Unwrap(device), unwrappedObj, pAllocator);
 }
 
@@ -701,55 +789,52 @@ VkResult WrappedVulkan::vkCreateFramebuffer(VkDevice device,
       VkResourceRecord *rpRecord = GetRecord(pCreateInfo->renderPass);
       record->AddParent(rpRecord);
 
-      // *2 in case we need separate barriers for depth and stencil, +1 for the terminating null
-      // attachment info
-      uint32_t arrayCount = pCreateInfo->attachmentCount * 2 + 1;
-
-      record->imageAttachments = new AttachmentInfo[arrayCount];
-      RDCEraseMem(record->imageAttachments, sizeof(AttachmentInfo) * arrayCount);
+      RenderPassInfo *rpInfo = rpRecord->renderPassInfo;
+      FramebufferInfo *fbInfo = record->framebufferInfo = new FramebufferInfo(*pCreateInfo);
 
       for(uint32_t i = 0, a = 0; i < pCreateInfo->attachmentCount; i++, a++)
       {
-        record->imageAttachments[a].barrier = rpRecord->imageAttachments[a].barrier;
+        fbInfo->imageAttachments[a].barrier = rpInfo->imageAttachments[a].barrier;
 
         if((pCreateInfo->flags & VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT) == 0)
         {
           VkResourceRecord *attRecord = GetRecord(pCreateInfo->pAttachments[i]);
           record->AddParent(attRecord);
 
-          record->imageAttachments[a].record = attRecord;
-          record->imageAttachments[a].barrier.image =
+          fbInfo->imageAttachments[a].record = attRecord;
+          fbInfo->imageAttachments[a].barrier.image =
               GetResourceManager()->GetCurrentHandle<VkImage>(attRecord->baseResource);
-          record->imageAttachments[a].barrier.subresourceRange = attRecord->viewRange;
+          fbInfo->imageAttachments[a].barrier.subresourceRange = attRecord->viewRange;
 
           {
             auto state = FindImageState(attRecord->GetResourceID());
             if(state && state->GetImageInfo().extent.depth > 1)
             {
-              record->imageAttachments[a].barrier.subresourceRange.baseArrayLayer = 0;
-              record->imageAttachments[a].barrier.subresourceRange.layerCount = 1;
+              fbInfo->imageAttachments[a].barrier.subresourceRange.baseArrayLayer = 0;
+              fbInfo->imageAttachments[a].barrier.subresourceRange.layerCount = 1;
             }
           }
 
           // if the renderpass specifies an aspect mask that mean split depth/stencil handling, so
           // respect the aspect mask and the next one will be stencil
-          if(rpRecord->imageAttachments[a].barrier.subresourceRange.aspectMask != 0)
+          if(rpInfo->imageAttachments[a].barrier.subresourceRange.aspectMask != 0)
           {
-            record->imageAttachments[a].barrier.subresourceRange.aspectMask =
-                rpRecord->imageAttachments[a].barrier.subresourceRange.aspectMask;
+            // restore the aspectMask that might have been trampled by attRecord->viewRange
+            fbInfo->imageAttachments[a].barrier.subresourceRange.aspectMask =
+                rpInfo->imageAttachments[a].barrier.subresourceRange.aspectMask;
 
             a++;
 
             // copy most properties from previous barrier
-            record->imageAttachments[a].record = record->imageAttachments[a - 1].record;
-            record->imageAttachments[a].barrier = record->imageAttachments[a - 1].barrier;
+            fbInfo->imageAttachments[a].record = fbInfo->imageAttachments[a - 1].record;
+            fbInfo->imageAttachments[a].barrier = fbInfo->imageAttachments[a - 1].barrier;
             // copy aspect mask and layouts from the next barrier in the RP
-            record->imageAttachments[a].barrier.subresourceRange.aspectMask =
-                rpRecord->imageAttachments[a].barrier.subresourceRange.aspectMask;
-            record->imageAttachments[a].barrier.oldLayout =
-                rpRecord->imageAttachments[a].barrier.oldLayout;
-            record->imageAttachments[a].barrier.newLayout =
-                rpRecord->imageAttachments[a].barrier.newLayout;
+            fbInfo->imageAttachments[a].barrier.subresourceRange.aspectMask =
+                rpInfo->imageAttachments[a].barrier.subresourceRange.aspectMask;
+            fbInfo->imageAttachments[a].barrier.oldLayout =
+                rpInfo->imageAttachments[a].barrier.oldLayout;
+            fbInfo->imageAttachments[a].barrier.newLayout =
+                rpInfo->imageAttachments[a].barrier.newLayout;
           }
         }
       }
@@ -816,13 +901,24 @@ bool WrappedVulkan::Serialise_vkCreateRenderPass(SerialiserType &ser, VkDevice d
     VkAttachmentDescription *att = (VkAttachmentDescription *)CreateInfo.pAttachments;
     for(uint32_t i = 0; i < CreateInfo.attachmentCount; i++)
     {
-      att[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-      att[i].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
+      if(m_ReplayOptions.optimisation != ReplayOptimisationLevel::Fastest)
+      {
+        att[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        att[i].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
 
-      if(att[i].loadOp == VK_ATTACHMENT_LOAD_OP_DONT_CARE)
-        att[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-      if(att[i].stencilLoadOp == VK_ATTACHMENT_LOAD_OP_DONT_CARE)
-        att[i].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        if(att[i].loadOp == VK_ATTACHMENT_LOAD_OP_DONT_CARE)
+        {
+          att[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+          if(att[i].initialLayout == VK_IMAGE_LAYOUT_UNDEFINED)
+            att[i].initialLayout = VK_IMAGE_LAYOUT_GENERAL;
+        }
+        if(att[i].stencilLoadOp == VK_ATTACHMENT_LOAD_OP_DONT_CARE)
+        {
+          att[i].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+          if(att[i].initialLayout == VK_IMAGE_LAYOUT_UNDEFINED)
+            att[i].initialLayout = VK_IMAGE_LAYOUT_GENERAL;
+        }
+      }
 
       // sanitise the actual layouts used to create the renderpass
       SanitiseOldImageLayout(att[i].initialLayout);
@@ -882,6 +978,11 @@ bool WrappedVulkan::Serialise_vkCreateRenderPass(SerialiserType &ser, VkDevice d
         }
 
         VkRenderPassCreateInfo loadInfo = CreateInfo;
+
+        {
+          byte *tempMem = GetTempMemory(GetNextPatchSize(loadInfo.pNext));
+          CopyNextChainForPatching("VkRenderPassCreateInfo", tempMem, (VkBaseInStructure *)&loadInfo);
+        }
 
         rpinfo.loadRPs.resize(CreateInfo.subpassCount);
 
@@ -956,22 +1057,7 @@ VkResult WrappedVulkan::vkCreateRenderPass(VkDevice device, const VkRenderPassCr
       VkResourceRecord *record = GetResourceManager()->AddResourceRecord(*pRenderPass);
       record->AddChunk(chunk);
 
-      // *2 in case we need separate barriers for depth and stencil, +1 for the terminating null
-      // attachment info (though separate depth/stencil buffers aren't needed here, we keep the
-      // array size the same)
-      uint32_t arrayCount = pCreateInfo->attachmentCount * 2 + 1;
-
-      record->imageAttachments = new AttachmentInfo[arrayCount];
-
-      RDCEraseMem(record->imageAttachments, sizeof(AttachmentInfo) * arrayCount);
-
-      for(uint32_t i = 0; i < pCreateInfo->attachmentCount; i++)
-      {
-        record->imageAttachments[i].record = NULL;
-        record->imageAttachments[i].barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        record->imageAttachments[i].barrier.oldLayout = pCreateInfo->pAttachments[i].initialLayout;
-        record->imageAttachments[i].barrier.newLayout = pCreateInfo->pAttachments[i].finalLayout;
-      }
+      record->renderPassInfo = new RenderPassInfo(*pCreateInfo);
     }
     else
     {
@@ -982,8 +1068,8 @@ VkResult WrappedVulkan::vkCreateRenderPass(VkDevice device, const VkRenderPassCr
 
       VkRenderPassCreateInfo info = *pCreateInfo;
 
-      VkAttachmentDescription atts[16];
-      RDCASSERT(ARRAY_COUNT(atts) >= (size_t)info.attachmentCount);
+      rdcarray<VkAttachmentDescription> atts;
+      atts.resize(info.attachmentCount);
 
       // make a version of the render pass that loads from its attachments,
       // so it can be used for replaying a single draw after a render pass
@@ -995,7 +1081,18 @@ VkResult WrappedVulkan::vkCreateRenderPass(VkDevice device, const VkRenderPassCr
         atts[i].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
       }
 
-      info.pAttachments = atts;
+      info.pAttachments = atts.data();
+
+      // copy the dependencies so we can mutate them
+      rdcarray<VkSubpassDependency> deps;
+      deps.assign(info.pDependencies, info.dependencyCount);
+
+      info.pDependencies = deps.data();
+
+      {
+        byte *tempMem = GetTempMemory(GetNextPatchSize(info.pNext));
+        CopyNextChainForPatching("VkRenderPassCreateInfo", tempMem, (VkBaseInStructure *)&info);
+      }
 
       rpinfo.loadRPs.resize(pCreateInfo->subpassCount);
 
@@ -1112,6 +1209,12 @@ bool WrappedVulkan::Serialise_vkCreateRenderPass2(SerialiserType &ser, VkDevice 
 
         VkRenderPassCreateInfo2 loadInfo = CreateInfo;
 
+        {
+          byte *tempMem = GetTempMemory(GetNextPatchSize(loadInfo.pNext));
+          CopyNextChainForPatching("VkRenderPassCreateInfo2", tempMem,
+                                   (VkBaseInStructure *)&loadInfo);
+        }
+
         rpinfo.loadRPs.resize(CreateInfo.subpassCount);
 
         // create a render pass for each subpass that maintains attachment layouts
@@ -1186,42 +1289,7 @@ VkResult WrappedVulkan::vkCreateRenderPass2(VkDevice device,
       VkResourceRecord *record = GetResourceManager()->AddResourceRecord(*pRenderPass);
       record->AddChunk(chunk);
 
-      // *2 in case we need separate barriers for depth and stencil, +1 for the terminating null
-      // attachment info
-      uint32_t arrayCount = pCreateInfo->attachmentCount * 2 + 1;
-
-      record->imageAttachments = new AttachmentInfo[arrayCount];
-
-      RDCEraseMem(record->imageAttachments, sizeof(AttachmentInfo) * arrayCount);
-
-      for(uint32_t i = 0, a = 0; i < pCreateInfo->attachmentCount; i++, a++)
-      {
-        record->imageAttachments[a].record = NULL;
-        record->imageAttachments[a].barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        record->imageAttachments[a].barrier.oldLayout = pCreateInfo->pAttachments[i].initialLayout;
-        record->imageAttachments[a].barrier.newLayout = pCreateInfo->pAttachments[i].finalLayout;
-
-        // VK_KHR_separate_depth_stencil_layouts
-        VkAttachmentDescriptionStencilLayoutKHR *separateStencil =
-            (VkAttachmentDescriptionStencilLayoutKHR *)FindNextStruct(
-                &pCreateInfo->pAttachments[i],
-                VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_STENCIL_LAYOUT_KHR);
-
-        if(separateStencil)
-        {
-          record->imageAttachments[a].barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-
-          // add a separate barrier for stencil
-          a++;
-
-          record->imageAttachments[a].record = NULL;
-          record->imageAttachments[a].barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-          record->imageAttachments[a].barrier.oldLayout = separateStencil->stencilInitialLayout;
-          record->imageAttachments[a].barrier.newLayout = separateStencil->stencilFinalLayout;
-          record->imageAttachments[a].barrier.subresourceRange.aspectMask =
-              VK_IMAGE_ASPECT_STENCIL_BIT;
-        }
-      }
+      record->renderPassInfo = new RenderPassInfo(*pCreateInfo);
     }
     else
     {
@@ -1232,8 +1300,8 @@ VkResult WrappedVulkan::vkCreateRenderPass2(VkDevice device,
 
       VkRenderPassCreateInfo2 info = *pCreateInfo;
 
-      VkAttachmentDescription2 atts[16];
-      RDCASSERT(ARRAY_COUNT(atts) >= (size_t)info.attachmentCount);
+      rdcarray<VkAttachmentDescription2> atts;
+      atts.resize(info.attachmentCount);
 
       // make a version of the render pass that loads from its attachments,
       // so it can be used for replaying a single draw after a render pass
@@ -1245,7 +1313,18 @@ VkResult WrappedVulkan::vkCreateRenderPass2(VkDevice device,
         atts[i].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
       }
 
-      info.pAttachments = atts;
+      info.pAttachments = atts.data();
+
+      // copy the dependencies so we can mutate them
+      rdcarray<VkSubpassDependency2> deps;
+      deps.assign(info.pDependencies, info.dependencyCount);
+
+      info.pDependencies = deps.data();
+
+      {
+        byte *tempMem = GetTempMemory(GetNextPatchSize(info.pNext));
+        CopyNextChainForPatching("VkRenderPassCreateInfo2", tempMem, (VkBaseInStructure *)&info);
+      }
 
       rpinfo.loadRPs.resize(pCreateInfo->subpassCount);
 
@@ -1298,6 +1377,8 @@ bool WrappedVulkan::Serialise_vkCreateQueryPool(SerialiserType &ser, VkDevice de
     {
       ResourceId live = GetResourceManager()->WrapResource(Unwrap(device), pool);
       GetResourceManager()->AddLiveResource(QueryPool, pool);
+
+      m_CreationInfo.m_QueryPool[live].Init(GetResourceManager(), m_CreationInfo, &CreateInfo);
 
       // We fill the query pool with valid but empty data, just so that future copies of query
       // results don't read from invalid data.
@@ -1680,6 +1761,9 @@ void WrappedVulkan::vkDestroyDebugReportCallbackEXT(VkInstance instance,
                                                     VkDebugReportCallbackEXT callback,
                                                     const VkAllocationCallbacks *pAllocator)
 {
+  if(callback == VK_NULL_HANDLE)
+    return;
+
   UserDebugReportCallbackData *user =
       (UserDebugReportCallbackData *)(uintptr_t)NON_DISP_TO_UINT64(callback);
 
@@ -1794,18 +1878,19 @@ static ObjData GetObjData(VkObjectType objType, uint64_t object)
       break;
     }
 
+    // private data slots are not wrapped
+    case VK_OBJECT_TYPE_PRIVATE_DATA_SLOT_EXT:
+      ret.unwrapped = object;
+      break;
+
     // these objects are not supported
-    case VK_OBJECT_TYPE_OBJECT_TABLE_NVX:
-    case VK_OBJECT_TYPE_INDIRECT_COMMANDS_LAYOUT_NVX:
-    case VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_NV:
+    case VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_KHR:
     case VK_OBJECT_TYPE_PERFORMANCE_CONFIGURATION_INTEL:
+    case VK_OBJECT_TYPE_DEFERRED_OPERATION_KHR:
+    case VK_OBJECT_TYPE_INDIRECT_COMMANDS_LAYOUT_NV:
     case VK_OBJECT_TYPE_UNKNOWN:
-    case VK_OBJECT_TYPE_RANGE_SIZE:
     case VK_OBJECT_TYPE_MAX_ENUM: break;
   }
-
-  RDCCOMPILE_ASSERT(VK_OBJECT_TYPE_END_RANGE == VK_OBJECT_TYPE_COMMAND_POOL,
-                    "Enum added to object type");
 
   // if we have a record and no unwrapped object, fetch it out of the record
   if(ret.record && ret.unwrapped == 0)
@@ -1854,24 +1939,16 @@ static ObjData GetObjData(VkDebugReportObjectTypeEXT objType, uint64_t object)
     castType = VK_OBJECT_TYPE_DISPLAY_MODE_KHR;
   else if(objType == VK_DEBUG_REPORT_OBJECT_TYPE_DEBUG_REPORT_CALLBACK_EXT_EXT)
     castType = VK_OBJECT_TYPE_DEBUG_REPORT_CALLBACK_EXT;
-  else if(objType == VK_DEBUG_REPORT_OBJECT_TYPE_OBJECT_TABLE_NVX_EXT)
-    castType = VK_OBJECT_TYPE_OBJECT_TABLE_NVX;
-  else if(objType == VK_DEBUG_REPORT_OBJECT_TYPE_INDIRECT_COMMANDS_LAYOUT_NVX_EXT)
-    castType = VK_OBJECT_TYPE_INDIRECT_COMMANDS_LAYOUT_NVX;
   else if(objType == VK_DEBUG_REPORT_OBJECT_TYPE_VALIDATION_CACHE_EXT_EXT)
     castType = VK_OBJECT_TYPE_VALIDATION_CACHE_EXT;
   else if(objType == VK_DEBUG_REPORT_OBJECT_TYPE_SAMPLER_YCBCR_CONVERSION_EXT)
     castType = VK_OBJECT_TYPE_SAMPLER_YCBCR_CONVERSION;
   else if(objType == VK_DEBUG_REPORT_OBJECT_TYPE_DESCRIPTOR_UPDATE_TEMPLATE_EXT)
     castType = VK_OBJECT_TYPE_DESCRIPTOR_UPDATE_TEMPLATE;
-  else if(objType == VK_DEBUG_REPORT_OBJECT_TYPE_ACCELERATION_STRUCTURE_NV_EXT)
-    castType = VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_NV;
+  else if(objType == VK_DEBUG_REPORT_OBJECT_TYPE_ACCELERATION_STRUCTURE_KHR_EXT)
+    castType = VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_KHR;
 
-  RDCCOMPILE_ASSERT(VK_DEBUG_REPORT_OBJECT_TYPE_END_RANGE_EXT ==
-                        VK_DEBUG_REPORT_OBJECT_TYPE_VALIDATION_CACHE_EXT_EXT,
-                    "Enum added to debug report object type");
-
-  return GetObjData((VkObjectType)objType, object);
+  return GetObjData(castType, object);
 }
 
 template <typename SerialiserType>
@@ -1951,7 +2028,8 @@ bool WrappedVulkan::Serialise_vkDebugMarkerSetObjectNameEXT(
     ResourceDescription &descr = GetResourceDesc(Object);
 
     AddResourceCurChunk(descr);
-    descr.SetCustomName(ObjectName);
+    if(ObjectName[0])
+      descr.SetCustomName(ObjectName);
   }
 
   return true;
@@ -2020,6 +2098,9 @@ void WrappedVulkan::vkDestroyDebugUtilsMessengerEXT(VkInstance instance,
                                                     VkDebugUtilsMessengerEXT messenger,
                                                     const VkAllocationCallbacks *pAllocator)
 {
+  if(messenger == VK_NULL_HANDLE)
+    return;
+
   UserDebugUtilsCallbackData *user =
       (UserDebugUtilsCallbackData *)(uintptr_t)NON_DISP_TO_UINT64(messenger);
 
@@ -2064,7 +2145,8 @@ bool WrappedVulkan::Serialise_vkSetDebugUtilsObjectNameEXT(
     ResourceDescription &descr = GetResourceDesc(Object);
 
     AddResourceCurChunk(descr);
-    descr.SetCustomName(ObjectName);
+    if(ObjectName[0])
+      descr.SetCustomName(ObjectName);
   }
 
   return true;
@@ -2209,4 +2291,40 @@ VkResult WrappedVulkan::vkAcquireProfilingLockKHR(VkDevice device,
 void WrappedVulkan::vkReleaseProfilingLockKHR(VkDevice device)
 {
   ObjDisp(device)->ReleaseProfilingLockKHR(Unwrap(device));
+}
+
+VkResult WrappedVulkan::vkCreatePrivateDataSlotEXT(VkDevice device,
+                                                   const VkPrivateDataSlotCreateInfoEXT *pCreateInfo,
+                                                   const VkAllocationCallbacks *pAllocator,
+                                                   VkPrivateDataSlotEXT *pPrivateDataSlot)
+{
+  // don't even wrap the slot, keep it unwrapped since we don't care about it
+  return ObjDisp(device)->CreatePrivateDataSlotEXT(Unwrap(device), pCreateInfo, pAllocator,
+                                                   pPrivateDataSlot);
+}
+
+void WrappedVulkan::vkDestroyPrivateDataSlotEXT(VkDevice device, VkPrivateDataSlotEXT privateDataSlot,
+                                                const VkAllocationCallbacks *pAllocator)
+{
+  return ObjDisp(device)->DestroyPrivateDataSlotEXT(Unwrap(device), privateDataSlot, pAllocator);
+}
+
+VkResult WrappedVulkan::vkSetPrivateDataEXT(VkDevice device, VkObjectType objectType,
+                                            uint64_t objectHandle,
+                                            VkPrivateDataSlotEXT privateDataSlot, uint64_t data)
+{
+  ObjData objdata = GetObjData(objectType, objectHandle);
+
+  return ObjDisp(device)->SetPrivateDataEXT(Unwrap(device), objectType, objdata.unwrapped,
+                                            privateDataSlot, data);
+}
+
+void WrappedVulkan::vkGetPrivateDataEXT(VkDevice device, VkObjectType objectType,
+                                        uint64_t objectHandle, VkPrivateDataSlotEXT privateDataSlot,
+                                        uint64_t *pData)
+{
+  ObjData objdata = GetObjData(objectType, objectHandle);
+
+  return ObjDisp(device)->GetPrivateDataEXT(Unwrap(device), objectType, objdata.unwrapped,
+                                            privateDataSlot, pData);
 }

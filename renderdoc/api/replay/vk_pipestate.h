@@ -40,15 +40,16 @@ struct BindingElement
   {
     return dynamicallyUsed == o.dynamicallyUsed && viewResourceId == o.viewResourceId &&
            resourceResourceId == o.resourceResourceId && samplerResourceId == o.samplerResourceId &&
-           immutableSampler == o.immutableSampler && viewFormat == o.viewFormat &&
-           swizzle == o.swizzle && firstMip == o.firstMip && firstSlice == o.firstSlice &&
-           numMips == o.numMips && numSlices == o.numSlices && byteOffset == o.byteOffset &&
-           byteSize == o.byteSize && filter == o.filter && addressU == o.addressU &&
-           addressV == o.addressV && addressW == o.addressW && mipBias == o.mipBias &&
-           maxAnisotropy == o.maxAnisotropy && compareFunction == o.compareFunction &&
-           minLOD == o.minLOD && maxLOD == o.maxLOD && borderColor[0] == o.borderColor[0] &&
-           borderColor[1] == o.borderColor[1] && borderColor[2] == o.borderColor[2] &&
-           borderColor[3] == o.borderColor[3] && unnormalized == o.unnormalized;
+           immutableSampler == o.immutableSampler && inlineBlock == o.inlineBlock &&
+           viewFormat == o.viewFormat && swizzle == o.swizzle && firstMip == o.firstMip &&
+           firstSlice == o.firstSlice && numMips == o.numMips && numSlices == o.numSlices &&
+           byteOffset == o.byteOffset && byteSize == o.byteSize && filter == o.filter &&
+           addressU == o.addressU && addressV == o.addressV && addressW == o.addressW &&
+           mipBias == o.mipBias && maxAnisotropy == o.maxAnisotropy &&
+           compareFunction == o.compareFunction && minLOD == o.minLOD && maxLOD == o.maxLOD &&
+           borderColor[0] == o.borderColor[0] && borderColor[1] == o.borderColor[1] &&
+           borderColor[2] == o.borderColor[2] && borderColor[3] == o.borderColor[3] &&
+           unnormalized == o.unnormalized;
   }
   bool operator<(const BindingElement &o) const
   {
@@ -62,6 +63,8 @@ struct BindingElement
       return samplerResourceId < o.samplerResourceId;
     if(!(immutableSampler == o.immutableSampler))
       return immutableSampler < o.immutableSampler;
+    if(!(inlineBlock == o.inlineBlock))
+      return inlineBlock < o.inlineBlock;
     if(!(viewFormat == o.viewFormat))
       return viewFormat < o.viewFormat;
     if(!(swizzle == o.swizzle))
@@ -170,6 +173,9 @@ since single descriptors may only be dynamically skipped by control flow.
   DOCUMENT("For samplers - ``True`` if unnormalized co-ordinates are used in this sampler.");
   bool unnormalized = false;
 
+  DOCUMENT("``True`` if this is an inline uniform block binding.");
+  bool inlineBlock = false;
+
   DOCUMENT(R"(For samplers - the :class:`ResourceId` of the ycbcr conversion object associated with
 this sampler.
 )");
@@ -240,7 +246,23 @@ redundant iteration to determine whether any bindings are present.
 
 For more information see :data:`VKBindingElement.dynamicallyUsed`.
 )");
-  uint32_t dynamicallyUsedCount = 0;
+  uint32_t dynamicallyUsedCount = ~0U;
+  DOCUMENT(R"(Gives the index of the first binding in :data:`binds` that is dynamically used. Useful
+to avoid redundant iteration in very large descriptor arrays with a small subset that are used.
+
+For more information see :data:`VKBindingElement.dynamicallyUsed`.
+)");
+  int32_t firstUsedIndex = 0;
+  DOCUMENT(R"(Gives the index of the first binding in :data:`binds` that is dynamically used. Useful
+to avoid redundant iteration in very large descriptor arrays with a small subset that are used.
+
+.. note::
+  This may be set to a higher value than the number of bindings, if no dynamic use information is
+  available. Ensure that this is an additional check on the bind and the count is still respected.
+
+For more information see :data:`VKBindingElement.dynamicallyUsed`.
+)");
+  int32_t lastUsedIndex = 0x7fffffff;
   DOCUMENT("The :class:`BindType` of this binding.");
   BindType type = BindType::Unknown;
   DOCUMENT("The :class:`ShaderStageMask` where this binding is visible.");
@@ -387,15 +409,13 @@ struct VertexBinding
 
   bool operator==(const VertexBinding &o) const
   {
-    return vertexBufferBinding == o.vertexBufferBinding && byteStride == o.byteStride &&
-           perInstance == o.perInstance && instanceDivisor == o.instanceDivisor;
+    return vertexBufferBinding == o.vertexBufferBinding && perInstance == o.perInstance &&
+           instanceDivisor == o.instanceDivisor;
   }
   bool operator<(const VertexBinding &o) const
   {
     if(!(vertexBufferBinding == o.vertexBufferBinding))
       return vertexBufferBinding < o.vertexBufferBinding;
-    if(!(byteStride == o.byteStride))
-      return byteStride < o.byteStride;
     if(!(perInstance == o.perInstance))
       return perInstance < o.perInstance;
     if(!(instanceDivisor == o.instanceDivisor))
@@ -404,8 +424,6 @@ struct VertexBinding
   }
   DOCUMENT("The vertex binding where data will be sourced from.");
   uint32_t vertexBufferBinding = 0;
-  DOCUMENT("The byte stride between the start of one set of vertex data and the next.");
-  uint32_t byteStride = 0;
   DOCUMENT("``True`` if the vertex data is instance-rate.");
   bool perInstance = false;
   DOCUMENT(R"(The instance rate divisor.
@@ -428,7 +446,8 @@ struct VertexBuffer
 
   bool operator==(const VertexBuffer &o) const
   {
-    return resourceId == o.resourceId && byteOffset == o.byteOffset;
+    return resourceId == o.resourceId && byteOffset == o.byteOffset && byteStride == o.byteStride &&
+           byteSize == o.byteSize;
   }
   bool operator<(const VertexBuffer &o) const
   {
@@ -436,12 +455,20 @@ struct VertexBuffer
       return resourceId < o.resourceId;
     if(!(byteOffset == o.byteOffset))
       return byteOffset < o.byteOffset;
+    if(!(byteStride == o.byteStride))
+      return byteStride < o.byteStride;
+    if(!(byteSize == o.byteSize))
+      return byteSize < o.byteSize;
     return false;
   }
   DOCUMENT("The :class:`ResourceId` of the buffer bound to this slot.");
   ResourceId resourceId;
   DOCUMENT("The byte offset from the start of the buffer to the beginning of the vertex data.");
   uint64_t byteOffset = 0;
+  DOCUMENT("The byte stride between the start of one set of vertex data and the next.");
+  uint32_t byteStride = 0;
+  DOCUMENT("The size of the vertex buffer.");
+  uint32_t byteSize = 0;
 };
 
 DOCUMENT("Describes the fixed-function vertex input fetch setup.");

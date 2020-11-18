@@ -90,6 +90,16 @@ class TestLogger:
         self.dedent()
         self.rawprint("<< Section {}".format(name))
 
+    def inline_file(self, name: str, path: str, with_stdout: bool = False):
+        self.rawprint(">> Raw {}".format(name))
+        self.indent()
+        with open(path) as f:
+            lines = f.readlines()
+            for l in lines:
+                self.rawprint(l.strip(), with_stdout=with_stdout)
+        self.dedent()
+        self.rawprint("<< Raw {}".format(name))
+
     def success(self, message):
         self.rawprint("** " + message)
 

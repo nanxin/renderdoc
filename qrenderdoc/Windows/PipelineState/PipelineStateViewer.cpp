@@ -94,8 +94,6 @@ PipelineStateViewer::PipelineStateViewer(ICaptureContext &ctx, QWidget *parent)
   for(size_t i = 0; i < ARRAY_COUNT(editMenus); i++)
     editMenus[i] = new QMenu(this);
 
-  setToD3D11();
-
   m_Ctx.AddCaptureViewer(this);
 }
 
@@ -613,7 +611,15 @@ void PipelineStateViewer::MakeShaderVariablesHLSL(bool cbufferContents,
       }
     }
 
-    struct_contents += lit("\t%1 %2").arg(v.type.descriptor.name).arg(v.name);
+    if(v.type.descriptor.elements > 1)
+    {
+      struct_contents +=
+          lit("\t%1 %2[%3]").arg(v.type.descriptor.name).arg(v.name).arg(v.type.descriptor.elements);
+    }
+    else
+    {
+      struct_contents += lit("\t%1 %2").arg(v.type.descriptor.name).arg(v.name);
+    }
 
     if((v.byteOffset % 4) != 0)
       qWarning() << "Variable " << QString(v.name) << " is not DWORD aligned";
@@ -637,6 +643,16 @@ void PipelineStateViewer::MakeShaderVariablesHLSL(bool cbufferContents,
       struct_contents += lit(";");
 
     struct_contents += lit("\n");
+  }
+}
+
+void PipelineStateViewer::showEvent(QShowEvent *event)
+{
+  // we didn't set any default pipeline state in case it would be overridden by the persist data.
+  // But if we don't have any persist data and we're about to show, default to D3D11.
+  if(m_Current == NULL)
+  {
+    setToD3D11();
   }
 }
 
@@ -848,7 +864,8 @@ IShaderViewer *PipelineStateViewer::EditShader(ResourceId id, ShaderStage shader
     // remove the replacement on close (we could make this more sophisticated if there
     // was a place to control replaced resources/shaders).
     ctx->Replay().AsyncInvoke([ctx, id](IReplayController *r) {
-      r->RemoveReplacement(id);
+      if(ctx->IsCaptureLoaded())
+        r->RemoveReplacement(id);
       GUIInvoke::call(ctx->GetMainWindow()->Widget(), [ctx, id] { ctx->UnregisterReplacement(id); });
     });
   };
@@ -989,7 +1006,7 @@ void PipelineStateViewer::SetupShaderEditButton(QToolButton *button, ResourceId 
             files.push_back(rdcpair<rdcstr, rdcstr>("pseudocode", editeddisasm));
 
             EditShader(shaderId, shaderDetails->stage, shaderDetails->entryPoint,
-                       ShaderCompileFlags(), ShaderEncoding::Unknown, files);
+                       shaderDetails->debugInfo.compileFlags, ShaderEncoding::Unknown, files);
           });
         });
       }
@@ -1001,7 +1018,7 @@ void PipelineStateViewer::SetupShaderEditButton(QToolButton *button, ResourceId 
         files.push_back(rdcpair<rdcstr, rdcstr>(
             "decompiled_stub.hlsl", GenerateHLSLStub(bindpointMapping, shaderDetails, entry)));
 
-        EditShader(shaderId, shaderDetails->stage, entry, ShaderCompileFlags(),
+        EditShader(shaderId, shaderDetails->stage, entry, shaderDetails->debugInfo.compileFlags,
                    ShaderEncoding::HLSL, files);
       }
 

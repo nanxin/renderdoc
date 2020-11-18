@@ -43,8 +43,10 @@ struct D3D12InitParams
 
   DXGI_ADAPTER_DESC AdapterDesc = {};
 
+  bool usedDXIL = false;
+
   // check if a frame capture section version is supported
-  static const uint64_t CurrentVersion = 0x8;
+  static const uint64_t CurrentVersion = 0x9;
 
   static bool IsSupportedVersion(uint64_t ver);
 };
@@ -338,6 +340,89 @@ struct WrappedDREDSettings : public ID3D12DeviceRemovedExtendedDataSettings
   }
 };
 
+// these aren't documented, they're defined in D3D12TranslationLayer in the d3d11on12 codebase
+typedef enum D3D12_COMPATIBILITY_SHARED_FLAGS {
+  D3D12_COMPATIBILITY_SHARED_FLAG_NONE = 0,
+  D3D12_COMPATIBILITY_SHARED_FLAG_NON_NT_HANDLE = 0x1,
+  D3D12_COMPATIBILITY_SHARED_FLAG_KEYED_MUTEX = 0x2,
+  D3D12_COMPATIBILITY_SHARED_FLAG_9_ON_12 = 0x4
+} D3D12_COMPATIBILITY_SHARED_FLAGS;
+
+typedef enum D3D12_REFLECT_SHARED_PROPERTY {
+  D3D12_REFLECT_SHARED_PROPERTY_D3D11_RESOURCE_FLAGS = 0,
+  D3D12_REFELCT_SHARED_PROPERTY_COMPATIBILITY_SHARED_FLAGS =
+      (D3D12_REFLECT_SHARED_PROPERTY_D3D11_RESOURCE_FLAGS + 1),
+  D3D12_REFLECT_SHARED_PROPERTY_NON_NT_SHARED_HANDLE =
+      (D3D12_REFELCT_SHARED_PROPERTY_COMPATIBILITY_SHARED_FLAGS + 1)
+} D3D12_REFLECT_SHARED_PROPERTY;
+
+typedef struct D3D11_RESOURCE_FLAGS
+{
+  UINT BindFlags;
+  UINT MiscFlags;
+  UINT CPUAccessFlags;
+  UINT StructureByteStride;
+} D3D11_RESOURCE_FLAGS;
+
+MIDL_INTERFACE("8f1c0e3c-fae3-4a82-b098-bfe1708207ff")
+ID3D12CompatibilityDevice : public IUnknown
+{
+public:
+  virtual HRESULT STDMETHODCALLTYPE CreateSharedResource(
+      _In_ const D3D12_HEAP_PROPERTIES *pHeapProperties, D3D12_HEAP_FLAGS HeapFlags,
+      _In_ const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialResourceState,
+      _In_opt_ const D3D12_CLEAR_VALUE *pOptimizedClearValue,
+      _In_opt_ const D3D11_RESOURCE_FLAGS *pFlags11,
+      D3D12_COMPATIBILITY_SHARED_FLAGS CompatibilityFlags,
+      _In_opt_ ID3D12LifetimeTracker *pLifetimeTracker,
+      _In_opt_ ID3D12SwapChainAssistant *pOwningSwapchain, REFIID riid,
+      _COM_Outptr_opt_ void **ppResource) = 0;
+
+  virtual HRESULT STDMETHODCALLTYPE CreateSharedHeap(
+      _In_ const D3D12_HEAP_DESC *pHeapDesc, D3D12_COMPATIBILITY_SHARED_FLAGS CompatibilityFlags,
+      REFIID riid, _COM_Outptr_opt_ void **ppHeap) = 0;
+
+  virtual HRESULT STDMETHODCALLTYPE ReflectSharedProperties(
+      _In_ ID3D12Object * pHeapOrResource, D3D12_REFLECT_SHARED_PROPERTY ReflectType,
+      _Out_writes_bytes_(DataSize) void *pData, UINT DataSize) = 0;
+};
+
+struct WrappedCompatibilityDevice : public ID3D12CompatibilityDevice
+{
+  WrappedID3D12Device &m_pDevice;
+  ID3D12CompatibilityDevice *m_pReal = NULL;
+
+  WrappedCompatibilityDevice(WrappedID3D12Device &dev) : m_pDevice(dev) {}
+  //////////////////////////////
+  // implement IUnknown
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject);
+  ULONG STDMETHODCALLTYPE AddRef();
+  ULONG STDMETHODCALLTYPE Release();
+
+  WriteSerialiser &GetThreadSerialiser();
+
+  //////////////////////////////
+  // implement ID3D12CompatibilityDevice
+  virtual HRESULT STDMETHODCALLTYPE CreateSharedResource(
+      _In_ const D3D12_HEAP_PROPERTIES *pHeapProperties, D3D12_HEAP_FLAGS HeapFlags,
+      _In_ const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialResourceState,
+      _In_opt_ const D3D12_CLEAR_VALUE *pOptimizedClearValue,
+      _In_opt_ const D3D11_RESOURCE_FLAGS *pFlags11,
+      D3D12_COMPATIBILITY_SHARED_FLAGS CompatibilityFlags,
+      _In_opt_ ID3D12LifetimeTracker *pLifetimeTracker,
+      _In_opt_ ID3D12SwapChainAssistant *pOwningSwapchain, REFIID riid,
+      _COM_Outptr_opt_ void **ppResource);
+
+  virtual HRESULT STDMETHODCALLTYPE CreateSharedHeap(_In_ const D3D12_HEAP_DESC *pHeapDesc,
+                                                     D3D12_COMPATIBILITY_SHARED_FLAGS CompatibilityFlags,
+                                                     REFIID riid, _COM_Outptr_opt_ void **ppHeap);
+
+  virtual HRESULT STDMETHODCALLTYPE ReflectSharedProperties(_In_ ID3D12Object *pHeapOrResource,
+                                                            D3D12_REFLECT_SHARED_PROPERTY ReflectType,
+                                                            _Out_writes_bytes_(DataSize) void *pData,
+                                                            UINT DataSize);
+};
+
 class WrappedID3D12CommandQueue;
 
 #define IMPLEMENT_FUNCTION_THREAD_SERIALISED(ret, func, ...) \
@@ -381,6 +466,7 @@ private:
   WrappedDownlevelDevice m_WrappedDownlevel;
   WrappedDRED m_DRED;
   WrappedDREDSettings m_DREDSettings;
+  WrappedCompatibilityDevice m_CompatDevice;
 
   rdcarray<ID3D12CommandAllocator *> m_CommandAllocators;
 
@@ -436,6 +522,8 @@ private:
 
   rdcarray<DebugMessage> m_DebugMessages;
 
+  uint64_t m_TimeBase = 0;
+  double m_TimeFrequency = 1.0f;
   SDFile *m_StructuredFile = NULL;
   SDFile m_StoredStructuredData;
 
@@ -447,14 +535,14 @@ private:
 
   bool m_AppControlledCapture = false;
 
-  bool m_InvalidPSO = false;
-
   Threading::RWLock m_CapTransitionLock;
   CaptureState m_State;
 
   PerformanceTimer m_CaptureTimer;
 
   uint32_t m_SubmitCounter = 0;
+
+  bool m_UsedDXIL = false;
 
   D3D12InitParams m_InitParams;
   uint64_t m_SectionVersion;
@@ -470,13 +558,9 @@ private:
   D3D12ResourceRecord *m_DeviceRecord;
 
   Threading::CriticalSection m_DynDescLock;
-  rdcarray<DynamicDescriptorCopy> m_DynamicDescriptorCopies;
-  rdcarray<DynamicDescriptorWrite> m_DynamicDescriptorWrites;
   rdcarray<D3D12Descriptor> m_DynamicDescriptorRefs;
 
   GPUAddressRangeTracker m_GPUAddresses;
-
-  void FlushPendingDescriptorWrites();
 
   // used both on capture and replay side to track resource states. Only locked
   // in capture
@@ -484,8 +568,6 @@ private:
   Threading::CriticalSection m_ResourceStatesLock;
 
   std::set<ResourceId> m_Cubemaps;
-
-  std::map<ResourceId, rdcstr> m_ResourceNames;
 
   // only valid on replay
   std::map<ResourceId, WrappedID3D12Resource1 *> *m_ResourceList = NULL;
@@ -519,8 +601,7 @@ private:
   static std::map<ID3D12Device *, WrappedID3D12Device *> m_DeviceWrappers;
 
 public:
-  static const int AllocPoolCount = 4;
-  ALLOCATE_WITH_WRAPPED_POOL(WrappedID3D12Device, AllocPoolCount);
+  ALLOCATE_WITH_WRAPPED_POOL(WrappedID3D12Device);
 
   WrappedID3D12Device(ID3D12Device *realDevice, D3D12InitParams params, bool enabledDebugLayer);
   bool IsDebugLayerEnabled() const { return m_debugLayerEnabled; }
@@ -573,7 +654,7 @@ public:
   void AddResourceCurChunk(ResourceDescription &descr);
   void AddResourceCurChunk(ResourceId id);
 
-  const rdcstr &GetResourceName(ResourceId id) { return m_ResourceNames[id]; }
+  bool UsedDXIL() { return m_UsedDXIL; }
   rdcarray<D3D12_RESOURCE_STATES> &GetSubresourceStates(ResourceId id)
   {
     return m_ResourceStates[id];
@@ -685,8 +766,12 @@ public:
     m_State = CaptureState::StructuredExport;
   }
   SDFile &GetStructuredFile() { return *m_StructuredFile; }
+  uint64_t GetTimeBase() { return m_TimeBase; }
+  double GetTimeFrequency() { return m_TimeFrequency; }
   // interface for DXGI
   virtual IUnknown *GetRealIUnknown() { return GetReal(); }
+  void *GetFrameCapturerDevice() { return (ID3D12Device *)this; }
+  virtual IFrameCapturer *GetFrameCapturer() { return this; }
   virtual IID GetBackbufferUUID() { return __uuidof(ID3D12Resource); }
   virtual bool IsDeviceUUID(REFIID iid)
   {

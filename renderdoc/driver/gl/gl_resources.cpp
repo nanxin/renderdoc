@@ -60,7 +60,7 @@ void DoSerialise(SerialiserType &ser, GLResource &el)
   ResourceId id;
 
   if(ser.IsWriting() && rm)
-    id = rm->GetID(el);
+    id = rm->GetResID(el);
 
   DoSerialise(ser, id);
 
@@ -567,6 +567,10 @@ int GetNumMips(GLenum target, GLuint tex, GLuint w, GLuint h, GLuint d)
 {
   int mips = 1;
 
+  // renderbuffers don't have mips
+  if(target == eGL_RENDERBUFFER)
+    return 1;
+
   GLint immut = 0;
   GL.glGetTextureParameterivEXT(tex, target, eGL_TEXTURE_IMMUTABLE_FORMAT, &immut);
 
@@ -696,9 +700,9 @@ rdcstr GetTextureCompleteStatus(GLenum target, GLuint tex, GLuint sampler)
     * The minification filter requires a mipmap (is neither NEAREST nor LINEAR), and the texture is
       not mipmap complete. [RULE_12]
     * Any of
-        – The internal format of the texture is integer (see table 8.12). [RULE_13]
-        – The internal format is STENCIL_INDEX. [RULE_14]
-        – The internal format is DEPTH_STENCIL, and the value of DEPTH_STENCIL_TEXTURE_MODE for the
+        - The internal format of the texture is integer (see table 8.12). [RULE_13]
+        - The internal format is STENCIL_INDEX. [RULE_14]
+        - The internal format is DEPTH_STENCIL, and the value of DEPTH_STENCIL_TEXTURE_MODE for the
           texture is STENCIL_INDEX. [RULE_15]
       and either the magnification filter is not NEAREST, or the minification filter is neither
       NEAREST nor NEAREST_MIPMAP_NEAREST

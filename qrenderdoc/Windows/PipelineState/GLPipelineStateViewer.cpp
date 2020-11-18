@@ -472,16 +472,16 @@ void GLPipelineStateViewer::setEmptyRow(RDTreeWidgetItem *node)
 }
 
 void GLPipelineStateViewer::setViewDetails(RDTreeWidgetItem *node, TextureDescription *tex,
-                                           uint32_t firstMip, uint32_t numMips,
-                                           const rdcstr &completeStatus)
+                                           uint32_t firstMip, uint32_t numMips, uint32_t firstSlice,
+                                           uint32_t numSlices, const rdcstr &completeStatus)
 {
-  if((tex->mips > 1 && firstMip > 0) || numMips < tex->mips || !completeStatus.isEmpty())
+  QString text;
+
+  if(!completeStatus.isEmpty())
+    text += tr("The texture is incomplete:\n%1\n\n").arg(completeStatus);
+
+  if((tex->mips > 1 && firstMip > 0) || numMips < tex->mips)
   {
-    QString text;
-
-    if(!completeStatus.isEmpty())
-      text += tr("The texture is incomplete:\n%1\n\n").arg(completeStatus);
-
     if(numMips == 1)
       text += tr("The texture has %1 mips, the view covers mip %2.").arg(tex->mips).arg(firstMip);
     else
@@ -489,7 +489,24 @@ void GLPipelineStateViewer::setViewDetails(RDTreeWidgetItem *node, TextureDescri
                   .arg(tex->mips)
                   .arg(firstMip)
                   .arg(firstMip + numMips - 1);
+  }
 
+  if((tex->arraysize > 1 && firstSlice > 0) || numSlices < tex->arraysize)
+  {
+    if(numSlices == 1)
+      text +=
+          tr("The texture has %1 slices, the view covers slice %2.").arg(tex->arraysize).arg(firstSlice);
+    else
+      text += tr("The texture has %1 slices, the view covers slices %2-%3.")
+                  .arg(tex->arraysize)
+                  .arg(firstSlice)
+                  .arg(firstSlice + numSlices - 1);
+  }
+
+  text = text.trimmed();
+
+  if(!text.isEmpty())
+  {
     node->setToolTip(text);
 
     node->setBackgroundColor(QColor(127, 255, 212));
@@ -771,7 +788,7 @@ void GLPipelineStateViewer::setShaderState(const GLPipe::Shader &stage, RDLabel 
         node->setTag(QVariant::fromValue(r.resourceId));
 
         if(tex)
-          setViewDetails(node, tex, r.firstMip, r.numMips, r.completeStatus);
+          setViewDetails(node, tex, r.firstMip, r.numMips, 0, ~0U, r.completeStatus);
 
         if(!filledSlot)
           setEmptyRow(node);
@@ -1140,7 +1157,8 @@ void GLPipelineStateViewer::setShaderState(const GLPipe::Shader &stage, RDLabel 
       node->setTag(tag);
 
       if(im && tex)
-        setViewDetails(node, tex, im->mipLevel, 1);
+        setViewDetails(node, tex, im->mipLevel, 1, im->layered ? 0 : im->slice,
+                       im->layered ? ~0U : 1U);
 
       if(!filledSlot)
         setEmptyRow(node);
@@ -1274,11 +1292,15 @@ void GLPipelineStateViewer::setState()
 
       if(showNode(usedSlot, filledSlot))
       {
-        QString genericVal = tr("Generic=") + MakeGenericValueString(compCount, compType, a);
+        QString format = QString(a.format.Name());
+
+        if(!a.enabled)
+          format = tr("Generic=") + MakeGenericValueString(compCount, compType, a);
+        else if(a.floatCast)
+          format += tr(" Cast to float");
 
         RDTreeWidgetItem *node =
-            new RDTreeWidgetItem({i, a.enabled ? tr("Enabled") : tr("Disabled"), name,
-                                  a.enabled ? QString(a.format.Name()) : genericVal,
+            new RDTreeWidgetItem({i, a.enabled ? tr("Enabled") : tr("Disabled"), name, format,
                                   a.vertexBufferSlot, a.byteOffset, QString()});
 
         node->setTag(i);
@@ -1873,7 +1895,7 @@ void GLPipelineStateViewer::setState()
         if(tex)
         {
           if(r)
-            setViewDetails(node, tex, r->mipLevel, 1);
+            setViewDetails(node, tex, r->mipLevel, 1, r->slice, r->numSlices);
           node->setTag(QVariant::fromValue(p));
         }
 
@@ -1902,10 +1924,22 @@ void GLPipelineStateViewer::setState()
         state.framebuffer.drawFBO.stencilAttachment.mipLevel,
     };
 
+    uint32_t dsSlice[] = {
+        state.framebuffer.drawFBO.depthAttachment.slice,
+        state.framebuffer.drawFBO.stencilAttachment.slice,
+    };
+
+    uint32_t dsNumSlices[] = {
+        state.framebuffer.drawFBO.depthAttachment.numSlices,
+        state.framebuffer.drawFBO.stencilAttachment.numSlices,
+    };
+
     for(int dsIdx = 0; dsIdx < 2; dsIdx++)
     {
       ResourceId ds = dsObjects[dsIdx];
       uint32_t mip = dsMips[dsIdx];
+      uint32_t slice = dsSlice[dsIdx];
+      uint32_t numSlices = dsNumSlices[dsIdx];
 
       bool filledSlot = (ds != ResourceId());
       bool usedSlot = filledSlot;
@@ -1953,7 +1987,7 @@ void GLPipelineStateViewer::setState()
 
         if(tex)
         {
-          setViewDetails(node, tex, mip, 1);
+          setViewDetails(node, tex, mip, 1, slice, numSlices);
           node->setTag(QVariant::fromValue(ds));
         }
 
@@ -2108,11 +2142,10 @@ void GLPipelineStateViewer::setState()
   else
   {
     bool raster = true;
-    bool fbo = true;
 
     if(state.vertexProcessing.discard)
     {
-      raster = fbo = false;
+      raster = false;
     }
 
     if(state.geometryShader.shaderResourceId == ResourceId() && state.transformFeedback.active)
@@ -2128,9 +2161,7 @@ void GLPipelineStateViewer::setState()
         {true, true, state.tessControlShader.shaderResourceId != ResourceId(),
          state.tessEvalShader.shaderResourceId != ResourceId(),
          state.geometryShader.shaderResourceId != ResourceId() || state.transformFeedback.active,
-         raster,
-         !state.vertexProcessing.discard && state.fragmentShader.shaderResourceId != ResourceId(),
-         fbo, false});
+         raster, raster && state.fragmentShader.shaderResourceId != ResourceId(), raster, false});
   }
 }
 

@@ -107,6 +107,16 @@ class RDCFile;
 
 class AMDRGPControl;
 
+struct RenderOutputSubresource
+{
+  RenderOutputSubresource(uint32_t mip, uint32_t slice, uint32_t numSlices)
+      : mip(mip), slice(slice), numSlices(numSlices)
+  {
+  }
+
+  uint32_t mip, slice, numSlices;
+};
+
 // these two interfaces define what an API driver implementation must provide
 // to the replay. At minimum it must implement IRemoteDriver which contains
 // all of the functionality that cannot be achieved elsewhere. An IReplayDriver
@@ -138,7 +148,7 @@ public:
   virtual ShaderReflection *GetShader(ResourceId pipeline, ResourceId shader,
                                       ShaderEntryPoint entry) = 0;
 
-  virtual rdcarray<rdcstr> GetDisassemblyTargets() = 0;
+  virtual rdcarray<rdcstr> GetDisassemblyTargets(bool withPipeline) = 0;
   virtual rdcstr DisassembleShader(ResourceId pipeline, const ShaderReflection *refl,
                                    const rdcstr &target) = 0;
 
@@ -198,9 +208,8 @@ public:
   virtual rdcarray<ShaderDebugState> ContinueDebug(ShaderDebugger *debugger) = 0;
   virtual void FreeDebugger(ShaderDebugger *debugger) = 0;
 
-  virtual ResourceId RenderOverlay(ResourceId texid, const Subresource &sub, CompType typeCast,
-                                   FloatVector clearCol, DebugOverlay overlay, uint32_t eventId,
-                                   const rdcarray<uint32_t> &passEvents) = 0;
+  virtual ResourceId RenderOverlay(ResourceId texid, FloatVector clearCol, DebugOverlay overlay,
+                                   uint32_t eventId, const rdcarray<uint32_t> &passEvents) = 0;
 
   virtual bool IsRenderOutput(ResourceId id) = 0;
 
@@ -261,7 +270,7 @@ public:
                                        CompType typeCast) = 0;
   virtual void FreeCustomShader(ResourceId id) = 0;
 
-  virtual void RenderCheckerboard() = 0;
+  virtual void RenderCheckerboard(FloatVector dark, FloatVector light) = 0;
 
   virtual void RenderHighlightBox(float w, float h, float scale) = 0;
 
@@ -335,3 +344,20 @@ struct HighlightCache
 };
 
 extern const Vec4f colorRamp[22];
+
+enum class DiscardType : int
+{
+  RenderPassLoad,         // discarded on renderpass load
+  RenderPassStore,        // discarded after renderpass store
+  UndefinedTransition,    // transition from undefined layout
+  DiscardCall,            // explicit Discard() type API call
+  InvalidateCall,         // explicit Invalidate() type API call
+  Count,
+};
+
+static constexpr uint32_t DiscardPatternWidth = 64;
+static constexpr uint32_t DiscardPatternHeight = 8;
+
+// returns a pattern to fill the texture with
+bytebuf GetDiscardPattern(DiscardType type, const ResourceFormat &fmt, uint32_t rowPitch = 1,
+                          bool invert = false);

@@ -38,11 +38,66 @@
 
 #include "data/hlsl/hlsl_cbuffers.h"
 
-ResourceId D3D11Replay::RenderOverlay(ResourceId texid, const Subresource &sub, CompType typeCast,
-                                      FloatVector clearCol, DebugOverlay overlay, uint32_t eventId,
-                                      const rdcarray<uint32_t> &passEvents)
+static void SetRTVDesc(D3D11_RENDER_TARGET_VIEW_DESC &rtDesc, const D3D11_TEXTURE2D_DESC &texDesc,
+                       const RenderOutputSubresource &sub)
 {
-  TextureShaderDetails details = GetDebugManager()->GetShaderDetails(texid, typeCast, false);
+  if(texDesc.ArraySize > 1)
+  {
+    if(texDesc.SampleDesc.Count > 1)
+    {
+      rtDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DMSARRAY;
+      rtDesc.Texture2DMSArray.FirstArraySlice = sub.slice;
+      rtDesc.Texture2DMSArray.ArraySize = sub.numSlices;
+    }
+    else
+    {
+      rtDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+      rtDesc.Texture2DArray.FirstArraySlice = sub.slice;
+      rtDesc.Texture2DArray.ArraySize = sub.numSlices;
+      rtDesc.Texture2DArray.MipSlice = sub.mip;
+    }
+  }
+  else
+  {
+    rtDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+    rtDesc.Texture2D.MipSlice = sub.mip;
+
+    if(texDesc.SampleDesc.Count > 1)
+      rtDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DMS;
+  }
+}
+
+RenderOutputSubresource D3D11Replay::GetRenderOutputSubresource(ResourceId id)
+{
+  id = m_pDevice->GetResourceManager()->GetOriginalID(id);
+
+  for(size_t i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; i++)
+  {
+    const D3D11Pipe::View &rt = m_CurPipelineState.outputMerger.renderTargets[i];
+
+    if(rt.viewResourceId == id || rt.resourceResourceId == id)
+      return RenderOutputSubresource(rt.firstMip, rt.firstSlice, rt.numSlices);
+  }
+
+  const D3D11Pipe::View &dsv = m_CurPipelineState.outputMerger.depthTarget;
+  if(dsv.viewResourceId == id || dsv.resourceResourceId == id)
+    return RenderOutputSubresource(dsv.firstMip, dsv.firstSlice, dsv.numSlices);
+
+  return RenderOutputSubresource(~0U, ~0U, 0);
+}
+
+ResourceId D3D11Replay::RenderOverlay(ResourceId texid, FloatVector clearCol, DebugOverlay overlay,
+                                      uint32_t eventId, const rdcarray<uint32_t> &passEvents)
+{
+  TextureShaderDetails details = GetDebugManager()->GetShaderDetails(texid, CompType::Float, false);
+
+  RenderOutputSubresource sub = GetRenderOutputSubresource(texid);
+
+  if(sub.slice == ~0U)
+  {
+    RDCERR("Rendering overlay for %s couldn't find output to get subresource.", ToStr(texid).c_str());
+    sub = RenderOutputSubresource(0, 0, 1);
+  }
 
   D3D11MarkerRegion renderoverlay(StringFormat::Fmt("RenderOverlay %d", overlay));
 
@@ -52,7 +107,7 @@ ResourceId D3D11Replay::RenderOverlay(ResourceId texid, const Subresource &sub, 
   realTexDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
   realTexDesc.Usage = D3D11_USAGE_DEFAULT;
   realTexDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-  realTexDesc.ArraySize = 1;
+  realTexDesc.ArraySize = details.texArraySize;
   realTexDesc.MipLevels = details.texMips;
   realTexDesc.CPUAccessFlags = 0;
   realTexDesc.MiscFlags = 0;
@@ -80,6 +135,7 @@ ResourceId D3D11Replay::RenderOverlay(ResourceId texid, const Subresource &sub, 
   // need to recreate backing custom render tex
   if(realTexDesc.Width != customTexDesc.Width || realTexDesc.Height != customTexDesc.Height ||
      realTexDesc.Format != customTexDesc.Format || realTexDesc.MipLevels != customTexDesc.MipLevels ||
+     realTexDesc.ArraySize != customTexDesc.ArraySize ||
      realTexDesc.SampleDesc.Count != customTexDesc.SampleDesc.Count ||
      realTexDesc.SampleDesc.Quality != customTexDesc.SampleDesc.Quality)
   {
@@ -144,26 +200,37 @@ ResourceId D3D11Replay::RenderOverlay(ResourceId texid, const Subresource &sub, 
     SAFE_RELEASE(realDepth);
   }
 
-  D3D11_RENDER_TARGET_VIEW_DESC rtDesc;
-  rtDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+  ID3D11RenderTargetView *rtv = NULL;
+  D3D11_RENDER_TARGET_VIEW_DESC rtDesc = {};
   rtDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-  rtDesc.Texture2D.MipSlice = sub.mip;
 
-  if(realTexDesc.SampleDesc.Count > 1 || realTexDesc.SampleDesc.Quality > 0)
+  // clear all mips and all slices first
+  for(UINT mip = 0; mip < realTexDesc.MipLevels; mip++)
   {
-    rtDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DMS;
+    SetRTVDesc(rtDesc, realTexDesc, RenderOutputSubresource(mip, 0, realTexDesc.ArraySize));
+
+    HRESULT hr = m_pDevice->CreateRenderTargetView(wrappedCustomRenderTex, &rtDesc, &rtv);
+    if(FAILED(hr))
+    {
+      RDCERR("Failed to create custom render tex for mip %u RTV HRESULT: %s", mip, ToStr(hr).c_str());
+    }
+    else
+    {
+      FLOAT black[] = {0.0f, 0.0f, 0.0f, 0.0f};
+      m_pImmediateContext->ClearRenderTargetView(rtv, black);
+    }
+
+    SAFE_RELEASE(rtv);
   }
 
-  ID3D11RenderTargetView *rtv = NULL;
+  SetRTVDesc(rtDesc, realTexDesc, sub);
+
   HRESULT hr = m_pDevice->CreateRenderTargetView(wrappedCustomRenderTex, &rtDesc, &rtv);
   if(FAILED(hr))
   {
     RDCERR("Failed to create custom render tex RTV HRESULT: %s", ToStr(hr).c_str());
     return m_Overlay.resourceId;
   }
-
-  FLOAT black[] = {0.0f, 0.0f, 0.0f, 0.0f};
-  m_pImmediateContext->ClearRenderTargetView(rtv, black);
 
   if(renderDepth)
   {
@@ -290,6 +357,7 @@ ResourceId D3D11Replay::RenderOverlay(ResourceId texid, const Subresource &sub, 
       {
         origdesc.CullMode = D3D11_CULL_BACK;
         origdesc.FrontCounterClockwise = FALSE;
+        origdesc.ScissorEnable = FALSE;
       }
 
       SAFE_RELEASE(rs);
@@ -305,7 +373,7 @@ ResourceId D3D11Replay::RenderOverlay(ResourceId texid, const Subresource &sub, 
       rdesc.DepthBiasClamp = D3D11_DEFAULT_DEPTH_BIAS_CLAMP;
       rdesc.SlopeScaledDepthBias = D3D11_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
       rdesc.DepthClipEnable = FALSE;
-      rdesc.ScissorEnable = FALSE;
+      rdesc.ScissorEnable = origdesc.ScissorEnable;
       rdesc.MultisampleEnable = FALSE;
       rdesc.AntialiasedLineEnable = FALSE;
 
@@ -355,27 +423,22 @@ ResourceId D3D11Replay::RenderOverlay(ResourceId texid, const Subresource &sub, 
   }
   else if(overlay == DebugOverlay::ViewportScissor)
   {
-    m_pImmediateContext->VSSetShader(m_Overlay.FullscreenVS, NULL, 0);
-    m_pImmediateContext->HSSetShader(NULL, NULL, 0);
-    m_pImmediateContext->DSSetShader(NULL, NULL, 0);
-    m_pImmediateContext->GSSetShader(NULL, NULL, 0);
-    m_pImmediateContext->PSSetShader(m_General.CheckerboardPS, NULL, 0);
-    m_pImmediateContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    m_pImmediateContext->IASetInputLayout(NULL);
+    m_pImmediateContext->OMSetBlendState(NULL, NULL, 0xffffffff);
+    m_pImmediateContext->PSSetShader(m_General.FixedColPS, NULL, 0);
 
-    D3D11_RASTERIZER_DESC origdesc;
+    D3D11_RASTERIZER_DESC origdesc = {};
 
     {
-      ID3D11RasterizerState *rs = NULL;
+      ID3D11RasterizerState *origRS = NULL;
 
-      m_pImmediateContext->RSGetState(&rs);
+      m_pImmediateContext->RSGetState(&origRS);
 
-      if(rs)
-        rs->GetDesc(&origdesc);
+      if(origRS)
+        origRS->GetDesc(&origdesc);
       else
         origdesc.ScissorEnable = FALSE;
 
-      SAFE_RELEASE(rs);
+      SAFE_RELEASE(origRS);
     }
 
     dsDesc.DepthEnable = FALSE;
@@ -389,7 +452,70 @@ ResourceId D3D11Replay::RenderOverlay(ResourceId texid, const Subresource &sub, 
       return m_Overlay.resourceId;
     }
 
+    ID3D11RasterizerState *rs = NULL;
+    ID3D11RasterizerState *rsScissorOn = NULL;
+    {
+      D3D11_RASTERIZER_DESC rdesc;
+
+      rdesc.FillMode = D3D11_FILL_SOLID;
+      rdesc.CullMode = D3D11_CULL_NONE;
+      rdesc.FrontCounterClockwise = FALSE;
+      rdesc.DepthBias = D3D11_DEFAULT_DEPTH_BIAS;
+      rdesc.DepthBiasClamp = D3D11_DEFAULT_DEPTH_BIAS_CLAMP;
+      rdesc.SlopeScaledDepthBias = D3D11_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
+      rdesc.DepthClipEnable = FALSE;
+      rdesc.ScissorEnable = FALSE;
+      rdesc.MultisampleEnable = FALSE;
+      rdesc.AntialiasedLineEnable = FALSE;
+
+      hr = m_pDevice->CreateRasterizerState(&rdesc, &rs);
+      if(FAILED(hr))
+      {
+        RDCERR("Failed to create drawcall rast state HRESULT: %s", ToStr(hr).c_str());
+        return m_Overlay.resourceId;
+      }
+
+      rdesc.ScissorEnable = TRUE;
+
+      hr = m_pDevice->CreateRasterizerState(&rdesc, &rsScissorOn);
+      if(FAILED(hr))
+      {
+        RDCERR("Failed to create drawcall rast state HRESULT: %s", ToStr(hr).c_str());
+        return m_Overlay.resourceId;
+      }
+    }
+
+    float clearColour[] = {0.0f, 0.0f, 0.0f, 0.0f};
+    m_pImmediateContext->ClearRenderTargetView(rtv, clearColour);
+
+    m_pImmediateContext->RSSetState(rs);
     m_pImmediateContext->OMSetDepthStencilState(os, 0);
+
+    float overlayConsts[] = {1.0f, 0.0f, 0.0f, 1.0f};
+    ID3D11Buffer *buf = GetDebugManager()->MakeCBuffer(overlayConsts, sizeof(overlayConsts));
+
+    m_pImmediateContext->PSSetConstantBuffers(0, 1, &buf);
+
+    m_pDevice->ReplayLog(0, eventId, eReplay_OnlyDraw);
+
+    overlayConsts[0] = 0.0f;
+    overlayConsts[1] = 1.0f;
+
+    buf = GetDebugManager()->MakeCBuffer(overlayConsts, sizeof(overlayConsts));
+
+    m_pImmediateContext->PSSetConstantBuffers(0, 1, &buf);
+
+    m_pImmediateContext->RSSetState(rsScissorOn);
+
+    m_pDevice->ReplayLog(0, eventId, eReplay_OnlyDraw);
+
+    m_pImmediateContext->VSSetShader(m_Overlay.FullscreenVS, NULL, 0);
+    m_pImmediateContext->HSSetShader(NULL, NULL, 0);
+    m_pImmediateContext->DSSetShader(NULL, NULL, 0);
+    m_pImmediateContext->GSSetShader(NULL, NULL, 0);
+    m_pImmediateContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    m_pImmediateContext->IASetInputLayout(NULL);
+    m_pImmediateContext->PSSetShader(m_General.CheckerboardPS, NULL, 0);
 
     D3D11_BLEND_DESC blendDesc;
     RDCEraseEl(blendDesc);
@@ -411,32 +537,6 @@ ResourceId D3D11Replay::RenderOverlay(ResourceId texid, const Subresource &sub, 
     float blendwhite[] = {1.0f, 1.0f, 1.0f, 1.0f};
     m_pImmediateContext->OMSetBlendState(bs, blendwhite, 0xffffffff);
 
-    ID3D11RasterizerState *rs = NULL;
-    {
-      D3D11_RASTERIZER_DESC rdesc;
-
-      rdesc.FillMode = D3D11_FILL_SOLID;
-      rdesc.CullMode = D3D11_CULL_NONE;
-      rdesc.FrontCounterClockwise = FALSE;
-      rdesc.DepthBias = D3D11_DEFAULT_DEPTH_BIAS;
-      rdesc.DepthBiasClamp = D3D11_DEFAULT_DEPTH_BIAS_CLAMP;
-      rdesc.SlopeScaledDepthBias = D3D11_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
-      rdesc.DepthClipEnable = FALSE;
-      rdesc.ScissorEnable = FALSE;
-      rdesc.MultisampleEnable = FALSE;
-      rdesc.AntialiasedLineEnable = FALSE;
-
-      hr = m_pDevice->CreateRasterizerState(&rdesc, &rs);
-      if(FAILED(hr))
-      {
-        RDCERR("Failed to create drawcall rast state HRESULT: %s", ToStr(hr).c_str());
-        return m_Overlay.resourceId;
-      }
-    }
-
-    float clearColour[] = {0.0f, 0.0f, 0.0f, 0.0f};
-    m_pImmediateContext->ClearRenderTargetView(rtv, clearColour);
-
     m_pImmediateContext->RSSetState(rs);
 
     CheckerboardCBuffer pixelData = {0};
@@ -450,13 +550,13 @@ ResourceId D3D11Replay::RenderOverlay(ResourceId texid, const Subresource &sub, 
 
     // set primary/secondary to the same to 'disable' checkerboard
     pixelData.PrimaryColor = pixelData.SecondaryColor = Vec4f(0.1f, 0.1f, 0.1f, 1.0f);
-    pixelData.InnerColor = Vec4f(0.2f, 0.2f, 0.9f, 0.7f);
+    pixelData.InnerColor = Vec4f(0.2f, 0.2f, 0.9f, 0.4f);
 
     // set viewport rect
     pixelData.RectPosition = Vec2f(views[0].TopLeftX, views[0].TopLeftY);
     pixelData.RectSize = Vec2f(views[0].Width, views[0].Height);
 
-    ID3D11Buffer *buf = GetDebugManager()->MakeCBuffer(&pixelData, sizeof(pixelData));
+    buf = GetDebugManager()->MakeCBuffer(&pixelData, sizeof(pixelData));
 
     m_pImmediateContext->PSSetConstantBuffers(0, 1, &buf);
 
@@ -498,6 +598,7 @@ ResourceId D3D11Replay::RenderOverlay(ResourceId texid, const Subresource &sub, 
 
     SAFE_RELEASE(os);
     SAFE_RELEASE(rs);
+    SAFE_RELEASE(rsScissorOn);
     SAFE_RELEASE(bs);
   }
   else if(overlay == DebugOverlay::Wireframe)
@@ -611,7 +712,7 @@ ResourceId D3D11Replay::RenderOverlay(ResourceId texid, const Subresource &sub, 
           m_pImmediateContext->ClearRenderTargetView(state.OM.RenderTargets[i], &clearCol.x);
 
       // Try to clear depth as well, to help debug shadow rendering
-      if(state.OM.DepthView && IsDepthFormat(details.srvFormat))
+      if(state.OM.DepthView && IsDepthFormat(details.texFmt))
       {
         if(state.OM.DepthStencilState)
         {
@@ -1048,6 +1149,10 @@ ResourceId D3D11Replay::RenderOverlay(ResourceId texid, const Subresource &sub, 
         m_pImmediateContext->OMSetDepthStencilState(NULL, 0);
         m_pImmediateContext->OMSetBlendState(NULL, NULL, 0xffffffff);
         m_pImmediateContext->RSSetState(m_General.RasterState);
+
+        D3D11_VIEWPORT view = {0.0f, 0.0f, (float)realTexDesc.Width, (float)realTexDesc.Height,
+                               0.0f, 1.0f};
+        m_pImmediateContext->RSSetViewports(1, &view);
 
         float clearColour[] = {0.0f, 0.0f, 0.0f, 0.0f};
         m_pImmediateContext->ClearRenderTargetView(rtv, clearColour);

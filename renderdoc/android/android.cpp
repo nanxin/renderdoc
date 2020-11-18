@@ -559,9 +559,20 @@ struct AndroidRemoteServer : public RemoteServer
   {
     ResetAndroidSettings();
 
+    // enable profiling to measure hardware counters
+    Android::adbExecCommand(m_deviceID, "shell setprop security.perf_harden 0");
+
     LazilyStartLogcatThread();
 
     return RemoteServer::OpenCapture(proxyid, filename, opts, progress);
+  }
+
+  virtual void CloseCapture(IReplayController *rend) override
+  {
+    // disable profiling
+    Android::adbExecCommand(m_deviceID, "shell setprop security.perf_harden 1");
+
+    RemoteServer::CloseCapture(rend);
   }
 
   virtual rdcstr GetHomeFolder() override { return ""; }
@@ -575,6 +586,9 @@ struct AndroidRemoteServer : public RemoteServer
 
       rdcarray<rdcstr> lines;
       split(adbStdout, lines, '\n');
+      for(rdcstr &line : lines)
+        while(!line.empty() && isspace(line.back()))
+          line.pop_back();
 
       rdcarray<PathEntry> packages;
       for(const rdcstr &line : lines)
@@ -599,6 +613,9 @@ struct AndroidRemoteServer : public RemoteServer
       adbStdout = Android::adbExecCommand(m_deviceID, "shell pm list packages -s").strStdout;
 
       split(adbStdout, lines, '\n');
+      for(rdcstr &line : lines)
+        while(!line.empty() && isspace(line.back()))
+          line.pop_back();
 
       for(const rdcstr &line : lines)
       {
@@ -617,26 +634,38 @@ struct AndroidRemoteServer : public RemoteServer
       adbStdout = Android::adbExecCommand(m_deviceID, "shell dumpsys package").strStdout;
 
       split(adbStdout, lines, '\n');
+      for(rdcstr &line : lines)
+        while(!line.empty() && isspace(line.back()))
+          line.pop_back();
 
       // not everything that looks like it's an activity is actually an activity, because of course
       // nothing is ever simple on Android. Watch out for the activity sections and only parse
       // activities found within them.
 
       bool activitySection = false;
+      bool nonDataSection = false;
 
       for(const rdcstr &line : lines)
       {
-        // the activity section ends when we reach a line that starts at column 0, which is the
-        // start of a section. Reset the flag to false
-        if(!isspace(line[0]))
-          activitySection = false;
-
         // if this is the start of the activity section, set the flag to true
         if(line.contains("Activity Resolver Table:"))
           activitySection = true;
 
+        // the activity section ends when we reach a line that starts at column 0, which is the
+        // start of a section. Reset the flag to false
+        else if(!line.empty() && !isspace(line[0]))
+          activitySection = false;
+
+        // if this is the start of the non-data action section, set the flag to true
+        if(line.contains("Non-Data Actions:"))
+          nonDataSection = true;
+
+        // a blank line indicates the end of the non-data action section
+        else if(line.empty())
+          nonDataSection = false;
+
         // if the flag is false, skip
-        if(!activitySection)
+        if(!activitySection || !nonDataSection)
           continue;
 
         // quick check, look for a /
@@ -1096,7 +1125,7 @@ ExecuteResult AndroidRemoteServer::ExecuteAndInject(const char *a, const char *w
   rdcstr intentArgs = c && c[0] ? c : "";
 
   // we spin up a thread to Ping() every second, since starting a package can block for a long time.
-  volatile int32_t done = 0;
+  int32_t done = 0;
   Threading::ThreadHandle pingThread = Threading::CreateThread([&done, this]() {
     Threading::SetCurrentThreadName("Android Ping");
 
@@ -1135,6 +1164,7 @@ ExecuteResult AndroidRemoteServer::ExecuteAndInject(const char *a, const char *w
     Android::adbExecCommand(m_deviceID, StringFormat::Fmt("forward --remove tcp:%i", jdwpPort));
     // force stop the package if it was running before
     Android::adbExecCommand(m_deviceID, "shell am force-stop " + processName);
+    Android::adbExecCommand(m_deviceID, "shell setprop debug.vulkan.layers :", ".", true);
 
     bool hookWithJDWP = true;
 
@@ -1148,7 +1178,27 @@ ExecuteResult AndroidRemoteServer::ExecuteAndInject(const char *a, const char *w
       // set up environment variables for the package, and point to ourselves for vulkan and GLES
       // layers
       rdcstr installedABI = Android::DetermineInstalledABI(m_deviceID, packageName);
-      rdcstr layerPackage = GetRenderDocPackageForABI(Android::GetABI(installedABI));
+
+      Android::ABI abi = Android::ABI::unknown;
+
+      if(installedABI == "null" || installedABI.empty())
+      {
+        RDCLOG("Can't determine installed ABI, falling back to device preferred ABI");
+
+        // pick the last ABI
+        rdcarray<Android::ABI> abis = Android::GetSupportedABIs(m_deviceID);
+
+        if(abis.empty())
+          RDCWARN("No ABIs listed as supported");
+        else
+          abi = abis.back();
+      }
+      else
+      {
+        abi = Android::GetABI(installedABI);
+      }
+
+      rdcstr layerPackage = GetRenderDocPackageForABI(abi);
       Android::adbExecCommand(m_deviceID, "shell settings put global enable_gpu_debug_layers 1");
       Android::adbExecCommand(m_deviceID, "shell settings put global gpu_debug_app " + packageName);
       Android::adbExecCommand(m_deviceID,
@@ -1157,18 +1207,59 @@ ExecuteResult AndroidRemoteServer::ExecuteAndInject(const char *a, const char *w
           m_deviceID, "shell settings put global gpu_debug_layers " RENDERDOC_VULKAN_LAYER_NAME);
       Android::adbExecCommand(
           m_deviceID, "shell settings put global gpu_debug_layers_gles " RENDERDOC_ANDROID_LIBRARY);
+
+      // don't ignore the layers by default, only if we encounter an error
+      Android::adbExecCommand(m_deviceID, "shell setprop debug.rdoc.IGNORE_LAYERS 0");
+
+      Process::ProcessResult check =
+          Android::adbExecCommand(m_deviceID, "shell settings list global");
+
+      // check both since we don't know which one it will come out in
+      rdcstr inString = check.strStdout + check.strStderror;
+
+      // remove all whitespace. Our package and layer doesn't contain spaces, and the user's package
+      // name can't contain spaces. This makes what we're searching for less subject to change (e.g.
+      // if some adb versions print 'setting = value' instead of 'setting=value'
+      // This will even work if there are new lines
+      rdcstr checkString;
+      checkString.reserve(inString.size());
+      for(const char &c : inString)
+      {
+        if(c == ' ' || c == '\t' || c == '\r' || c == '\n')
+          continue;
+
+        checkString.push_back(c);
+      }
+
+      if(!checkString.contains("enable_gpu_debug_layers=1") ||
+         !checkString.contains("gpu_debug_app=" + packageName) ||
+         !checkString.contains("gpu_debug_layer_app=" + layerPackage) ||
+         !checkString.contains("gpu_debug_layers=" RENDERDOC_VULKAN_LAYER_NAME) ||
+         !checkString.contains("gpu_debug_layers_gles=" RENDERDOC_ANDROID_LIBRARY))
+      {
+        RDCERR(
+            "Couldn't verify that debug settings are set:\n%s"
+            "Do you have a strange device that requires extra setup?\n"
+            "E.g. Xiaomi requires a developer account and \"USB debugging (Security Settings)\"\n",
+            inString.c_str());
+        hookWithJDWP = true;
+
+        // need to tell the hooks to ignore the fact that layers are present because they're not
+        // working.
+        Android::adbExecCommand(m_deviceID, "shell setprop debug.rdoc.IGNORE_LAYERS 1");
+      }
     }
-    else
+
+    if(hookWithJDWP)
     {
       RDCLOG("Using pre-Android 10 Vulkan layering and JDWP injection");
-
-      // use JDWP hooking to inject our library for GLES
-      hookWithJDWP = true;
 
       // enable the vulkan layer (will only be used by vulkan programs)
       Android::adbExecCommand(m_deviceID,
                               "shell setprop debug.vulkan.layers " RENDERDOC_VULKAN_LAYER_NAME);
     }
+
+    rdcstr folderName = Android::GetFolderName(m_deviceID);
 
     // if in VR mode, enable frame delimiter markers
     Android::adbExecCommand(m_deviceID, "shell setprop debug.vr.profiler 1");
@@ -1180,9 +1271,9 @@ ExecuteResult AndroidRemoteServer::ExecuteAndInject(const char *a, const char *w
     // Android/data/<package>
     // has the permissions set correctly, and we don't have a convenient way to get the package name
     // from native code.
-    Android::adbExecCommand(m_deviceID, "shell mkdir -p /sdcard/Android/data/" + processName);
-    Android::adbExecCommand(m_deviceID,
-                            "shell mkdir -p /sdcard/Android/data/" + processName + "/files");
+    Android::adbExecCommand(m_deviceID, "shell mkdir -p /sdcard/Android/" + folderName + processName);
+    Android::adbExecCommand(
+        m_deviceID, "shell mkdir -p /sdcard/Android/" + folderName + processName + "/files");
     // set our property with the capture options encoded, to be picked up by the library on the
     // device
     Android::adbExecCommand(m_deviceID,
@@ -1191,7 +1282,7 @@ ExecuteResult AndroidRemoteServer::ExecuteAndInject(const char *a, const char *w
 
     // try to push our settings file into the appdata folder
     Android::adbExecCommand(m_deviceID, "push \"" + FileIO::GetAppFolderFilename("renderdoc.conf") +
-                                            "\" /sdcard/Android/data/" + processName +
+                                            "\" /sdcard/Android/" + folderName + processName +
                                             "/files/renderdoc.conf");
 
     rdcstr installedPath = Android::GetPathForPackage(m_deviceID, packageName);

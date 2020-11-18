@@ -466,36 +466,35 @@ ResourceId PipeState::GetShader(ShaderStage stage) const
 
 BoundVBuffer PipeState::GetIBuffer() const
 {
-  ResourceId buf;
-  uint64_t ByteOffset = 0;
+  BoundVBuffer ret;
 
   if(IsCaptureLoaded())
   {
     if(IsCaptureD3D11())
     {
-      buf = m_D3D11->inputAssembly.indexBuffer.resourceId;
-      ByteOffset = m_D3D11->inputAssembly.indexBuffer.byteOffset;
+      ret.resourceId = m_D3D11->inputAssembly.indexBuffer.resourceId;
+      ret.byteOffset = m_D3D11->inputAssembly.indexBuffer.byteOffset;
+      ret.byteSize = ~0ULL;
     }
     else if(IsCaptureD3D12())
     {
-      buf = m_D3D12->inputAssembly.indexBuffer.resourceId;
-      ByteOffset = m_D3D12->inputAssembly.indexBuffer.byteOffset;
+      ret.resourceId = m_D3D12->inputAssembly.indexBuffer.resourceId;
+      ret.byteOffset = m_D3D12->inputAssembly.indexBuffer.byteOffset;
+      ret.byteSize = m_D3D12->inputAssembly.indexBuffer.byteSize;
     }
     else if(IsCaptureGL())
     {
-      buf = m_GL->vertexInput.indexBuffer;
-      ByteOffset = 0;    // GL only has per-draw index offset
+      ret.resourceId = m_GL->vertexInput.indexBuffer;
+      ret.byteOffset = 0;    // GL only has per-draw index offset
+      ret.byteSize = ~0ULL;
     }
     else if(IsCaptureVK())
     {
-      buf = m_Vulkan->inputAssembly.indexBuffer.resourceId;
-      ByteOffset = m_Vulkan->inputAssembly.indexBuffer.byteOffset;
+      ret.resourceId = m_Vulkan->inputAssembly.indexBuffer.resourceId;
+      ret.byteOffset = m_Vulkan->inputAssembly.indexBuffer.byteOffset;
+      ret.byteSize = ~0ULL;
     }
   }
-
-  BoundVBuffer ret;
-  ret.resourceId = buf;
-  ret.byteOffset = ByteOffset;
 
   return ret;
 }
@@ -562,6 +561,7 @@ rdcarray<BoundVBuffer> PipeState::GetVBuffers() const
         ret[i].resourceId = m_D3D11->inputAssembly.vertexBuffers[i].resourceId;
         ret[i].byteOffset = m_D3D11->inputAssembly.vertexBuffers[i].byteOffset;
         ret[i].byteStride = m_D3D11->inputAssembly.vertexBuffers[i].byteStride;
+        ret[i].byteSize = ~0ULL;
       }
     }
     else if(IsCaptureD3D12())
@@ -572,6 +572,7 @@ rdcarray<BoundVBuffer> PipeState::GetVBuffers() const
         ret[i].resourceId = m_D3D12->inputAssembly.vertexBuffers[i].resourceId;
         ret[i].byteOffset = m_D3D12->inputAssembly.vertexBuffers[i].byteOffset;
         ret[i].byteStride = m_D3D12->inputAssembly.vertexBuffers[i].byteStride;
+        ret[i].byteSize = m_D3D12->inputAssembly.vertexBuffers[i].byteSize;
       }
     }
     else if(IsCaptureGL())
@@ -582,6 +583,7 @@ rdcarray<BoundVBuffer> PipeState::GetVBuffers() const
         ret[i].resourceId = m_GL->vertexInput.vertexBuffers[i].resourceId;
         ret[i].byteOffset = m_GL->vertexInput.vertexBuffers[i].byteOffset;
         ret[i].byteStride = m_GL->vertexInput.vertexBuffers[i].byteStride;
+        ret[i].byteSize = ~0ULL;
       }
     }
     else if(IsCaptureVK())
@@ -591,19 +593,8 @@ rdcarray<BoundVBuffer> PipeState::GetVBuffers() const
       {
         ret[i].resourceId = m_Vulkan->vertexInput.vertexBuffers[i].resourceId;
         ret[i].byteOffset = m_Vulkan->vertexInput.vertexBuffers[i].byteOffset;
-        ret[i].byteStride = 0;
-
-        // find the binding that corresponds to this VB to get the stride. Valid use suggests there
-        // should be at most 1, so stop at first result. If there are 0 then the stride is just 0
-        // (this vertex buffer is unused).
-        for(int j = 0; j < m_Vulkan->vertexInput.bindings.count(); j++)
-        {
-          if(m_Vulkan->vertexInput.bindings[j].vertexBufferBinding == (uint32_t)i)
-          {
-            ret[i].byteStride = m_Vulkan->vertexInput.bindings[j].byteStride;
-            break;
-          }
-        }
+        ret[i].byteStride = m_Vulkan->vertexInput.vertexBuffers[i].byteStride;
+        ret[i].byteSize = m_Vulkan->vertexInput.vertexBuffers[i].byteSize;
       }
     }
   }
@@ -964,6 +955,9 @@ BoundCBuffer PipeState::GetConstantBuffer(ShaderStage stage, uint32_t BufIdx, ui
             buf = b.resourceId;
             ByteOffset = b.byteOffset;
             ByteSize = b.byteSize;
+
+            if(ByteSize == 0)
+              ByteSize = ~0ULL;
           }
         }
       }
@@ -1138,7 +1132,7 @@ rdcarray<BoundResourceArray> PipeState::GetSamplers(ShaderStage stage) const
   return ret;
 }
 
-rdcarray<BoundResourceArray> PipeState::GetReadOnlyResources(ShaderStage stage) const
+rdcarray<BoundResourceArray> PipeState::GetReadOnlyResources(ShaderStage stage, bool onlyUsed) const
 {
   rdcarray<BoundResourceArray> ret;
 
@@ -1257,18 +1251,33 @@ rdcarray<BoundResourceArray> PipeState::GetReadOnlyResources(ShaderStage stage) 
             ret.push_back(BoundResourceArray());
             ret.back().bindPoint = Bindpoint(set, slot);
 
-            rdcarray<BoundResource> &val = ret.back().resources;
-            val.resize(bind.descriptorCount);
+            uint32_t count = bind.descriptorCount;
+            uint32_t firstIdx = 0;
 
+            if(onlyUsed)
+            {
+              firstIdx = (uint32_t)bind.firstUsedIndex;
+              if(bind.dynamicallyUsedCount < count)
+                count = bind.dynamicallyUsedCount;
+              if((uint32_t)bind.lastUsedIndex < count)
+                count = uint32_t(bind.lastUsedIndex - bind.firstUsedIndex + 1);
+            }
+
+            rdcarray<BoundResource> &val = ret.back().resources;
+            val.reserve(count);
+
+            ret.back().firstIndex = (int32_t)firstIdx;
             ret.back().dynamicallyUsedCount = bind.dynamicallyUsedCount;
 
-            for(uint32_t i = 0; i < bind.descriptorCount; i++)
+            BoundResource res;
+            for(uint32_t i = firstIdx; i < firstIdx + count; i++)
             {
-              val[i].resourceId = bind.binds[i].resourceResourceId;
-              val[i].dynamicallyUsed = bind.binds[i].dynamicallyUsed;
-              val[i].firstMip = (int)bind.binds[i].firstMip;
-              val[i].firstSlice = (int)bind.binds[i].firstSlice;
-              val[i].typeCast = bind.binds[i].viewFormat.compType;
+              res.resourceId = bind.binds[i].resourceResourceId;
+              res.dynamicallyUsed = bind.binds[i].dynamicallyUsed;
+              res.firstMip = (int)bind.binds[i].firstMip;
+              res.firstSlice = (int)bind.binds[i].firstSlice;
+              res.typeCast = bind.binds[i].viewFormat.compType;
+              val.push_back(res);
             }
           }
         }
@@ -1281,7 +1290,7 @@ rdcarray<BoundResourceArray> PipeState::GetReadOnlyResources(ShaderStage stage) 
   return ret;
 }
 
-rdcarray<BoundResourceArray> PipeState::GetReadWriteResources(ShaderStage stage) const
+rdcarray<BoundResourceArray> PipeState::GetReadWriteResources(ShaderStage stage, bool onlyUsed) const
 {
   rdcarray<BoundResourceArray> ret;
 
@@ -1365,7 +1374,7 @@ rdcarray<BoundResourceArray> PipeState::GetReadWriteResources(ShaderStage stage)
             for(size_t j = 0; j < element.views.size(); ++j)
             {
               const D3D12Pipe::View &view = element.views[j];
-              if(view.bind >= start && view.bind <= end)
+              if(view.bind >= start && view.bind < end)
               {
                 val.push_back(BoundResource());
                 BoundResource &b = val.back();
@@ -1423,18 +1432,33 @@ rdcarray<BoundResourceArray> PipeState::GetReadWriteResources(ShaderStage stage)
             ret.push_back(BoundResourceArray());
             ret.back().bindPoint = Bindpoint(set, slot);
 
-            rdcarray<BoundResource> &val = ret.back().resources;
-            val.resize(bind.descriptorCount);
+            uint32_t count = bind.descriptorCount;
+            uint32_t firstIdx = 0;
 
+            if(onlyUsed)
+            {
+              firstIdx = (uint32_t)bind.firstUsedIndex;
+              if(bind.dynamicallyUsedCount < count)
+                count = bind.dynamicallyUsedCount;
+              if((uint32_t)bind.lastUsedIndex < count)
+                count = uint32_t(bind.lastUsedIndex - bind.firstUsedIndex + 1);
+            }
+
+            rdcarray<BoundResource> &val = ret.back().resources;
+            val.reserve(count);
+
+            ret.back().firstIndex = (int32_t)firstIdx;
             ret.back().dynamicallyUsedCount = bind.dynamicallyUsedCount;
 
-            for(uint32_t i = 0; i < bind.descriptorCount; i++)
+            BoundResource res;
+            for(uint32_t i = firstIdx; i < firstIdx + count; i++)
             {
-              val[i].resourceId = bind.binds[i].resourceResourceId;
-              val[i].dynamicallyUsed = bind.binds[i].dynamicallyUsed;
-              val[i].firstMip = (int)bind.binds[i].firstMip;
-              val[i].firstSlice = (int)bind.binds[i].firstSlice;
-              val[i].typeCast = bind.binds[i].viewFormat.compType;
+              res.resourceId = bind.binds[i].resourceResourceId;
+              res.dynamicallyUsed = bind.binds[i].dynamicallyUsed;
+              res.firstMip = (int)bind.binds[i].firstMip;
+              res.firstSlice = (int)bind.binds[i].firstSlice;
+              res.typeCast = bind.binds[i].viewFormat.compType;
+              val.push_back(res);
             }
           }
         }

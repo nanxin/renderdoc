@@ -28,50 +28,6 @@ RD_TEST(VK_Secondary_CmdBuf, VulkanGraphicsTest)
 {
   static constexpr const char *Description = "Draw using secondary command buffers";
 
-  std::string common = R"EOSHADER(
-
-#version 420 core
-
-struct v2f
-{
-	vec4 pos;
-	vec4 col;
-	vec4 uv;
-};
-
-)EOSHADER";
-
-  const std::string vertex = R"EOSHADER(
-
-layout(location = 0) in vec3 Position;
-layout(location = 1) in vec4 Color;
-layout(location = 2) in vec2 UV;
-
-layout(location = 0) out v2f vertOut;
-
-void main()
-{
-	vertOut.pos = vec4(Position.xyz*vec3(1,-1,1), 1);
-	gl_Position = vertOut.pos;
-	vertOut.col = Color;
-	vertOut.uv = vec4(UV.xy, 0, 1);
-}
-
-)EOSHADER";
-
-  const std::string pixel = R"EOSHADER(
-
-layout(location = 0) in v2f vertIn;
-
-layout(location = 0, index = 0) out vec4 Color;
-
-void main()
-{
-	Color = vertIn.col;
-}
-
-)EOSHADER";
-
   int main()
   {
     // initialise, create window, create context, etc
@@ -122,8 +78,8 @@ void main()
     };
 
     pipeCreateInfo.stages = {
-        CompileShaderModule(common + vertex, ShaderLang::glsl, ShaderStage::vert, "main"),
-        CompileShaderModule(common + pixel, ShaderLang::glsl, ShaderStage::frag, "main"),
+        CompileShaderModule(VKDefaultVertex, ShaderLang::glsl, ShaderStage::vert, "main"),
+        CompileShaderModule(VKDefaultPixel, ShaderLang::glsl, ShaderStage::frag, "main"),
     };
 
     pipeCreateInfo.subpass = 0;
@@ -215,15 +171,7 @@ void main()
                                            VK_IMAGE_LAYOUT_GENERAL, img.image),
                });
 
-      region.srcOffsets[1].x = size.extent.width;
-      region.srcOffsets[1].y = size.extent.height;
-      region.srcOffsets[1].z = 1;
-      region.dstOffsets[1].x = mainWindow->scissor.extent.width;
-      region.dstOffsets[1].y = mainWindow->scissor.extent.height;
-      region.dstOffsets[1].z = 1;
-
-      vkCmdBlitImage(cmd, img.image, VK_IMAGE_LAYOUT_GENERAL, swapimg, VK_IMAGE_LAYOUT_GENERAL, 1,
-                     &region, VK_FILTER_LINEAR);
+      blitToSwap(cmd, img.image, VK_IMAGE_LAYOUT_GENERAL, swapimg, VK_IMAGE_LAYOUT_GENERAL);
 
       FinishUsingBackbuffer(cmd, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_GENERAL);
 

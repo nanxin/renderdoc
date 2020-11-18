@@ -350,8 +350,8 @@ void ShaderViewer::editShader(ResourceId id, ShaderStage stage, const QString &e
 
 void ShaderViewer::cacheResources()
 {
-  m_ReadOnlyResources = m_Ctx.CurPipelineState().GetReadOnlyResources(m_Stage);
-  m_ReadWriteResources = m_Ctx.CurPipelineState().GetReadWriteResources(m_Stage);
+  m_ReadOnlyResources = m_Ctx.CurPipelineState().GetReadOnlyResources(m_Stage, false);
+  m_ReadWriteResources = m_Ctx.CurPipelineState().GetReadWriteResources(m_Stage, false);
 }
 
 void ShaderViewer::debugShader(const ShaderBindpointMapping *bind, const ShaderReflection *shader,
@@ -385,7 +385,18 @@ void ShaderViewer::debugShader(const ShaderBindpointMapping *bind, const ShaderR
       if(!me)
         return;
 
-      rdcarray<rdcstr> targets = r->GetDisassemblyTargets();
+      rdcarray<rdcstr> targets = r->GetDisassemblyTargets(m_Pipeline != ResourceId());
+
+      if(m_Pipeline == ResourceId())
+      {
+        rdcarray<rdcstr> pipelineTargets = r->GetDisassemblyTargets(true);
+
+        if(pipelineTargets.size() > targets.size())
+        {
+          m_PipelineTargets = pipelineTargets;
+          m_PipelineTargets.removeIf([&targets](const rdcstr &t) { return targets.contains(t); });
+        }
+      }
 
       rdcstr disasm = r->DisassembleShader(m_Pipeline, m_ShaderDetails, "");
 
@@ -409,6 +420,9 @@ void ShaderViewer::debugShader(const ShaderBindpointMapping *bind, const ShaderR
             }
           }
         }
+
+        if(!m_PipelineTargets.empty())
+          targetNames << tr("More disassembly formats...");
 
         m_DisassemblyType->clear();
         m_DisassemblyType->addItems(targetNames);
@@ -1383,6 +1397,26 @@ void ShaderViewer::disassemble_typeChanged(int index)
       m_DisassemblyView->emptyUndoBuffer();
       return;
     }
+  }
+
+  if(targetStr == tr("More disassembly formats..."))
+  {
+    QString text;
+
+    text =
+        tr("; More disassembly formats are available with a pipeline. This shader view is not\n"
+           "; associated with any specific pipeline and shows only the shader itself.\n\n"
+           "; Viewing the shader from the pipeline state view with a pipeline bound will expose\n"
+           "; these other formats:\n\n");
+
+    for(const rdcstr &t : m_PipelineTargets)
+      text += QFormatStr("%1\n").arg(QString(t));
+
+    m_DisassemblyView->setReadOnly(false);
+    SetTextAndUpdateMargin0(m_DisassemblyView, text);
+    m_DisassemblyView->setReadOnly(true);
+    m_DisassemblyView->emptyUndoBuffer();
+    return;
   }
 
   QPointer<ShaderViewer> me(this);
@@ -2671,12 +2705,15 @@ void ShaderViewer::updateDebugState()
 
       if(bind.arraySize == 1)
       {
-        RDTreeWidgetItem *node =
-            new RDTreeWidgetItem({m_ShaderDetails->readOnlyResources[i].name, ro.name,
-                                  lit("Resource"), ToQStr(roBind.resources[0].resourceId)});
-        node->setTag(QVariant::fromValue(
-            VariableTag(DebugVariableReference(DebugVariableType::ReadOnlyResource, ro.name))));
-        ui->constants->addTopLevelItem(node);
+        if(!roBind.resources.empty())
+        {
+          RDTreeWidgetItem *node =
+              new RDTreeWidgetItem({m_ShaderDetails->readOnlyResources[i].name, ro.name,
+                                    lit("Resource"), ToQStr(roBind.resources[0].resourceId)});
+          node->setTag(QVariant::fromValue(
+              VariableTag(DebugVariableReference(DebugVariableType::ReadOnlyResource, ro.name))));
+          ui->constants->addTopLevelItem(node);
+        }
       }
       else if(bind.arraySize == ~0U)
       {
@@ -2739,12 +2776,15 @@ void ShaderViewer::updateDebugState()
 
       if(bind.arraySize == 1)
       {
-        RDTreeWidgetItem *node =
-            new RDTreeWidgetItem({m_ShaderDetails->readWriteResources[i].name, rw.name,
-                                  lit("Resource"), ToQStr(rwBind.resources[0].resourceId)});
-        node->setTag(QVariant::fromValue(
-            VariableTag(DebugVariableReference(DebugVariableType::ReadWriteResource, rw.name))));
-        ui->constants->addTopLevelItem(node);
+        if(!rwBind.resources.empty())
+        {
+          RDTreeWidgetItem *node =
+              new RDTreeWidgetItem({m_ShaderDetails->readWriteResources[i].name, rw.name,
+                                    lit("Resource"), ToQStr(rwBind.resources[0].resourceId)});
+          node->setTag(QVariant::fromValue(
+              VariableTag(DebugVariableReference(DebugVariableType::ReadWriteResource, rw.name))));
+          ui->constants->addTopLevelItem(node);
+        }
       }
       else if(bind.arraySize == ~0U)
       {
@@ -2807,12 +2847,15 @@ void ShaderViewer::updateDebugState()
 
       if(bind.arraySize == 1)
       {
-        RDTreeWidgetItem *node =
-            new RDTreeWidgetItem({m_ShaderDetails->samplers[i].name, s.name, lit("Sampler"),
-                                  samplerRep(bind, ~0U, sampBind.resources[0].resourceId)});
-        node->setTag(QVariant::fromValue(
-            VariableTag(DebugVariableReference(DebugVariableType::Sampler, s.name))));
-        ui->constants->addTopLevelItem(node);
+        if(!sampBind.resources.empty())
+        {
+          RDTreeWidgetItem *node =
+              new RDTreeWidgetItem({m_ShaderDetails->samplers[i].name, s.name, lit("Sampler"),
+                                    samplerRep(bind, ~0U, sampBind.resources[0].resourceId)});
+          node->setTag(QVariant::fromValue(
+              VariableTag(DebugVariableReference(DebugVariableType::Sampler, s.name))));
+          ui->constants->addTopLevelItem(node);
+        }
       }
       else if(bind.arraySize == ~0U)
       {
@@ -3193,21 +3236,41 @@ RDTreeWidgetItem *ShaderViewer::makeSourceVariableNode(const ShaderVariable &var
   else if(var.type == VarType::Bool)
     typeName = lit("bool");
 
+  QString rowTypeName = typeName;
+
   if(var.rows > 1)
+  {
     typeName += QFormatStr("%1x%2").arg(var.rows).arg(var.columns);
+    if(var.columns > 1)
+      rowTypeName += QString::number(var.columns);
+  }
   else if(var.columns > 1)
+  {
     typeName += QString::number(var.columns);
+  }
 
   QString value = var.rows == 1 && var.members.empty() ? stringRep(var) : QString();
 
   rdcstr sep = var.name[0] == '[' ? "" : ".";
 
-  RDTreeWidgetItem *node = new RDTreeWidgetItem(
-      {sourcePath + sep + var.name, debugVarPath + sep + var.name, typeName, value});
+  rdcstr sourceName = sourcePath + sep + var.name;
+  rdcstr debugName = debugVarPath + sep + var.name;
+
+  RDTreeWidgetItem *node = new RDTreeWidgetItem({sourceName, debugName, typeName, value});
 
   for(const ShaderVariable &child : var.members)
-    node->addChild(makeSourceVariableNode(child, sourcePath + sep + var.name,
-                                          debugVarPath + sep + var.name, modified));
+    node->addChild(makeSourceVariableNode(child, sourceName, debugName, modified));
+
+  // if this is a matrix, even if it has no explicit row members add the rows as children
+  if(var.members.empty() && var.rows > 1)
+  {
+    for(uint32_t row = 0; row < var.rows; row++)
+    {
+      rdcstr rowsuffix = ".row" + ToStr(row);
+      node->addChild(new RDTreeWidgetItem(
+          {sourceName + rowsuffix, debugName + rowsuffix, rowTypeName, stringRep(var, row)}));
+    }
+  }
 
   if(modified)
     node->setForegroundColor(QColor(Qt::red));
@@ -3286,7 +3349,8 @@ RDTreeWidgetItem *ShaderViewer::makeSourceVariableNode(const SourceVariableMappi
 
         if(bind.arraySize == 1)
         {
-          value = samplerRep(bind, ~0U, res.resources[0].resourceId);
+          if(!res.resources.empty())
+            value = samplerRep(bind, ~0U, res.resources[0].resourceId);
         }
         else if(bind.arraySize == ~0U)
         {
@@ -3341,7 +3405,8 @@ RDTreeWidgetItem *ShaderViewer::makeSourceVariableNode(const SourceVariableMappi
         BoundResourceArray &res = resList[bindIdx];
         if(bind.arraySize == 1)
         {
-          value = ToQStr(res.resources[0].resourceId);
+          if(!res.resources.empty())
+            value = ToQStr(res.resources[0].resourceId);
         }
         else if(bind.arraySize == ~0U)
         {

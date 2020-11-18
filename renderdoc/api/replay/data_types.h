@@ -1533,6 +1533,7 @@ worked around by re-sorting bindings.
   bool SparseResources = false;
   bool MultiGPU = false;
   bool D3D12Bundle = false;
+  bool DXILShaders = false;
 #endif
 };
 
@@ -1769,6 +1770,15 @@ struct ModificationValue
 
   DOCUMENT("The stencil output, or ``-1`` if not available.");
   int32_t stencil;
+
+  DOCUMENT("Returns whether or not this modification value is valid.");
+  bool IsValid() const { return col.uintValue[0] != 0xdeadbeef || col.uintValue[1] != 0xdeadf00d; }
+  DOCUMENT("Sets this modification value to be invalid.");
+  void SetInvalid()
+  {
+    col.uintValue[0] = 0xdeadbeef;
+    col.uintValue[1] = 0xdeadf00d;
+  }
 };
 
 DECLARE_REFLECTION_STRUCT(ModificationValue);
@@ -1787,9 +1797,10 @@ struct PixelModification
            unboundPS == o.unboundPS && fragIndex == o.fragIndex && primitiveID == o.primitiveID &&
            preMod == o.preMod && shaderOut == o.shaderOut && postMod == o.postMod &&
            sampleMasked == o.sampleMasked && backfaceCulled == o.backfaceCulled &&
-           depthClipped == o.depthClipped && viewClipped == o.viewClipped &&
-           scissorClipped == o.scissorClipped && shaderDiscarded == o.shaderDiscarded &&
-           depthTestFailed == o.depthTestFailed && stencilTestFailed == o.stencilTestFailed;
+           depthClipped == o.depthClipped && depthBoundsFailed == o.depthBoundsFailed &&
+           viewClipped == o.viewClipped && scissorClipped == o.scissorClipped &&
+           shaderDiscarded == o.shaderDiscarded && depthTestFailed == o.depthTestFailed &&
+           stencilTestFailed == o.stencilTestFailed;
   }
   bool operator<(const PixelModification &o) const
   {
@@ -1815,6 +1826,8 @@ struct PixelModification
       return backfaceCulled < o.backfaceCulled;
     if(!(depthClipped == o.depthClipped))
       return depthClipped < o.depthClipped;
+    if(!(depthBoundsFailed == o.depthBoundsFailed))
+      return depthBoundsFailed < o.depthBoundsFailed;
     if(!(viewClipped == o.viewClipped))
       return viewClipped < o.viewClipped;
     if(!(scissorClipped == o.scissorClipped))
@@ -1861,6 +1874,8 @@ pixel.
   bool backfaceCulled;
   DOCUMENT("``True`` if depth near/far clipping eliminated this fragment.");
   bool depthClipped;
+  DOCUMENT("``True`` if depth bounds clipping eliminated this fragment.");
+  bool depthBoundsFailed;
   DOCUMENT("``True`` if viewport clipping eliminated this fragment.");
   bool viewClipped;
   DOCUMENT("``True`` if scissor clipping eliminated this fragment.");
@@ -1881,8 +1896,9 @@ pixel.
 )");
   bool Passed() const
   {
-    return !sampleMasked && !backfaceCulled && !depthClipped && !viewClipped && !scissorClipped &&
-           !shaderDiscarded && !depthTestFailed && !stencilTestFailed && !predicationSkipped;
+    return !sampleMasked && !backfaceCulled && !depthClipped && !depthBoundsFailed &&
+           !viewClipped && !scissorClipped && !shaderDiscarded && !depthTestFailed &&
+           !stencilTestFailed && !predicationSkipped;
   }
 };
 

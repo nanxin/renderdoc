@@ -39,6 +39,7 @@ typedef HRESULT(WINAPI *pD3DSetBlobPart)(_In_reads_bytes_(SrcDataSize) LPCVOID p
                                          _In_ SIZE_T SrcDataSize, _In_ D3D_BLOB_PART Part,
                                          _In_ UINT Flags, _In_reads_bytes_(PartSize) LPCVOID pPart,
                                          _In_ SIZE_T PartSize, _Out_ ID3DBlob **ppNewShader);
+typedef HRESULT(WINAPI *pD3DCreateBlob)(SIZE_T Size, ID3DBlob **ppBlob);
 
 struct Win32Window;
 
@@ -71,12 +72,10 @@ struct D3D12GraphicsTest : public GraphicsTest
     BufUAVType = 0xf00,
   };
 
-  ID3DBlobPtr Compile(std::string src, std::string entry, std::string profile,
-                      ID3DBlob **unstripped = NULL);
-  void WriteBlob(std::string name, ID3DBlob *blob, bool compress);
+  ID3DBlobPtr Compile(std::string src, std::string entry, std::string profile);
+  void WriteBlob(std::string name, ID3DBlobPtr blob, bool compress);
 
-  const std::vector<D3D12_INPUT_ELEMENT_DESC> &DefaultInputLayout() { return m_DefaultInputLayout; }
-  ID3DBlobPtr SetBlobPath(std::string name, ID3DBlob *blob);
+  void SetBlobPath(std::string name, ID3DBlobPtr &blob);
   void SetBlobPath(std::string name, ID3D12DeviceChild *shader);
 
   ID3D12GraphicsCommandListPtr GetCommandBuffer();
@@ -89,45 +88,45 @@ struct D3D12GraphicsTest : public GraphicsTest
       UINT NumStaticSamplers = 0, const D3D12_STATIC_SAMPLER_DESC *StaticSamplers = NULL);
   ID3D12CommandSignaturePtr MakeCommandSig(ID3D12RootSignaturePtr rootSig,
                                            const std::vector<D3D12_INDIRECT_ARGUMENT_DESC> &params);
-  D3D12PSOCreator MakePSO() { return D3D12PSOCreator(this); }
-  D3D12BufferCreator MakeBuffer() { return D3D12BufferCreator(this); }
+  D3D12PSOCreator MakePSO() { return D3D12PSOCreator(dev); }
+  D3D12BufferCreator MakeBuffer() { return D3D12BufferCreator(dev, this); }
   D3D12TextureCreator MakeTexture(DXGI_FORMAT format, UINT width)
   {
-    return D3D12TextureCreator(this, format, width, 1, 1);
+    return D3D12TextureCreator(dev, format, width, 1, 1);
   }
   D3D12TextureCreator MakeTexture(DXGI_FORMAT format, UINT width, UINT height)
   {
-    return D3D12TextureCreator(this, format, width, height, 1);
+    return D3D12TextureCreator(dev, format, width, height, 1);
   }
   D3D12TextureCreator MakeTexture(DXGI_FORMAT format, UINT width, UINT height, UINT depth)
   {
-    return D3D12TextureCreator(this, format, width, height, depth);
+    return D3D12TextureCreator(dev, format, width, height, depth);
   }
 
   template <typename T>
   D3D12ViewCreator MakeCBV(T res)
   {
-    return D3D12ViewCreator(this, m_CBVUAVSRV, NULL, ViewType::CBV, res);
+    return D3D12ViewCreator(dev, m_CBVUAVSRV, NULL, ViewType::CBV, res);
   }
   template <typename T>
   D3D12ViewCreator MakeSRV(T res)
   {
-    return D3D12ViewCreator(this, m_CBVUAVSRV, NULL, ViewType::SRV, res);
+    return D3D12ViewCreator(dev, m_CBVUAVSRV, NULL, ViewType::SRV, res);
   }
   template <typename T>
   D3D12ViewCreator MakeRTV(T res)
   {
-    return D3D12ViewCreator(this, m_RTV, NULL, ViewType::RTV, res);
+    return D3D12ViewCreator(dev, m_RTV, NULL, ViewType::RTV, res);
   }
   template <typename T>
   D3D12ViewCreator MakeDSV(T res)
   {
-    return D3D12ViewCreator(this, m_DSV, NULL, ViewType::DSV, res);
+    return D3D12ViewCreator(dev, m_DSV, NULL, ViewType::DSV, res);
   }
   template <typename T>
   D3D12ViewCreator MakeUAV(T res)
   {
-    return D3D12ViewCreator(this, m_CBVUAVSRV, m_Clear, ViewType::UAV, res);
+    return D3D12ViewCreator(dev, m_CBVUAVSRV, m_Clear, ViewType::UAV, res);
   }
 
   std::vector<byte> GetBufferData(ID3D12ResourcePtr buffer, D3D12_RESOURCE_STATES state,
@@ -161,6 +160,8 @@ struct D3D12GraphicsTest : public GraphicsTest
   void ClearRenderTargetView(ID3D12GraphicsCommandListPtr cmd, D3D12_CPU_DESCRIPTOR_HANDLE rt,
                              Vec4f col);
   void ClearRenderTargetView(ID3D12GraphicsCommandListPtr cmd, ID3D12ResourcePtr rt, Vec4f col);
+  void ClearDepthStencilView(ID3D12GraphicsCommandListPtr cmd, D3D12_CPU_DESCRIPTOR_HANDLE dsv,
+                             D3D12_CLEAR_FLAGS flags, float depth, UINT8 stencil);
   void ClearDepthStencilView(ID3D12GraphicsCommandListPtr cmd, ID3D12ResourcePtr dsv,
                              D3D12_CLEAR_FLAGS flags, float depth, UINT8 stencil);
 
@@ -187,6 +188,7 @@ struct D3D12GraphicsTest : public GraphicsTest
   pD3DCompile dyn_D3DCompile = NULL;
   pD3DStripShader dyn_D3DStripShader = NULL;
   pD3DSetBlobPart dyn_D3DSetBlobPart = NULL;
+  pD3DCreateBlob dyn_CreateBlob = NULL;
 
   PFN_D3D12_CREATE_DEVICE dyn_D3D12CreateDevice = NULL;
 
@@ -205,13 +207,17 @@ struct D3D12GraphicsTest : public GraphicsTest
   ID3D12RootSignaturePtr swapBlitSig;
   ID3D12PipelineStatePtr swapBlitPso;
 
-  bool gpuva = false, m_12On7 = false;
+  bool gpuva = false, m_12On7 = false, m_DXILSupport = false;
   IDXGIFactory1Ptr m_Factory;
 
   ID3D12DebugPtr d3d12Debug;
   ID3D12InfoQueuePtr infoqueue;
 
   ID3D12DevicePtr dev;
+  ID3D12Device1Ptr dev1;
+  ID3D12Device2Ptr dev2;
+  ID3D12Device3Ptr dev3;
+  ID3D12Device4Ptr dev4;
 
   ID3D12DescriptorHeapPtr m_RTV, m_DSV, m_CBVUAVSRV, m_Clear, m_Sampler;
 
@@ -219,8 +225,6 @@ struct D3D12GraphicsTest : public GraphicsTest
   ID3D12GraphicsCommandListPtr m_DebugList;
 
   ID3D12CommandQueuePtr queue;
-
-  std::vector<D3D12_INPUT_ELEMENT_DESC> m_DefaultInputLayout;
 
   ID3D12FencePtr m_GPUSyncFence;
   HANDLE m_GPUSyncHandle = NULL;

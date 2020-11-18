@@ -142,13 +142,13 @@ const PipeState &ReplayController::GetPipelineState()
   return m_PipeState;
 }
 
-rdcarray<rdcstr> ReplayController::GetDisassemblyTargets()
+rdcarray<rdcstr> ReplayController::GetDisassemblyTargets(bool withPipeline)
 {
   CHECK_REPLAY_THREAD();
 
   rdcarray<rdcstr> ret;
 
-  rdcarray<rdcstr> targets = m_pDevice->GetDisassemblyTargets();
+  rdcarray<rdcstr> targets = m_pDevice->GetDisassemblyTargets(withPipeline);
 
   ret.reserve(targets.size());
   for(const rdcstr &t : targets)
@@ -1279,7 +1279,7 @@ bool ReplayController::SaveTexture(const TextureSave &saveData, const char *path
       {
         for(uint32_t x = 0; x < td.width; x++)
         {
-          FloatVector pixel = ConvertComponents(saveFmt, srcData);
+          FloatVector pixel = DecodeFormattedComponents(saveFmt, srcData);
           srcData += pixStride;
 
           // HDR can't represent negative values
@@ -1489,6 +1489,10 @@ rdcarray<PixelModification> ReplayController::PixelHistory(ResourceId target, ui
 
       case ResourceUsage::CPUWrite:
         // writing but CPU-only, don't include
+        continue;
+
+      case ResourceUsage::Discard:
+        // writing but not something pixel history should handle
         continue;
 
       case ResourceUsage::Unused:
@@ -1854,6 +1858,9 @@ rdcpair<ResourceId, rdcstr> ReplayController::BuildTargetShader(
 {
   CHECK_REPLAY_THREAD();
 
+  if(source.empty())
+    return rdcpair<ResourceId, rdcstr>(ResourceId(), "0-byte shader is not valid");
+
   rdcarray<ShaderEncoding> encodings = m_pDevice->GetTargetShaderEncodings();
 
   if(encodings.indexOf(sourceEncoding) == -1)
@@ -1891,6 +1898,9 @@ rdcpair<ResourceId, rdcstr> ReplayController::BuildCustomShader(
 
   ResourceId id;
   rdcstr errs;
+
+  if(source.empty())
+    return rdcpair<ResourceId, rdcstr>(ResourceId(), "0-byte shader is not valid");
 
   switch(type)
   {
@@ -1999,15 +2009,16 @@ ReplayStatus ReplayController::PostCreateInit(IReplayDriver *device, RDCFile *rd
 
   m_pDevice = device;
 
+  m_APIProps = m_pDevice->GetAPIProperties();
+
+  GCNISA::CacheSupport(m_APIProps.pipelineType);
+
   ReplayStatus status = m_pDevice->ReadLogInitialisation(rdc, false);
+
+  GCNISA::GetTargets(m_APIProps.pipelineType, m_GCNTargets);
 
   if(status != ReplayStatus::Succeeded)
     return status;
-
-  m_APIProps = m_pDevice->GetAPIProperties();
-
-  // fetch GCN ISA targets
-  GCNISA::GetTargets(m_APIProps.pipelineType, m_GCNTargets);
 
   m_Buffers = m_pDevice->GetBuffers();
   m_Textures = m_pDevice->GetTextures();

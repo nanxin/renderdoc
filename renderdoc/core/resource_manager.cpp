@@ -29,7 +29,7 @@
 
 namespace ResourceIDGen
 {
-static volatile int64_t globalIDCounter = 1;
+static int64_t globalIDCounter = 1;
 
 ResourceId GetNewUniqueID()
 {
@@ -168,6 +168,11 @@ bool IncludesWrite(FrameRefType refType)
 bool IsDirtyFrameRef(FrameRefType refType)
 {
   return (refType != eFrameRef_None && refType != eFrameRef_Read);
+}
+
+bool IsCompleteWriteFrameRef(FrameRefType refType)
+{
+  return refType == eFrameRef_CompleteWrite;
 }
 
 void ResourceRecord::AddResourceReferences(ResourceRecordHandler *mgr)

@@ -30,50 +30,6 @@ RD_TEST(VK_Misaligned_Dirty, VulkanGraphicsTest)
       "Generate a case where the initial states for a buffer end up being misaligned with what can "
       "be cleared.";
 
-  std::string common = R"EOSHADER(
-
-#version 420 core
-
-struct v2f
-{
-	vec4 pos;
-	vec4 col;
-	vec4 uv;
-};
-
-)EOSHADER";
-
-  const std::string vertex = R"EOSHADER(
-
-layout(location = 0) in vec3 Position;
-layout(location = 1) in vec4 Color;
-layout(location = 2) in vec2 UV;
-
-layout(location = 0) out v2f vertOut;
-
-void main()
-{
-	vertOut.pos = vec4(Position.xyz*vec3(1,-1,1), 1);
-	gl_Position = vertOut.pos;
-	vertOut.col = Color;
-	vertOut.uv = vec4(UV.xy, 0, 1);
-}
-
-)EOSHADER";
-
-  const std::string pixel = R"EOSHADER(
-
-layout(location = 0) in v2f vertIn;
-
-layout(location = 0, index = 0) out vec4 Color;
-
-void main()
-{
-	Color = vertIn.col;
-}
-
-)EOSHADER";
-
   int main()
   {
     // initialise, create window, create context, etc
@@ -94,36 +50,68 @@ void main()
     };
 
     pipeCreateInfo.stages = {
-        CompileShaderModule(common + vertex, ShaderLang::glsl, ShaderStage::vert, "main"),
-        CompileShaderModule(common + pixel, ShaderLang::glsl, ShaderStage::frag, "main"),
+        CompileShaderModule(VKDefaultVertex, ShaderLang::glsl, ShaderStage::vert, "main"),
+        CompileShaderModule(VKDefaultPixel, ShaderLang::glsl, ShaderStage::frag, "main"),
     };
 
     VkPipeline pipe = createGraphicsPipeline(pipeCreateInfo);
 
     const float val = 2.0f / 3.0f;
 
-    const DefaultA2V tri[3] = {
+    DefaultA2V tri[4] = {
         {Vec3f(-val, -val, val), Vec4f(0.0f, 1.0f, 0.0f, 1.0f), Vec2f(0.0f, 0.0f)},
         {Vec3f(0.0f, val, val), Vec4f(0.0f, 1.0f, 0.0f, 1.0f), Vec2f(0.0f, 1.0f)},
         {Vec3f(val, -val, val), Vec4f(0.0f, 1.0f, 0.0f, 1.0f), Vec2f(1.0f, 0.0f)},
+        {},
     };
-
-    AllocatedBuffer vb(this, vkh::BufferCreateInfo(sizeof(tri), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
-                                                                    VK_BUFFER_USAGE_TRANSFER_DST_BIT),
-                       VmaAllocationCreateInfo({0, VMA_MEMORY_USAGE_CPU_TO_GPU}));
-
-    vb.upload(tri);
 
     AllocatedBuffer copy_src(
         this, vkh::BufferCreateInfo(
                   sizeof(tri), VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT),
         VmaAllocationCreateInfo({0, VMA_MEMORY_USAGE_CPU_TO_GPU}));
 
+    setName(copy_src.buffer, "copy_src");
+
+    AllocatedBuffer vb(this, vkh::BufferCreateInfo(sizeof(tri), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                                                                    VK_BUFFER_USAGE_TRANSFER_DST_BIT),
+                       VmaAllocationCreateInfo({0, VMA_MEMORY_USAGE_CPU_TO_GPU}));
+
+    setName(vb.buffer, "vb");
+
+    vb.upload(tri);
+
+    tri[0].pos = Vec3f(0.0f, 0.0f, 10.0f);
+
     copy_src.upload(tri);
 
+    VmaAllocationInfo alloc_info;
+
+    vmaGetAllocationInfo(copy_src.allocator, copy_src.alloc, &alloc_info);
+
+    float *mapped = NULL;
+    vkMapMemory(device, alloc_info.deviceMemory, alloc_info.offset + sizeof(DefaultA2V) * 3,
+                sizeof(Vec4f), 0, (void **)&mapped);
+
+    float counter = 0;
     while(Running())
     {
+      counter += 1.0f;
+      mapped[2] = counter;
+
       VkCommandBuffer cmd = GetCommandBuffer();
+
+      // create a dummy submit which uses the memory. This will serialise the whole memory contents
+      // (we don't create reference data until after this)
+      vkBeginCommandBuffer(cmd, vkh::CommandBufferBeginInfo());
+      setMarker(cmd, "First Submit");
+      vkCmdUpdateBuffer(cmd, copy_src.buffer, sizeof(Vec3f), sizeof(Vec4f), &tri[0].col);
+      vkEndCommandBuffer(cmd);
+      Submit(0, 3, {cmd});
+
+      counter += 1.0f;
+      mapped[2] = counter;
+
+      cmd = GetCommandBuffer();
 
       vkBeginCommandBuffer(cmd, vkh::CommandBufferBeginInfo());
 
@@ -135,9 +123,13 @@ void main()
                            vkh::ImageSubresourceRange());
 
       VkBufferCopy region = {};
-      region.srcOffset = 3;
-      region.dstOffset = 3;
+      region.srcOffset = 3 + sizeof(DefaultA2V);
+      region.dstOffset = 3 + sizeof(DefaultA2V);
       region.size = 7;
+      vkCmdCopyBuffer(cmd, copy_src.buffer, vb.buffer, 1, &region);
+      region.srcOffset = sizeof(DefaultA2V) * 3;
+      region.dstOffset = sizeof(DefaultA2V) * 3;
+      region.size = sizeof(DefaultA2V);
       vkCmdCopyBuffer(cmd, copy_src.buffer, vb.buffer, 1, &region);
 
       vkCmdBeginRenderPass(
@@ -148,6 +140,7 @@ void main()
       vkCmdSetViewport(cmd, 0, 1, &mainWindow->viewport);
       vkCmdSetScissor(cmd, 0, 1, &mainWindow->scissor);
       vkh::cmdBindVertexBuffers(cmd, 0, {vb.buffer}, {0});
+      setMarker(cmd, "Second Submit");
       vkCmdDraw(cmd, 3, 1, 0, 0);
 
       vkCmdEndRenderPass(cmd);
@@ -156,10 +149,24 @@ void main()
 
       vkEndCommandBuffer(cmd);
 
-      Submit(0, 1, {cmd});
+      Submit(1, 3, {cmd});
+
+      mapped[2] = counter - 1.0f;
+
+      cmd = GetCommandBuffer();
+
+      // create a dummy submit which uses the memory. This will serialise the whole memory contents
+      // (we don't create reference data until after this)
+      vkBeginCommandBuffer(cmd, vkh::CommandBufferBeginInfo());
+      setMarker(cmd, "Third Submit");
+      vkCmdUpdateBuffer(cmd, copy_src.buffer, sizeof(Vec3f), sizeof(Vec4f), &tri[0].col);
+      vkEndCommandBuffer(cmd);
+      Submit(2, 3, {cmd});
 
       Present();
     }
+
+    vkUnmapMemory(device, alloc_info.deviceMemory);
 
     return 0;
   }

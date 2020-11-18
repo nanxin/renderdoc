@@ -121,6 +121,9 @@ class ConstantBufferChecker:
             raise TestFailureException("Too many variables checked, {} has no matching data".format(name))
         return ShaderVariableCheck(self._variables.pop(0), name)
 
+    def next_var(self):
+        return self._variables[0]
+
     def done(self):
         if len(self._variables) != 0:
             raise TestFailureException("Not all variables checked, {} still remain".format(len(self._variables)))
@@ -198,7 +201,10 @@ class TestCase:
         """
 
         if self.demos_test_name != '':
-            return capture.run_and_capture(util.get_demos_binary(), self.demos_test_name, self.demos_frame_cap, opts=self.get_capture_options(), timeout=util.get_demos_timeout())
+            logfile = os.path.join(util.get_tmp_dir(), 'demos.log')
+            return capture.run_and_capture(util.get_demos_binary(), self.demos_test_name + " --log " + logfile,
+                                           self.demos_frame_cap, logfile=logfile, opts=self.get_capture_options(),
+                                           timeout=util.get_demos_timeout())
 
         raise NotImplementedError("If run() is not implemented in a test, then"
                                   "get_capture() and check_capture() must be.")
@@ -259,12 +265,19 @@ class TestCase:
         else:
             num_indices = min(num_indices, draw.numIndices)
 
+        ioffs = draw.indexOffset * draw.indexByteWidth
+
         mesh = rd.MeshFormat()
         mesh.numIndices = num_indices
-        mesh.indexByteOffset = ib.byteOffset + draw.indexOffset * draw.indexByteWidth
+        mesh.indexByteOffset = ib.byteOffset + ioffs
         mesh.indexByteStride = draw.indexByteWidth
         mesh.indexResourceId = ib.resourceId
         mesh.baseVertex = draw.baseVertex
+
+        if ib.byteSize > ioffs:
+            mesh.indexByteSize = ib.byteSize - ioffs
+        else:
+            mesh.indexByteSize = 0
 
         if not (draw.flags & rd.DrawFlags.Indexed):
             mesh.indexByteOffset = 0
@@ -295,12 +308,19 @@ class TestCase:
 
         ib: rd.BoundVBuffer = self.controller.GetPipelineState().GetIBuffer()
 
+        ioffs = draw.indexOffset * draw.indexByteWidth
+
         in_mesh = rd.MeshFormat()
         in_mesh.numIndices = num_indices
-        in_mesh.indexByteOffset = ib.byteOffset + draw.indexOffset * draw.indexByteWidth
+        in_mesh.indexByteOffset = ib.byteOffset + ioffs
         in_mesh.indexByteStride = draw.indexByteWidth
         in_mesh.indexResourceId = ib.resourceId
         in_mesh.baseVertex = draw.baseVertex
+
+        if ib.byteSize > ioffs:
+            in_mesh.indexByteSize = ib.byteSize - ioffs
+        else:
+            in_mesh.indexByteSize = 0
 
         if not (draw.flags & rd.DrawFlags.Indexed):
             in_mesh.indexByteOffset = 0
@@ -365,6 +385,9 @@ class TestCase:
             save_data = rd.TextureSave()
             save_data.resourceId = tex
             save_data.destType = rd.FileType.PNG
+            save_data.slice.sliceIndex = sub.slice
+            save_data.mip = sub.mip
+            save_data.sample.sampleIndex = sub.sample
 
             img_path = util.get_tmp_path('output.png')
 
@@ -549,7 +572,7 @@ class TestCase:
         remaining = ''
 
         # Otherwise, take off any child if we haven't started recursing
-        m = re.match("([a-zA-Z0-9_]+)(\[|\..*)", path)
+        m = re.match("([a-zA-Z0-9_]+)(\[.*|\..*)", path)
         if m:
             child = m.group(1)
             remaining = m.group(2)

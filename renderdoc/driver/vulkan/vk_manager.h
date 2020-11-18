@@ -117,6 +117,8 @@ struct VkInitialContents
     SAFE_DELETE_ARRAY(descriptorSlots);
     SAFE_DELETE_ARRAY(descriptorWrites);
     SAFE_DELETE_ARRAY(descriptorInfo);
+    SAFE_DELETE_ARRAY(inlineInfo);
+    FreeAlignedBuffer(inlineData);
 
     rm->ResourceTypeRelease(GetWrapped(buf));
     rm->ResourceTypeRelease(GetWrapped(img));
@@ -147,6 +149,9 @@ struct VkInitialContents
   DescriptorSetSlot *descriptorSlots;
   VkWriteDescriptorSet *descriptorWrites;
   VkDescriptorBufferInfo *descriptorInfo;
+  VkWriteDescriptorSetInlineUniformBlockEXT *inlineInfo;
+  byte *inlineData;
+  size_t inlineByteSize;
   uint32_t numDescriptors;
 
   // for plain resources, we store the resource type and memory allocation details of the contents
@@ -220,10 +225,12 @@ public:
   template <typename realtype>
   VkResourceRecord *AddResourceRecord(realtype &obj)
   {
-    typename UnwrapHelper<realtype>::Outer *wrapped = GetWrapped(obj);
+    using WrappedType = typename UnwrapHelper<realtype>::Outer;
+    WrappedType *wrapped = GetWrapped(obj);
     VkResourceRecord *ret = wrapped->record = ResourceManager::AddResourceRecord(wrapped->id);
 
     ret->Resource = (WrappedVkRes *)wrapped;
+    ret->resType = (VkResourceType)WrappedType::TypeEnum;
 
     return ret;
   }
@@ -264,7 +271,7 @@ public:
                      rdcarray<rdcpair<ResourceId, ImageRegionState> > &states,
                      std::map<ResourceId, ImageLayouts> &layouts);
 
-  void RecordBarriers(std::map<ResourceId, ImageState> &states, uint32_t queueFamilyIndex,
+  void RecordBarriers(rdcflatmap<ResourceId, ImageState> &states, uint32_t queueFamilyIndex,
                       uint32_t numBarriers, const VkImageMemoryBarrier *barriers);
 
   template <typename SerialiserType>
@@ -319,6 +326,20 @@ public:
     obj = realtype((uint64_t)wrapped);
 
     return id;
+  }
+
+  template <typename realtype>
+  ResourceId WrapReusedResource(VkResourceRecord *record, realtype &obj)
+  {
+    RDCASSERT(obj != VK_NULL_HANDLE);
+
+    typename UnwrapHelper<realtype>::Outer *wrapped =
+        (typename UnwrapHelper<realtype>::Outer *)record->Resource;
+    wrapped->real = ToTypedHandle(obj).real;
+
+    obj = realtype((uint64_t)wrapped);
+
+    return wrapped->id;
   }
 
   template <typename realtype>
@@ -428,7 +449,7 @@ public:
   void AddDeviceMemory(ResourceId mem);
   void RemoveDeviceMemory(ResourceId mem);
 
-  void MergeReferencedMemory(std::map<ResourceId, MemRefs> &memRefs);
+  void MergeReferencedMemory(rdcflatmap<ResourceId, MemRefs> &memRefs);
   void ClearReferencedMemory();
   MemRefs *FindMemRefs(ResourceId mem);
   ImgRefs *FindImgRefs(ResourceId img);
@@ -449,6 +470,8 @@ public:
     }
   }
 
+  bool IsResourceTrackedForPersistency(WrappedVkRes *const &res);
+
 private:
   bool ResourceTypeRelease(WrappedVkRes *res);
 
@@ -461,7 +484,7 @@ private:
   rdcarray<ResourceId> InitialContentResources();
 
   WrappedVulkan *m_Core;
-  std::map<ResourceId, MemRefs> m_MemFrameRefs;
+  rdcflatmap<ResourceId, MemRefs> m_MemFrameRefs;
   std::set<ResourceId> m_DeviceMemories;
   InitPolicy m_InitPolicy = eInitPolicy_CopyAll;
 };

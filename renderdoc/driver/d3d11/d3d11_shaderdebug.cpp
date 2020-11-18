@@ -1116,8 +1116,6 @@ bool D3D11DebugAPIWrapper::CalculateSampleGather(
   };
 
   int texcoordType = 0;
-  int ddxType = 0;
-  int ddyType = 0;
   int texdimOffs = 0;
 
   if(opcode == OPCODE_SAMPLE || opcode == OPCODE_SAMPLE_L || opcode == OPCODE_SAMPLE_B ||
@@ -1126,7 +1124,7 @@ bool D3D11DebugAPIWrapper::CalculateSampleGather(
      opcode == OPCODE_GATHER4_PO_C || opcode == OPCODE_LOD)
   {
     // all floats
-    texcoordType = ddxType = ddyType = 0;
+    texcoordType = 0;
   }
   else if(opcode == OPCODE_LD)
   {
@@ -1151,7 +1149,7 @@ bool D3D11DebugAPIWrapper::CalculateSampleGather(
 
   for(uint32_t i = 0; i < ddxCalc.columns; i++)
   {
-    if(ddxType == 0 && (_isnan(ddxCalc.value.fv[i]) || !_finite(ddxCalc.value.fv[i])))
+    if(!RDCISFINITE(ddxCalc.value.fv[i]))
     {
       RDCWARN("NaN or Inf in texlookup");
       ddxCalc.value.fv[i] = 0.0f;
@@ -1162,7 +1160,7 @@ bool D3D11DebugAPIWrapper::CalculateSampleGather(
                                                    "texture lookup ddx - using 0.0 instead",
                                                    m_instruction, opString));
     }
-    if(ddyType == 0 && (_isnan(ddyCalc.value.fv[i]) || !_finite(ddyCalc.value.fv[i])))
+    if(!RDCISFINITE(ddyCalc.value.fv[i]))
     {
       RDCWARN("NaN or Inf in texlookup");
       ddyCalc.value.fv[i] = 0.0f;
@@ -1177,7 +1175,7 @@ bool D3D11DebugAPIWrapper::CalculateSampleGather(
 
   for(uint32_t i = 0; i < uv.columns; i++)
   {
-    if(texcoordType == 0 && (_isnan(uv.value.fv[i]) || !_finite(uv.value.fv[i])))
+    if(texcoordType == 0 && !RDCISFINITE(uv.value.fv[i]))
     {
       RDCWARN("NaN or Inf in texlookup");
       uv.value.fv[i] = 0.0f;
@@ -1237,23 +1235,11 @@ bool D3D11DebugAPIWrapper::CalculateSampleGather(
 
   if(opcode == OPCODE_SAMPLE || opcode == OPCODE_SAMPLE_B || opcode == OPCODE_SAMPLE_D)
   {
-    rdcstr ddx;
+    rdcstr ddx = StringFormat::Fmt(formats[offsetDim + texdimOffs - 1][0], ddxCalc.value.f.x,
+                                   ddxCalc.value.f.y, ddxCalc.value.f.z, ddxCalc.value.f.w);
 
-    if(ddxType == 0)
-      ddx = StringFormat::Fmt(formats[offsetDim + texdimOffs - 1][ddxType], ddxCalc.value.f.x,
-                              ddxCalc.value.f.y, ddxCalc.value.f.z, ddxCalc.value.f.w);
-    else
-      ddx = StringFormat::Fmt(formats[offsetDim + texdimOffs - 1][ddxType], ddxCalc.value.i.x,
-                              ddxCalc.value.i.y, ddxCalc.value.i.z, ddxCalc.value.i.w);
-
-    rdcstr ddy;
-
-    if(ddyType == 0)
-      ddy = StringFormat::Fmt(formats[offsetDim + texdimOffs - 1][ddyType], ddyCalc.value.f.x,
-                              ddyCalc.value.f.y, ddyCalc.value.f.z, ddyCalc.value.f.w);
-    else
-      ddy = StringFormat::Fmt(formats[offsetDim + texdimOffs - 1][ddyType], ddyCalc.value.i.x,
-                              ddyCalc.value.i.y, ddyCalc.value.i.z, ddyCalc.value.i.w);
+    rdcstr ddy = StringFormat::Fmt(formats[offsetDim + texdimOffs - 1][0], ddyCalc.value.f.x,
+                                   ddyCalc.value.f.y, ddyCalc.value.f.z, ddyCalc.value.f.w);
 
     sampleProgram = StringFormat::Fmt("%s : register(t0);\n%s : register(s0);\n\n",
                                       textureDecl.c_str(), samplerDecl.c_str());
@@ -1378,17 +1364,13 @@ bool D3D11DebugAPIWrapper::CalculateSampleGather(
     return false;
   }
 
+  D3D11RenderStateTracker tracker(m_pDevice->GetImmediateContext());
+
   ID3D11DeviceContext *context = NULL;
 
   m_pDevice->GetImmediateContext(&context);
 
   // back up SRV/sampler on PS slot 0
-
-  ID3D11ShaderResourceView *prevSRV = NULL;
-  ID3D11SamplerState *prevSamp = NULL;
-
-  context->PSGetShaderResources(0, 1, &prevSRV);
-  context->PSGetSamplers(0, 1, &prevSamp);
 
   ID3D11ShaderResourceView *usedSRV = NULL;
   ID3D11SamplerState *usedSamp = NULL;
@@ -1556,15 +1538,7 @@ bool D3D11DebugAPIWrapper::CalculateSampleGather(
   SAFE_RELEASE(vs);
   SAFE_RELEASE(ps);
 
-  // restore whatever was on PS slot 0 before we messed with it
-
-  context->PSSetShaderResources(0, 1, &prevSRV);
-  context->PSSetSamplers(0, 1, &prevSamp);
-
   SAFE_RELEASE(context);
-
-  SAFE_RELEASE(prevSRV);
-  SAFE_RELEASE(prevSamp);
 
   SAFE_RELEASE(usedSRV);
   SAFE_RELEASE(usedSamp);
@@ -1598,16 +1572,10 @@ bool D3D11DebugAPIWrapper::CalculateMathIntrinsic(DXBCBytecode::OpcodeType opcod
   ID3D11ComputeShader *cs =
       m_pDevice->GetShaderCache()->MakeCShader(csProgram.c_str(), "main", "cs_5_0");
 
+  D3D11RenderStateTracker tracker(m_pDevice->GetImmediateContext());
+
   ID3D11DeviceContext *context = NULL;
   m_pDevice->GetImmediateContext(&context);
-
-  // back up CB/UAV on CS slot 0
-
-  ID3D11Buffer *prevCB = NULL;
-  ID3D11UnorderedAccessView *prevUAV = NULL;
-
-  context->CSGetConstantBuffers(0, 1, &prevCB);
-  context->CSGetUnorderedAccessViews(0, 1, &prevUAV);
 
   ID3D11Buffer *constBuf = NULL;
 
@@ -1714,16 +1682,7 @@ bool D3D11DebugAPIWrapper::CalculateMathIntrinsic(DXBCBytecode::OpcodeType opcod
   SAFE_RELEASE(uav);
   SAFE_RELEASE(cs);
 
-  // restore whatever was on CS slot 0 before we messed with it
-
-  UINT append[] = {~0U};
-  context->CSSetConstantBuffers(0, 1, &prevCB);
-  context->CSSetUnorderedAccessViews(0, 1, &prevUAV, append);
-
   SAFE_RELEASE(context);
-
-  SAFE_RELEASE(prevCB);
-  SAFE_RELEASE(prevUAV);
 
   return true;
 }
@@ -1991,7 +1950,7 @@ ShaderDebugTrace *D3D11Replay::DebugVertex(uint32_t eventId, uint32_t vertid, ui
       }
       else
       {
-        if(size_t(fmt.compByteWidth * fmt.compCount) > dataSize)
+        if(srcData == NULL || size_t(fmt.compByteWidth * fmt.compCount) > dataSize)
         {
           state.inputs[i].value.u.x = state.inputs[i].value.u.y = state.inputs[i].value.u.z = 0;
           if(fmt.compType == CompType::UInt || fmt.compType == CompType::SInt)

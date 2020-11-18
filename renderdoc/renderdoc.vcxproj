@@ -25,6 +25,7 @@
     <RootNamespace>renderdoc</RootNamespace>
     <ProjectName>renderdoc</ProjectName>
   </PropertyGroup>
+  <Import Project="$(SolutionDir)\util\WindowsSDKTarget.props" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
@@ -180,6 +181,7 @@
     <ClInclude Include="api\replay\gl_pipestate.h" />
     <ClInclude Include="api\replay\pipestate.h" />
     <ClInclude Include="api\replay\rdcarray.h" />
+    <ClInclude Include="api\replay\rdcflatmap.h" />
     <ClInclude Include="api\replay\rdcpair.h" />
     <ClInclude Include="api\replay\rdcstr.h" />
     <ClInclude Include="api\replay\renderdoc_replay.h" />
@@ -288,22 +290,42 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
+      <Optimization>MaxSpeed</Optimization>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <ClCompile Include="3rdparty\jpeg-compressor\jpge.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
+      <Optimization>MaxSpeed</Optimization>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <ClCompile Include="3rdparty\lz4\lz4.c">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
+      <Optimization>MaxSpeed</Optimization>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <ClCompile Include="3rdparty\miniz\miniz.c">
       <DisableSpecificWarnings>4100;4127</DisableSpecificWarnings>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
+      <Optimization>MaxSpeed</Optimization>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <ClCompile Include="3rdparty\plthook\plthook_elf.c">
       <ExcludedFromBuild>true</ExcludedFromBuild>
@@ -312,11 +334,21 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
+      <Optimization>MaxSpeed</Optimization>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <ClCompile Include="3rdparty\stb\stb_impl.c">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
+      <Optimization>MaxSpeed</Optimization>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <ClCompile Include="3rdparty\tinyexr\tinyexr.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -332,101 +364,201 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
+      <Optimization>MaxSpeed</Optimization>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <ClCompile Include="3rdparty\zstd\hist.c">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
+      <Optimization>MaxSpeed</Optimization>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <ClCompile Include="3rdparty\zstd\zstd_double_fast.c">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
+      <Optimization>MaxSpeed</Optimization>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <ClCompile Include="3rdparty\zstd\zstd_fast.c">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
+      <Optimization>MaxSpeed</Optimization>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <ClCompile Include="3rdparty\zstd\zstd_lazy.c">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
+      <Optimization>MaxSpeed</Optimization>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <ClCompile Include="3rdparty\zstd\zstd_ldm.c">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
+      <Optimization>MaxSpeed</Optimization>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <ClCompile Include="3rdparty\zstd\zstd_opt.c">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
+      <Optimization>MaxSpeed</Optimization>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <ClCompile Include="3rdparty\zstd\entropy_common.c">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
+      <Optimization>MaxSpeed</Optimization>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <ClCompile Include="3rdparty\zstd\error_private.c">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
+      <Optimization>MaxSpeed</Optimization>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <ClCompile Include="3rdparty\zstd\fse_decompress.c">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
+      <Optimization>MaxSpeed</Optimization>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <ClCompile Include="3rdparty\zstd\pool.c">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
+      <Optimization>MaxSpeed</Optimization>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <ClCompile Include="3rdparty\zstd\threading.c">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
+      <Optimization>MaxSpeed</Optimization>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <ClCompile Include="3rdparty\zstd\xxhash.c">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
+      <Optimization>MaxSpeed</Optimization>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <ClCompile Include="3rdparty\zstd\zstd_common.c">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
+      <Optimization>MaxSpeed</Optimization>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <ClCompile Include="3rdparty\zstd\fse_compress.c">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
+      <Optimization>MaxSpeed</Optimization>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <ClCompile Include="3rdparty\zstd\huf_compress.c">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
+      <Optimization>MaxSpeed</Optimization>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <ClCompile Include="3rdparty\zstd\zstdmt_compress.c">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
+      <Optimization>MaxSpeed</Optimization>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <ClCompile Include="3rdparty\zstd\zstd_compress.c">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
+      <Optimization>MaxSpeed</Optimization>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <ClCompile Include="3rdparty\zstd\huf_decompress.c">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
+      <Optimization>MaxSpeed</Optimization>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <ClCompile Include="3rdparty\zstd\zstd_decompress.c">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
+      <Optimization>MaxSpeed</Optimization>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <ClCompile Include="android\android.cpp" />
     <ClCompile Include="android\android_manifest.cpp" />
@@ -588,6 +720,7 @@
     <None Include="data\glsl\checkerboard.frag" />
     <None Include="data\glsl\deptharr2ms.frag" />
     <None Include="data\glsl\depthms2arr.frag" />
+    <None Include="data\glsl\discard.frag" />
     <None Include="data\glsl\fixedcol.frag" />
     <None Include="data\glsl\gltext.frag" />
     <None Include="data\glsl\gltext.vert" />
@@ -600,6 +733,7 @@
     <None Include="data\glsl\minmaxtile.comp" />
     <None Include="data\glsl\ms2array.comp" />
     <None Include="data\glsl\pixelhistory_mscopy.comp" />
+    <None Include="data\glsl\pixelhistory_mscopy_depth.comp" />
     <None Include="data\glsl\pixelhistory_primid.frag" />
     <None Include="data\glsl\quadresolve.frag" />
     <None Include="data\glsl\quadwrite.frag" />
@@ -620,9 +754,91 @@
     <None Include="data\hlsl\quadoverdraw.hlsl" />
     <None Include="data\hlsl\texdisplay.hlsl" />
     <None Include="os\win32\comexport.def" />
+    <None Include="librenderdoc.so-gdb.py" />
     <None Include="replay\renderdoc_serialise.inl" />
     <None Include="data\hlsl\texremap.hlsl" />
+    <None Include="data\hlsl\fixedcol.hlsl" />
   </ItemGroup>
+  <!-- try to bake shaders needed in DXIL now, in case we won't be able to find a dxc at runtime -->
+  <UsingTask TaskName="GetDXCExecutable" TaskFactory="CodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <DXC ParameterType="System.String" Required="False" Output="True" />
+      <SDKPath ParameterType="System.String" Required="True" Output="False" />
+    </ParameterGroup>
+    <Task>
+      <Code Type="Class" Language="cs">
+using System;
+using System.Diagnostics;
+using System.Linq;
+using System.Runtime.CompilerServices;
+
+namespace DXCEnumerateAndCheck {
+  public class GetDXCExecutable : Microsoft.Build.Utilities.Task {
+    public override bool Execute() {
+      string[] dirs = System.IO.Directory.GetDirectories(SDKPath, "10.*");
+      // sort and reverse so we try from latest to oldest
+      System.Array.Sort(dirs);
+      System.Array.Reverse(dirs);
+
+      // look for the latest dxc.exe available that works
+      foreach(string path in dirs)
+      {
+        string dxcCheck = System.IO.Path.Combine(path, "x64", "dxc.exe");
+        if(System.IO.File.Exists(dxcCheck))
+        {
+          // check that dxc.exe is runnable, some dxc.exe are broken
+          try
+          {
+            ProcessStartInfo psi = new ProcessStartInfo();
+            psi.UseShellExecute = false;
+            psi.FileName = dxcCheck;
+            psi.CreateNoWindow = true;
+            Process.Start(psi);
+            DXC = dxcCheck;
+            return true;
+          }
+          catch(Exception ex)
+          {
+            // keep going, maybe we'll find one that works
+          }
+        }
+      }
+      // always succeed even if we don't find dxc
+      return true;
+    }
+
+    [Microsoft.Build.Framework.Required] public string SDKPath { get; set; }
+    [Microsoft.Build.Framework.Output] public string DXC { get; set; }
+  }
+}
+      </Code>
+    </Task>
+  </UsingTask>
+  <Target Name="_findDXC" BeforeTargets="PrepareForBuild">
+    <GetDXCExecutable SDKPath="$(Registry:HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Microsoft SDKs\Windows\v10.0@InstallationFolder)bin" ContinueOnError="WarnAndContinue">
+      <Output TaskParameter="DXC" PropertyName="DXCExecutable" />
+    </GetDXCExecutable>
+    <Message Condition="$(DXCExecutable.Length) == 0" Importance="high" Text="Can't build DXIL shaders without DXC. Install windows 10 SDK to bake DXIL shaders." />
+    <PropertyGroup>
+      <DXILBakedDir>$(IntDir)</DXILBakedDir>
+      <DXILBakedDirParam>$(DXILBakedDir.Replace('\', '/'))</DXILBakedDirParam>
+    </PropertyGroup>
+    <ItemGroup Condition="$(DXCExecutable.Length) &gt; 0">
+      <ResourceCompile>
+        <AdditionalIncludeDirectories>$(DXILBakedDirParam)</AdditionalIncludeDirectories>
+        <PreprocessorDefinitions>RENDERDOC_BAKED_DXC_SHADERS=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      </ResourceCompile>
+    </ItemGroup>
+  </Target>
+  <Target Name="_bakeShaders" BeforeTargets="PrepareForBuild" Condition="$(DXCExecutable.Length) &gt; 0" Inputs="data\hlsl\fixedcol.hlsl;data\hlsl\quadoverdraw.hlsl" Outputs="$(DXILBakedDir)\fixedcol_0.dxbc;$(DXILBakedDir)\fixedcol_1.dxbc;$(DXILBakedDir)\fixedcol_2.dxbc;$(DXILBakedDir)\fixedcol_3.dxbc;$(DXILBakedDir)\quadwrite.dxbc">
+    <Message Text="Baking DXIL Shaders with $(DXCExecutable)" Importance="High" />
+    <MakeDir Directories="$(DXILBakedDir)" />
+    <Exec Command="&quot;$(DXCExecutable)&quot; &quot;$(ProjectDir)data\hlsl\fixedcol.hlsl&quot; -T ps_6_0 -DVARIANT=0 -E main -Qstrip_reflect -Fo &quot;$(DXILBakedDir)fixedcol_0.dxbc&quot;" />
+    <Exec Command="&quot;$(DXCExecutable)&quot; &quot;$(ProjectDir)data\hlsl\fixedcol.hlsl&quot; -T ps_6_0 -DVARIANT=1 -E main -Qstrip_reflect -Fo &quot;$(DXILBakedDir)fixedcol_1.dxbc&quot;" />
+    <Exec Command="&quot;$(DXCExecutable)&quot; &quot;$(ProjectDir)data\hlsl\fixedcol.hlsl&quot; -T ps_6_0 -DVARIANT=2 -E main -Qstrip_reflect -Fo &quot;$(DXILBakedDir)fixedcol_2.dxbc&quot;" />
+    <Exec Command="&quot;$(DXCExecutable)&quot; &quot;$(ProjectDir)data\hlsl\fixedcol.hlsl&quot; -T ps_6_0 -DVARIANT=3 -E main -Qstrip_reflect -Fo &quot;$(DXILBakedDir)fixedcol_3.dxbc&quot;" />
+    <Exec Command="&quot;$(DXCExecutable)&quot; &quot;$(ProjectDir)data\hlsl\quadoverdraw.hlsl&quot; -T ps_6_0 -E RENDERDOC_QuadOverdrawPS -Qstrip_reflect -Fo &quot;$(DXILBakedDir)quadwrite.dxbc&quot;" />
+  </Target>
   <ItemGroup>
     <Natvis Include="renderdoc.natvis" />
   </ItemGroup>
@@ -676,6 +892,9 @@
     </ProjectReference>
     <ProjectReference Include="driver\ihv\amd\AMD.vcxproj">
       <Project>{5de5a561-548a-4dd7-90f0-06a2b39eae9a}</Project>
+    </ProjectReference>
+    <ProjectReference Include="driver\ihv\arm\ARM.vcxproj">
+      <Project>{F9CCE6CA-0CA3-4A22-9C7B-881369955E62}</Project>
     </ProjectReference>
     <ProjectReference Include="driver\ihv\intel\Intel.vcxproj">
       <Project>{7fcb5fc5-1dbd-4da6-83a0-6ba4e945bda5}</Project>

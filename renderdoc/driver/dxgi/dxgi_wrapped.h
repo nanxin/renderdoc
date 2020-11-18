@@ -170,12 +170,17 @@ struct IDXGISwapper
   virtual HWND GetHWND() = 0;
 };
 
+struct IFrameCapturer;
+
 struct ID3DDevice
 {
   // re-use IUnknown
   virtual ULONG STDMETHODCALLTYPE AddRef() = 0;
   virtual ULONG STDMETHODCALLTYPE Release() = 0;
   virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) = 0;
+
+  virtual void *GetFrameCapturerDevice() = 0;
+  virtual IFrameCapturer *GetFrameCapturer() = 0;
 
   virtual IUnknown *GetRealIUnknown() = 0;
 
@@ -1331,8 +1336,7 @@ public:
   WrappedIDXGIDevice4(IDXGIDevice *real, ID3DDevice *d3d);
   virtual ~WrappedIDXGIDevice4();
 
-  static const int AllocPoolCount = 4;
-  ALLOCATE_WITH_WRAPPED_POOL(WrappedIDXGIDevice4, AllocPoolCount);
+  ALLOCATE_WITH_WRAPPED_POOL(WrappedIDXGIDevice4);
 
   IMPLEMENT_IDXGIOBJECT_WITH_REFCOUNTDXGIOBJECT_CUSTOMQUERY;
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject);

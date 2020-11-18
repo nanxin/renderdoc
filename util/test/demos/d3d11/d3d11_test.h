@@ -50,8 +50,8 @@ struct D3D11GraphicsTest : public GraphicsTest
   void Shutdown();
   GraphicsWindow *MakeWindow(int width, int height, const char *title);
 
-  HRESULT CreateDevice(const std::vector<IDXGIAdapterPtr> &adaptersToTry,
-                       DXGI_SWAP_CHAIN_DESC *swapDesc, D3D_FEATURE_LEVEL *features, UINT flags);
+  HRESULT CreateDevice(IDXGIAdapterPtr adapterToTry, DXGI_SWAP_CHAIN_DESC *swapDesc,
+                       D3D_FEATURE_LEVEL *features, UINT flags);
   void PostDeviceCreate();
 
   enum BufType
@@ -70,9 +70,9 @@ struct D3D11GraphicsTest : public GraphicsTest
     BufUAVType = 0xf00,
   };
 
-  ID3DBlobPtr Compile(std::string src, std::string entry, std::string profile,
-                      ID3DBlob **unstripped = NULL);
-  void WriteBlob(std::string name, ID3DBlob *blob, bool compress);
+  ID3DBlobPtr Compile(std::string src, std::string entry, std::string profile);
+  void Strip(ID3DBlobPtr &ptr);
+  void WriteBlob(std::string name, ID3DBlobPtr blob, bool compress);
 
   ID3D11VertexShaderPtr CreateVS(ID3DBlobPtr blob);
   ID3D11PixelShaderPtr CreatePS(ID3DBlobPtr blob);
@@ -82,45 +82,45 @@ struct D3D11GraphicsTest : public GraphicsTest
                                    const std::vector<D3D11_SO_DECLARATION_ENTRY> &sodecl,
                                    const std::vector<UINT> &strides, UINT rastStream = 0);
 
-  ID3DBlobPtr SetBlobPath(std::string name, ID3DBlob *blob);
+  void SetBlobPath(std::string name, ID3DBlobPtr &blob);
   void SetBlobPath(std::string name, ID3D11DeviceChild *shader);
 
   void CreateDefaultInputLayout(ID3DBlobPtr vsblob);
 
-  D3D11BufferCreator MakeBuffer() { return D3D11BufferCreator(this); }
+  D3D11BufferCreator MakeBuffer() { return D3D11BufferCreator(dev); }
   D3D11TextureCreator MakeTexture(DXGI_FORMAT format, UINT width)
   {
-    return D3D11TextureCreator(this, format, width, 1, 1);
+    return D3D11TextureCreator(dev, format, width, 1, 1);
   }
   D3D11TextureCreator MakeTexture(DXGI_FORMAT format, UINT width, UINT height)
   {
-    return D3D11TextureCreator(this, format, width, height, 1);
+    return D3D11TextureCreator(dev, format, width, height, 1);
   }
   D3D11TextureCreator MakeTexture(DXGI_FORMAT format, UINT width, UINT height, UINT depth)
   {
-    return D3D11TextureCreator(this, format, width, height, depth);
+    return D3D11TextureCreator(dev, format, width, height, depth);
   }
 
-  D3D11SamplerCreator MakeSampler() { return D3D11SamplerCreator(this); }
+  D3D11SamplerCreator MakeSampler() { return D3D11SamplerCreator(dev); }
   template <typename T>
   D3D11ViewCreator MakeSRV(T res)
   {
-    return D3D11ViewCreator(this, ViewType::SRV, res);
+    return D3D11ViewCreator(dev, ViewType::SRV, res);
   }
   template <typename T>
   D3D11ViewCreator MakeRTV(T res)
   {
-    return D3D11ViewCreator(this, ViewType::RTV, res);
+    return D3D11ViewCreator(dev, ViewType::RTV, res);
   }
   template <typename T>
   D3D11ViewCreator MakeDSV(T res)
   {
-    return D3D11ViewCreator(this, ViewType::DSV, res);
+    return D3D11ViewCreator(dev, ViewType::DSV, res);
   }
   template <typename T>
   D3D11ViewCreator MakeUAV(T res)
   {
-    return D3D11ViewCreator(this, ViewType::UAV, res);
+    return D3D11ViewCreator(dev, ViewType::UAV, res);
   }
 
   std::vector<byte> GetBufferData(ID3D11Buffer *buf, uint32_t offset = 0, uint32_t len = 0);

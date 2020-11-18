@@ -32,6 +32,7 @@
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QScreen>
 #include <QSplitter>
 #include <QTabBar>
@@ -828,7 +829,7 @@ void ToolWindowManager::startDrag(const QList<QWidget *> &toolWindows,
 QVariantMap ToolWindowManager::saveSplitterState(QSplitter *splitter)
 {
   QVariantMap result;
-  result[QStringLiteral("state")] = splitter->saveState().toBase64();
+  result[QStringLiteral("state")] = QString::fromLatin1(splitter->saveState().toBase64());
   result[QStringLiteral("type")] = QStringLiteral("splitter");
   QVariantList items;
   for(int i = 0; i < splitter->count(); i++)

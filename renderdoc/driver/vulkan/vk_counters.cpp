@@ -52,7 +52,7 @@ static void GetKHRUnitDescription(const VkPerformanceCounterUnitKHR khrUnit,
                                   const VkPerformanceCounterStorageKHR khrStorage,
                                   CounterUnit &unit, CompType &type, uint32_t &byteWidth)
 {
-  type = isFloatKhrStorage(khrStorage) ? CompType::Double : CompType::UInt;
+  type = isFloatKhrStorage(khrStorage) ? CompType::Float : CompType::UInt;
   byteWidth = 8;
 
   switch(khrUnit)
@@ -154,7 +154,12 @@ rdcarray<GPUCounter> VulkanReplay::EnumerateCounters()
         Unwrap(physDev), 0, &khrCounters, &m_KHRCounters[0], &m_KHRCountersDescriptions[0]);
 
     for(uint32_t c = 0; c < khrCounters; c++)
-      ret.push_back(ToKHRCounter(c));
+    {
+      // Only report counters with command scope. We currently don't
+      // have use for renderpass ones.
+      if(m_KHRCounters[c].scope == VK_PERFORMANCE_COUNTER_SCOPE_COMMAND_KHR)
+        ret.push_back(ToKHRCounter(c));
+    }
   }
 
   if(m_pAMDCounters)
@@ -204,7 +209,7 @@ CounterDescription VulkanReplay::DescribeCounter(GPUCounter counterID)
 
     // Special chase for time units.
     if(khrCounter.unit == VK_PERFORMANCE_COUNTER_UNIT_NANOSECONDS_KHR)
-      rdcDesc.resultType = CompType::Double;
+      rdcDesc.resultType = CompType::Float;
 
     return rdcDesc;
   }
@@ -224,7 +229,7 @@ CounterDescription VulkanReplay::DescribeCounter(GPUCounter counterID)
       desc.description =
           "Time taken for this event on the GPU, as measured by delta between two GPU timestamps.";
       desc.resultByteWidth = 8;
-      desc.resultType = CompType::Double;
+      desc.resultType = CompType::Float;
       desc.unit = CounterUnit::Seconds;
       break;
     case GPUCounter::InputVerticesRead:
@@ -543,22 +548,13 @@ struct VulkanKHRCallback : public VulkanDrawcallCallback
   void PreDispatch(uint32_t eid, VkCommandBuffer cmd) override { PreDraw(eid, cmd); }
   bool PostDispatch(uint32_t eid, VkCommandBuffer cmd) override { return PostDraw(eid, cmd); }
   void PostRedispatch(uint32_t eid, VkCommandBuffer cmd) override { PostRedraw(eid, cmd); }
-  void PreMisc(uint32_t eid, DrawFlags flags, VkCommandBuffer cmd) override
-  {
-    if(flags & DrawFlags::PassBoundary)
-      return;
-    PreDraw(eid, cmd);
-  }
+  void PreMisc(uint32_t eid, DrawFlags flags, VkCommandBuffer cmd) override { PreDraw(eid, cmd); }
   bool PostMisc(uint32_t eid, DrawFlags flags, VkCommandBuffer cmd) override
   {
-    if(flags & DrawFlags::PassBoundary)
-      return false;
     return PostDraw(eid, cmd);
   }
   void PostRemisc(uint32_t eid, DrawFlags flags, VkCommandBuffer cmd) override
   {
-    if(flags & DrawFlags::PassBoundary)
-      return;
     PostRedraw(eid, cmd);
   }
   void AliasEvent(uint32_t primary, uint32_t alias) override

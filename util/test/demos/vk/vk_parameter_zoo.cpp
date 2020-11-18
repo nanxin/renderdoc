@@ -34,52 +34,9 @@ RD_TEST(VK_Parameter_Zoo, VulkanGraphicsTest)
       "General tests of parameters known to cause problems - e.g. optional values that should be "
       "ignored, edge cases, special values, etc.";
 
-  std::string common = R"EOSHADER(
-
-#version 420 core
-
-struct v2f
-{
-	vec4 pos;
-	vec4 col;
-	vec4 uv;
-};
-
-)EOSHADER";
-
-  const std::string vertex = R"EOSHADER(
-
-layout(location = 0) in vec3 Position;
-layout(location = 1) in vec4 Color;
-layout(location = 2) in vec2 UV;
-
-layout(location = 0) out v2f vertOut;
-
-void main()
-{
-	vertOut.pos = vec4(Position.xyz*vec3(1,-1,1), 1);
-	gl_Position = vertOut.pos;
-	vertOut.col = Color;
-	vertOut.uv = vec4(UV.xy, 0, 1);
-}
-
-)EOSHADER";
-
-  const std::string pixel = R"EOSHADER(
-
-layout(location = 0) in v2f vertIn;
-
-layout(location = 0, index = 0) out vec4 Color;
-
-void main()
-{
-	Color = vertIn.col;
-}
-
-)EOSHADER";
-
   const std::string pixel2 = R"EOSHADER(
 #version 450 core
+
 #extension GL_EXT_samplerless_texture_functions : enable
 
 layout(location = 0, index = 0) out vec4 Color;
@@ -106,6 +63,78 @@ void main()
 	Color = vec4(0, 1, 0, 1) * texelFetch(tex, ivec2(0), 0);
 }
 
+)EOSHADER";
+
+  const std::string asm_vertex = R"EOSHADER(
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Vertex %main "main" %idx %pos %imgres
+               OpDecorate %idx BuiltIn VertexIndex
+               OpDecorate %pos BuiltIn Position
+               OpDecorate %imgres Location 0
+               OpDecorate %imgs DescriptorSet 0
+               OpDecorate %imgs Binding 10
+               OpMemberDecorate %PushData 0 Offset 0
+               OpDecorate %PushData Block
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+        %int = OpTypeInt 32 1
+      %float = OpTypeFloat 32
+      %int_0 = OpConstant %int 0
+         %10 = OpTypeImage %float 2D 0 0 0 1 Unknown
+     %uint_4 = OpConstant %uint 4
+%_arr_10_uint_4 = OpTypeArray %10 %uint_4
+%_ptr_UniformConstant__arr_10_uint_4 = OpTypePointer UniformConstant %_arr_10_uint_4
+%_ptr_UniformConstant_10 = OpTypePointer UniformConstant %10
+       %imgs = OpVariable %_ptr_UniformConstant__arr_10_uint_4 UniformConstant
+   %PushData = OpTypeStruct %uint
+%_ptr_PushConstant_PushData = OpTypePointer PushConstant %PushData
+%_ptr_PushConstant_uint = OpTypePointer PushConstant %uint
+       %push = OpVariable %_ptr_PushConstant_PushData PushConstant
+      %v2int = OpTypeVector %int 2
+    %v4float = OpTypeVector %float 4
+    %v2float = OpTypeVector %float 2
+%_arr_v2float_uint_4 = OpTypeArray %v2float %uint_4
+%_ptr_Function__arr_v2float_uint_4 = OpTypePointer Function %_arr_v2float_uint_4
+   %float_n1 = OpConstant %float -1
+    %float_1 = OpConstant %float 1
+         %21 = OpConstantComposite %v2float %float_n1 %float_1
+         %22 = OpConstantComposite %v2float %float_1 %float_1
+         %23 = OpConstantComposite %v2float %float_n1 %float_n1
+         %24 = OpConstantComposite %v2float %float_1 %float_n1
+         %25 = OpConstantComposite %_arr_v2float_uint_4 %21 %22 %23 %24
+%_ptr_Function_v2float = OpTypePointer Function %v2float
+    %float_0 = OpConstant %float 0
+%_ptr_Input_uint = OpTypePointer Input %uint
+        %idx = OpVariable %_ptr_Input_uint Input
+%_ptr_Output_v4float = OpTypePointer Output %v4float
+%pos = OpVariable %_ptr_Output_v4float Output
+%imgres = OpVariable %_ptr_Output_v4float Output
+       %main = OpFunction %void None %3
+          %5 = OpLabel
+         %45 = OpVariable %_ptr_Function__arr_v2float_uint_4 Function
+         %39 = OpLoad %uint %idx
+               OpStore %45 %25
+         %49 = OpAccessChain %_ptr_Function_v2float %45 %39
+         %50 = OpLoad %v2float %49
+         %51 = OpCompositeExtract %float %50 0
+         %52 = OpCompositeExtract %float %50 1
+         %53 = OpCompositeConstruct %v4float %51 %52 %float_0 %float_1
+
+               OpStore %pos %53
+
+         %54 = OpAccessChain %_ptr_PushConstant_uint %push %int_0
+         %55 = OpLoad %uint %54
+         %56 = OpAccessChain %_ptr_UniformConstant_10 %imgs %55
+         %57 = OpLoad %10 %56
+         %58 = OpCompositeConstruct %v2int %int_0 %int_0
+         %59 = OpImageFetch %v4float %57 %58 Lod %int_0
+
+               OpStore %imgres %59
+
+               OpReturn
+               OpFunctionEnd
 )EOSHADER";
 
   struct refdatastruct
@@ -193,6 +222,7 @@ void main()
        devExts.end())
     {
       timeline.timelineSemaphore = VK_TRUE;
+      timeline.pNext = (void *)devInfoNext;
       devInfoNext = &timeline;
     }
 
@@ -216,6 +246,18 @@ void main()
       if(vk12avail.timelineSemaphore)
         vk12.timelineSemaphore = VK_TRUE;
     }
+
+    static VkPhysicalDeviceTransformFeedbackFeaturesEXT xfbFeats = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT,
+    };
+
+    if(std::find(devExts.begin(), devExts.end(), VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME) !=
+       devExts.end())
+    {
+      xfbFeats.transformFeedback = VK_TRUE;
+      xfbFeats.pNext = (void *)devInfoNext;
+      devInfoNext = &xfbFeats;
+    }
   }
 
   int main()
@@ -236,6 +278,33 @@ void main()
       TEST_LOG("%u tools available:", toolCount);
       for(VkPhysicalDeviceToolPropertiesEXT &tool : tools)
         TEST_LOG("  - %s", tool.name);
+    }
+
+    {
+      VkPhysicalDeviceProperties2KHR props2 = vkh::PhysicalDeviceProperties2KHR();
+
+      PFN_vkGetPhysicalDeviceProperties2KHR instfn =
+          (PFN_vkGetPhysicalDeviceProperties2KHR)vkGetInstanceProcAddr(
+              instance, "vkGetPhysicalDeviceProperties2KHR");
+      PFN_vkGetPhysicalDeviceProperties2KHR devfn =
+          (PFN_vkGetPhysicalDeviceProperties2KHR)vkGetDeviceProcAddr(
+              device, "vkGetPhysicalDeviceProperties2KHR");
+
+      instfn(phys, &props2);
+
+      TEST_LOG("Got physical device %s", props2.properties.deviceName);
+
+      props2 = vkh::PhysicalDeviceProperties2KHR();
+
+      if(devfn != NULL)
+      {
+        TEST_ERROR("Unexpected non-NULL return from vkGetDeviceProcAddr for physdev function");
+
+        // we expect this to crash
+        devfn(phys, &props2);
+
+        return 5;
+      }
     }
 
     bool KHR_descriptor_update_template =
@@ -291,11 +360,7 @@ void main()
         }));
 
     VkSampler invalidSampler = (VkSampler)0x1234;
-    VkSampler validSampler = VK_NULL_HANDLE;
-    VkSamplerCreateInfo sampInfo = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-    sampInfo.magFilter = VK_FILTER_LINEAR;
-    sampInfo.minFilter = VK_FILTER_LINEAR;
-    vkCreateSampler(device, &sampInfo, NULL, &validSampler);
+    VkSampler validSampler = createSampler(vkh::SamplerCreateInfo(VK_FILTER_LINEAR));
 
     VkDescriptorSetLayout immutsetlayout = createDescriptorSetLayout(vkh::DescriptorSetLayoutCreateInfo({
         {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_VERTEX_BIT, &validSampler},
@@ -355,9 +420,25 @@ void main()
         {1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
     }));
 
+    VkPipelineLayout layout2 = createPipelineLayout(vkh::PipelineLayoutCreateInfo({setlayout2}));
+
     VkDescriptorSet descset2 = allocateDescriptorSet(setlayout2);
 
-    VkPipelineLayout layout2 = createPipelineLayout(vkh::PipelineLayoutCreateInfo({setlayout2}));
+    VkDescriptorSetLayout asm_setlayout =
+        createDescriptorSetLayout(vkh::DescriptorSetLayoutCreateInfo({
+            {0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, 0},
+            {1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, 0},
+            {2, VK_DESCRIPTOR_TYPE_SAMPLER, 3, 0},
+            {5, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 0, 0},
+            {6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 0, VK_SHADER_STAGE_VERTEX_BIT},
+            {9, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 3, VK_SHADER_STAGE_VERTEX_BIT},
+            {10, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4, VK_SHADER_STAGE_VERTEX_BIT},
+        }));
+
+    VkDescriptorSet asm_descset = allocateDescriptorSet(asm_setlayout);
+
+    VkPipelineLayout asm_layout = createPipelineLayout(vkh::PipelineLayoutCreateInfo(
+        {asm_setlayout}, {vkh::PushConstantRange(VK_SHADER_STAGE_VERTEX_BIT, 0, 4)}));
 
     vkh::GraphicsPipelineCreateInfo pipeCreateInfo;
 
@@ -371,8 +452,8 @@ void main()
     };
 
     pipeCreateInfo.stages = {
-        CompileShaderModule(common + vertex, ShaderLang::glsl, ShaderStage::vert, "main"),
-        CompileShaderModule(common + pixel, ShaderLang::glsl, ShaderStage::frag, "main"),
+        CompileShaderModule(VKDefaultVertex, ShaderLang::glsl, ShaderStage::vert, "main"),
+        CompileShaderModule(VKDefaultPixel, ShaderLang::glsl, ShaderStage::frag, "main"),
     };
 
     VkPipeline pipe = createGraphicsPipeline(pipeCreateInfo);
@@ -386,13 +467,33 @@ void main()
     VkPipeline refpipe = createGraphicsPipeline(pipeCreateInfo);
 
     pipeCreateInfo.stages = {
-        CompileShaderModule(common + vertex, ShaderLang::glsl, ShaderStage::vert, "main"),
+        CompileShaderModule(VKDefaultVertex, ShaderLang::glsl, ShaderStage::vert, "main"),
         CompileShaderModule(pixel2, ShaderLang::glsl, ShaderStage::frag, "main"),
     };
 
     pipeCreateInfo.layout = layout2;
 
     VkPipeline pipe2 = createGraphicsPipeline(pipeCreateInfo);
+
+    pipeCreateInfo.stages = {
+        CompileShaderModule(asm_vertex, ShaderLang::spvasm, ShaderStage::vert, "main"),
+    };
+
+    pipeCreateInfo.inputAssemblyState.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+    pipeCreateInfo.layout = asm_layout;
+
+    VkPipeline asm_pipe;
+    {
+      vkh::GraphicsPipelineCreateInfo asm_info = pipeCreateInfo;
+
+      asm_info.viewportState.viewports.clear();
+      asm_info.viewportState.scissors.clear();
+      asm_info.viewportState.viewportCount = 0;
+      asm_info.viewportState.scissorCount = 0;
+      asm_info.rasterizationState.rasterizerDiscardEnable = VK_TRUE;
+
+      asm_pipe = createGraphicsPipeline(asm_info);
+    }
 
     {
       // invalid handle - should not be used because the flag for derived pipelines is not used
@@ -832,6 +933,19 @@ void main()
                                     {vkh::DescriptorImageInfo(view1, VK_IMAGE_LAYOUT_GENERAL)}),
         });
 
+    vkh::updateDescriptorSets(
+        device,
+        {
+            vkh::WriteDescriptorSet(asm_descset, 10, 0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                                    {vkh::DescriptorImageInfo(view3, VK_IMAGE_LAYOUT_GENERAL)}),
+            vkh::WriteDescriptorSet(asm_descset, 10, 1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                                    {vkh::DescriptorImageInfo(view3, VK_IMAGE_LAYOUT_GENERAL)}),
+            vkh::WriteDescriptorSet(asm_descset, 10, 2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                                    {vkh::DescriptorImageInfo(view3, VK_IMAGE_LAYOUT_GENERAL)}),
+            vkh::WriteDescriptorSet(asm_descset, 10, 3, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                                    {vkh::DescriptorImageInfo(view3, VK_IMAGE_LAYOUT_GENERAL)}),
+        });
+
     refdatastruct resetrefdata = {};
     resetrefdata.sampler.sampler = resetrefdata.combined.sampler = validSampler;
     resetrefdata.sampled.imageView = resetrefdata.combined.imageView =
@@ -855,10 +969,10 @@ void main()
       // create the specific resources that will only be referenced through descriptor updates
       for(int i = 0; i < 4; i++)
       {
-        vkCreateSampler(device, &sampInfo, NULL, &refsamp[i]);
+        refsamp[i] = createSampler(vkh::SamplerCreateInfo(VK_FILTER_LINEAR));
         setName(refsamp[i], "refsamp" + std::to_string(i));
 
-        vkCreateSampler(device, &sampInfo, NULL, &refcombinedsamp[i]);
+        refcombinedsamp[i] = createSampler(vkh::SamplerCreateInfo(VK_FILTER_LINEAR));
         setName(refcombinedsamp[i], "refcombinedsamp" + std::to_string(i));
 
         VkFormat fmt = VK_FORMAT_R32G32B32A32_SFLOAT;
@@ -969,6 +1083,54 @@ void main()
 
       CHECK_VKR(vkCreateSemaphore(device, vkh::SemaphoreCreateInfo().next(&semType), NULL, &sem));
     }
+
+    // check destroying NULL objects
+    vkDestroyBuffer(device, NULL, NULL);
+    vkDestroyBufferView(device, NULL, NULL);
+    vkDestroyCommandPool(device, NULL, NULL);
+    vkDestroyDescriptorPool(device, NULL, NULL);
+    vkDestroyDescriptorSetLayout(device, NULL, NULL);
+    vkDestroyDevice(NULL, NULL);
+    vkDestroyEvent(device, NULL, NULL);
+    vkDestroyFence(device, NULL, NULL);
+    vkDestroyFramebuffer(device, NULL, NULL);
+    vkDestroyImage(device, NULL, NULL);
+    vkDestroyImageView(device, NULL, NULL);
+    vkDestroyInstance(NULL, NULL);
+    vkDestroyPipeline(device, NULL, NULL);
+    vkDestroyPipelineCache(device, NULL, NULL);
+    vkDestroyPipelineLayout(device, NULL, NULL);
+    vkDestroyQueryPool(device, NULL, NULL);
+    vkDestroyRenderPass(device, NULL, NULL);
+    vkDestroySampler(device, NULL, NULL);
+    vkDestroySemaphore(device, NULL, NULL);
+    vkDestroyShaderModule(device, NULL, NULL);
+    vkDestroySurfaceKHR(instance, NULL, NULL);
+    vkDestroySwapchainKHR(device, NULL, NULL);
+    if(KHR_descriptor_update_template)
+    {
+      vkDestroyDescriptorUpdateTemplateKHR(device, NULL, NULL);
+    }
+
+    VkCommandPool cmdPool;
+    CHECK_VKR(vkCreateCommandPool(device, vkh::CommandPoolCreateInfo(), NULL, &cmdPool));
+    VkDescriptorPool descPool;
+    CHECK_VKR(vkCreateDescriptorPool(
+        device, vkh::DescriptorPoolCreateInfo(128,
+                                              {
+                                                  {VK_DESCRIPTOR_TYPE_SAMPLER, 1024},
+                                              },
+                                              VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT),
+        NULL, &descPool));
+
+    VkCommandBuffer emptyCmd = VK_NULL_HANDLE;
+    vkFreeCommandBuffers(device, cmdPool, 1, &emptyCmd);
+    VkDescriptorSet emptyDesc = VK_NULL_HANDLE;
+    vkFreeDescriptorSets(device, descPool, 1, &emptyDesc);
+    vkFreeMemory(device, VK_NULL_HANDLE, NULL);
+
+    vkDestroyCommandPool(device, cmdPool, NULL);
+    vkDestroyDescriptorPool(device, descPool, NULL);
 
     while(Running())
     {
@@ -1120,49 +1282,11 @@ void main()
 
         vkCmdEndRenderPass(cmd);
 
-        if(vkCmdBeginDebugUtilsLabelEXT)
-        {
-          VkDebugUtilsLabelEXT info = {};
-          info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
-          info.pLabelName = NULL;
-          vkCmdBeginDebugUtilsLabelEXT(cmd, &info);
-        }
-
-        if(vkCmdInsertDebugUtilsLabelEXT)
-        {
-          VkDebugUtilsLabelEXT info = {};
-          info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
-          info.pLabelName = NULL;
-          vkCmdInsertDebugUtilsLabelEXT(cmd, &info);
-        }
-
-        if(vkCmdEndDebugUtilsLabelEXT)
-          vkCmdEndDebugUtilsLabelEXT(cmd);
-
         vkEndCommandBuffer(cmd);
 
         Submit(1, 4, {cmd});
 
         vkDeviceWaitIdle(device);
-
-        if(vkQueueBeginDebugUtilsLabelEXT)
-        {
-          VkDebugUtilsLabelEXT info = {};
-          info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
-          info.pLabelName = NULL;
-          vkQueueBeginDebugUtilsLabelEXT(queue, &info);
-        }
-
-        if(vkQueueInsertDebugUtilsLabelEXT)
-        {
-          VkDebugUtilsLabelEXT info = {};
-          info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
-          info.pLabelName = NULL;
-          vkQueueInsertDebugUtilsLabelEXT(queue, &info);
-        }
-
-        if(vkQueueEndDebugUtilsLabelEXT)
-          vkQueueEndDebugUtilsLabelEXT(queue);
 
         // scribble over the descriptor contents so that initial contents fetch never gets these
         // resources that way
@@ -1222,10 +1346,19 @@ void main()
           popMarker(cmd);
         }
 
+        uint32_t idx = 1;
+        vkh::cmdBindVertexBuffers(cmd, 0, {vb.buffer}, {0});
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, asm_pipe);
+        vkCmdPushConstants(cmd, asm_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 4, &idx);
+        vkh::cmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, asm_layout, 0,
+                                   {asm_descset}, {});
+
+        setMarker(cmd, "ASM Draw");
+        vkCmdDraw(cmd, 4, 1, 0, 0);
+
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
         vkCmdSetViewport(cmd, 0, 1, &mainWindow->viewport);
         vkCmdSetScissor(cmd, 0, 1, &mainWindow->scissor);
-        vkh::cmdBindVertexBuffers(cmd, 0, {vb.buffer}, {0});
         vkh::cmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, {descset},
                                    {0, 0});
         if(KHR_push_descriptor)
@@ -1248,6 +1381,9 @@ void main()
 
         setMarker(cmd, "Color Draw");
         vkCmdDraw(cmd, 3, 1, 0, 0);
+
+        VkRect2D sc = {100, 100, 10, 10};
+        vkCmdSetScissor(cmd, 0, 1, &sc);
 
         if(EXT_transform_feedback)
         {
@@ -1290,8 +1426,6 @@ void main()
     vkDestroyEvent(device, ev, NULL);
     vkDestroyFence(device, fence, NULL);
     vkDestroySemaphore(device, sem, NULL);
-
-    vkDestroySampler(device, validSampler, NULL);
 
     vkDestroyImageView(device, view1, NULL);
     vkDestroyImageView(device, view3, NULL);

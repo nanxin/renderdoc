@@ -43,7 +43,7 @@ struct VertexAttribute
 
   bool operator==(const VertexAttribute &o) const
   {
-    return enabled == o.enabled && format == o.format &&
+    return enabled == o.enabled && floatCast == o.floatCast && format == o.format &&
            !memcmp(&genericValue, &o.genericValue, sizeof(genericValue)) &&
            vertexBufferSlot == o.vertexBufferSlot && byteOffset == o.byteOffset;
   }
@@ -51,6 +51,8 @@ struct VertexAttribute
   {
     if(!(enabled == o.enabled))
       return enabled < o.enabled;
+    if(!(floatCast == o.floatCast))
+      return floatCast < o.floatCast;
     if(!(format == o.format))
       return format < o.format;
     if(memcmp(&genericValue, &o.genericValue, sizeof(genericValue)) < 0)
@@ -63,6 +65,14 @@ struct VertexAttribute
   }
   DOCUMENT("``True`` if this vertex attribute is enabled.");
   bool enabled = false;
+
+  DOCUMENT(R"(Only valid for integer formatted attributes, ``True`` if they are cast to float.
+
+This is because they were specified with an integer format but glVertexAttribFormat (not
+glVertexAttribIFormat) so they will be cast.
+)");
+  bool floatCast = false;
+
   DOCUMENT("The :class:`ResourceFormat` of the vertex attribute.");
   ResourceFormat format;
 
@@ -591,8 +601,8 @@ struct Attachment
 
   bool operator==(const Attachment &o) const
   {
-    return resourceId == o.resourceId && slice == o.slice && mipLevel == o.mipLevel &&
-           swizzle == o.swizzle;
+    return resourceId == o.resourceId && slice == o.slice && numSlices == o.numSlices &&
+           mipLevel == o.mipLevel && swizzle == o.swizzle;
   }
   bool operator<(const Attachment &o) const
   {
@@ -610,6 +620,8 @@ struct Attachment
   ResourceId resourceId;
   DOCUMENT("The slice of the texture that's used in the attachment.");
   uint32_t slice = 0;
+  DOCUMENT("The number of slices of the texture that are used in the attachment.");
+  uint32_t numSlices = 1;
   DOCUMENT("The mip of the texture that's used in the attachment.");
   uint32_t mipLevel = 0;
   DOCUMENT("A :class:`TextureSwizzle4` indicating the swizzle applied to this texture.");

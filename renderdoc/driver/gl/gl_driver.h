@@ -59,7 +59,7 @@ struct GLInitParams
   rdcstr renderer, version;
 
   // check if a frame capture section version is supported
-  static const uint64_t CurrentVersion = 0x21;
+  static const uint64_t CurrentVersion = 0x23;
   static bool IsSupportedVersion(uint64_t ver);
 };
 
@@ -100,6 +100,7 @@ class WrappedOpenGL : public IFrameCapturer
 {
 private:
   friend class GLReplay;
+  friend struct GLRenderState;
   friend class GLResourceManager;
 
   GLPlatform &m_Platform;
@@ -208,6 +209,8 @@ private:
 
   GLResourceManager *m_ResourceManager;
 
+  uint64_t m_TimeBase = 0;
+  double m_TimeFrequency = 1.0f;
   SDFile *m_StructuredFile;
   SDFile m_StoredStructuredData;
 
@@ -452,6 +455,10 @@ private:
     GLuint m_ProgramPipeline;
     GLuint m_Program;
 
+    GLint m_MaxImgBind = 0;
+    GLint m_MaxAtomicBind = 0;
+    GLint m_MaxSSBOBind = 0;
+
     GLResourceRecord *GetActiveTexRecord(GLenum target)
     {
       if(IsProxyTarget(target))
@@ -514,7 +521,8 @@ private:
     rdcarray<VertexAttrib> attribs;
     GLuint prevArrayBufferBinding;
   };
-  ClientMemoryData *CopyClientMemoryArrays(GLint first, GLsizei count, GLenum indexType,
+  ClientMemoryData *CopyClientMemoryArrays(GLint first, GLsizei count, GLint baseinstance,
+                                           GLsizei instancecount, GLenum indexType,
                                            const void *&indices);
   void RestoreClientMemoryArrays(ClientMemoryData *clientMemoryArrays, GLenum indexType);
 
@@ -760,7 +768,7 @@ public:
 
   void FillReflectionArray(GLResource program, PerStageReflections &stages)
   {
-    FillReflectionArray(GetResourceManager()->GetID(program), stages);
+    FillReflectionArray(GetResourceManager()->GetResID(program), stages);
   }
 
   ResourceId ExtractFBOAttachment(GLenum target, GLenum attachment);

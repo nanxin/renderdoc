@@ -134,7 +134,7 @@ void WrappedID3D12GraphicsCommandList::AtomicCopyBufferUINT(
     Serialise_AtomicCopyBufferUINT(ser, pDstBuffer, DstOffset, pSrcBuffer, SrcOffset, Dependencies,
                                    ppDependentResources, pDependentSubresourceRanges);
 
-    m_ListRecord->AddChunk(scope.Get());
+    m_ListRecord->AddChunk(scope.Get(m_ListRecord->cmdInfo->alloc));
     m_ListRecord->MarkResourceFrameReferenced(GetResID(pDstBuffer), eFrameRef_PartialWrite);
     m_ListRecord->MarkResourceFrameReferenced(GetResID(pSrcBuffer), eFrameRef_Read);
 
@@ -252,7 +252,7 @@ void WrappedID3D12GraphicsCommandList::AtomicCopyBufferUINT64(
     Serialise_AtomicCopyBufferUINT64(ser, pDstBuffer, DstOffset, pSrcBuffer, SrcOffset, Dependencies,
                                      ppDependentResources, pDependentSubresourceRanges);
 
-    m_ListRecord->AddChunk(scope.Get());
+    m_ListRecord->AddChunk(scope.Get(m_ListRecord->cmdInfo->alloc));
     m_ListRecord->MarkResourceFrameReferenced(GetResID(pDstBuffer), eFrameRef_PartialWrite);
     m_ListRecord->MarkResourceFrameReferenced(GetResID(pSrcBuffer), eFrameRef_Read);
 
@@ -288,17 +288,19 @@ bool WrappedID3D12GraphicsCommandList::Serialise_OMSetDepthBounds(SerialiserType
 
     m_Cmd->m_LastCmdListID = GetResourceManager()->GetOriginalID(GetResID(pCommandList));
 
+    bool stateUpdate = false;
+
     if(IsActiveReplaying(m_State))
     {
       if(m_Cmd->InRerecordRange(m_Cmd->m_LastCmdListID))
       {
         Unwrap1(m_Cmd->RerecordCmdList(m_Cmd->m_LastCmdListID))->OMSetDepthBounds(Min, Max);
 
-        if(m_Cmd->IsPartialCmdList(m_Cmd->m_LastCmdListID))
-        {
-          m_Cmd->m_RenderState.depthBoundsMin = Min;
-          m_Cmd->m_RenderState.depthBoundsMax = Max;
-        }
+        stateUpdate = true;
+      }
+      else if(!m_Cmd->IsPartialCmdList(m_Cmd->m_LastCmdListID))
+      {
+        stateUpdate = true;
       }
     }
     else
@@ -306,6 +308,11 @@ bool WrappedID3D12GraphicsCommandList::Serialise_OMSetDepthBounds(SerialiserType
       Unwrap1(pCommandList)->OMSetDepthBounds(Min, Max);
       GetCrackedList1()->OMSetDepthBounds(Min, Max);
 
+      stateUpdate = true;
+    }
+
+    if(stateUpdate)
+    {
       m_Cmd->m_BakedCmdListInfo[m_Cmd->m_LastCmdListID].state.depthBoundsMin = Min;
       m_Cmd->m_BakedCmdListInfo[m_Cmd->m_LastCmdListID].state.depthBoundsMax = Max;
     }
@@ -324,7 +331,7 @@ void WrappedID3D12GraphicsCommandList::OMSetDepthBounds(FLOAT Min, FLOAT Max)
     SCOPED_SERIALISE_CHUNK(D3D12Chunk::List_OMSetDepthBounds);
     Serialise_OMSetDepthBounds(ser, Min, Max);
 
-    m_ListRecord->AddChunk(scope.Get());
+    m_ListRecord->AddChunk(scope.Get(m_ListRecord->cmdInfo->alloc));
   }
 }
 
@@ -351,6 +358,8 @@ bool WrappedID3D12GraphicsCommandList::Serialise_SetSamplePositions(
 
     m_Cmd->m_LastCmdListID = GetResourceManager()->GetOriginalID(GetResID(pCommandList));
 
+    bool stateUpdate = false;
+
     if(IsActiveReplaying(m_State))
     {
       if(m_Cmd->InRerecordRange(m_Cmd->m_LastCmdListID))
@@ -358,14 +367,11 @@ bool WrappedID3D12GraphicsCommandList::Serialise_SetSamplePositions(
         Unwrap1(m_Cmd->RerecordCmdList(m_Cmd->m_LastCmdListID))
             ->SetSamplePositions(NumSamplesPerPixel, NumPixels, pSamplePositions);
 
-        if(m_Cmd->IsPartialCmdList(m_Cmd->m_LastCmdListID))
-        {
-          D3D12RenderState &state = m_Cmd->m_RenderState;
-
-          state.samplePos.NumSamplesPerPixel = NumSamplesPerPixel;
-          state.samplePos.NumPixels = NumPixels;
-          state.samplePos.Positions.assign(pSamplePositions, NumSamplesPerPixel * NumPixels);
-        }
+        stateUpdate = true;
+      }
+      else if(!m_Cmd->IsPartialCmdList(m_Cmd->m_LastCmdListID))
+      {
+        stateUpdate = true;
       }
     }
     else
@@ -373,13 +379,16 @@ bool WrappedID3D12GraphicsCommandList::Serialise_SetSamplePositions(
       Unwrap1(pCommandList)->SetSamplePositions(NumSamplesPerPixel, NumPixels, pSamplePositions);
       GetCrackedList1()->SetSamplePositions(NumSamplesPerPixel, NumPixels, pSamplePositions);
 
-      {
-        D3D12RenderState &state = m_Cmd->m_BakedCmdListInfo[m_Cmd->m_LastCmdListID].state;
+      stateUpdate = true;
+    }
 
-        state.samplePos.NumSamplesPerPixel = NumSamplesPerPixel;
-        state.samplePos.NumPixels = NumPixels;
-        state.samplePos.Positions.assign(pSamplePositions, NumSamplesPerPixel * NumPixels);
-      }
+    if(stateUpdate)
+    {
+      D3D12RenderState &state = m_Cmd->m_BakedCmdListInfo[m_Cmd->m_LastCmdListID].state;
+
+      state.samplePos.NumSamplesPerPixel = NumSamplesPerPixel;
+      state.samplePos.NumPixels = NumPixels;
+      state.samplePos.Positions.assign(pSamplePositions, NumSamplesPerPixel * NumPixels);
     }
   }
 
@@ -397,7 +406,7 @@ void WrappedID3D12GraphicsCommandList::SetSamplePositions(UINT NumSamplesPerPixe
     SCOPED_SERIALISE_CHUNK(D3D12Chunk::List_SetSamplePositions);
     Serialise_SetSamplePositions(ser, NumSamplesPerPixel, NumPixels, pSamplePositions);
 
-    m_ListRecord->AddChunk(scope.Get());
+    m_ListRecord->AddChunk(scope.Get(m_ListRecord->cmdInfo->alloc));
   }
 }
 
@@ -503,7 +512,7 @@ void WrappedID3D12GraphicsCommandList::ResolveSubresourceRegion(
     Serialise_ResolveSubresourceRegion(ser, pDstResource, DstSubresource, DstX, DstY, pSrcResource,
                                        SrcSubresource, pSrcRect, Format, ResolveMode);
 
-    m_ListRecord->AddChunk(scope.Get());
+    m_ListRecord->AddChunk(scope.Get(m_ListRecord->cmdInfo->alloc));
     m_ListRecord->MarkResourceFrameReferenced(GetResID(pDstResource), eFrameRef_PartialWrite);
     m_ListRecord->MarkResourceFrameReferenced(GetResID(pSrcResource), eFrameRef_Read);
   }
@@ -534,14 +543,19 @@ bool WrappedID3D12GraphicsCommandList::Serialise_SetViewInstanceMask(SerialiserT
 
     m_Cmd->m_LastCmdListID = GetResourceManager()->GetOriginalID(GetResID(pCommandList));
 
+    bool stateUpdate = false;
+
     if(IsActiveReplaying(m_State))
     {
       if(m_Cmd->InRerecordRange(m_Cmd->m_LastCmdListID))
       {
         Unwrap1(m_Cmd->RerecordCmdList(m_Cmd->m_LastCmdListID))->SetViewInstanceMask(Mask);
 
-        if(m_Cmd->IsPartialCmdList(m_Cmd->m_LastCmdListID))
-          m_Cmd->m_RenderState.viewInstMask = Mask;
+        stateUpdate = true;
+      }
+      else if(!m_Cmd->IsPartialCmdList(m_Cmd->m_LastCmdListID))
+      {
+        stateUpdate = true;
       }
     }
     else
@@ -549,8 +563,11 @@ bool WrappedID3D12GraphicsCommandList::Serialise_SetViewInstanceMask(SerialiserT
       Unwrap1(pCommandList)->SetViewInstanceMask(Mask);
       GetCrackedList1()->SetViewInstanceMask(Mask);
 
-      m_Cmd->m_BakedCmdListInfo[m_Cmd->m_LastCmdListID].state.viewInstMask = Mask;
+      stateUpdate = true;
     }
+
+    if(stateUpdate)
+      m_Cmd->m_BakedCmdListInfo[m_Cmd->m_LastCmdListID].state.viewInstMask = Mask;
   }
 
   return true;
@@ -566,7 +583,7 @@ void WrappedID3D12GraphicsCommandList::SetViewInstanceMask(UINT Mask)
     SCOPED_SERIALISE_CHUNK(D3D12Chunk::List_SetViewInstanceMask);
     Serialise_SetViewInstanceMask(ser, Mask);
 
-    m_ListRecord->AddChunk(scope.Get());
+    m_ListRecord->AddChunk(scope.Get(m_ListRecord->cmdInfo->alloc));
   }
 }
 

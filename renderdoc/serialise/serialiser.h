@@ -94,7 +94,7 @@ public:
 #if ENABLED(RDOC_RELEASE)
         sertype == SerialiserMode::Reading &&
 #endif
-        m_ExportStructured && !m_InternalElement;
+        m_ExportStructured && m_InternalElement == 0;
   }
 
   enum ChunkFlags
@@ -115,11 +115,17 @@ public:
   Serialiser(const Serialiser &other) = delete;
 
   bool IsErrored() { return IsReading() ? m_Read->IsErrored() : m_Write->IsErrored(); }
+  void SetErrored() { IsReading() ? m_Read->SetErrored() : m_Write->SetErrored(); }
   bool IsDummy() { return m_Dummy; }
   StreamWriter *GetWriter() { return m_Write; }
   StreamReader *GetReader() { return m_Read; }
   uint32_t GetChunkMetadataRecording() { return m_ChunkFlags; }
   void SetChunkMetadataRecording(uint32_t flags);
+  void SetChunkTimestampBasis(uint64_t base, double freq)
+  {
+    m_TimerBase = base;
+    m_TimerFrequency = freq;
+  }
 
   // debug-only option to dump out (roughly) the data going through the serialiser as it happens
   void EnableDumping(FileIO::LogFileHandle *debugLog) { m_DebugDumpLog = debugLog; }
@@ -157,11 +163,14 @@ public:
   //////////////////////////////////////////
   // Public serialisation interface
 
-  void ConfigureStructuredExport(ChunkLookup lookup, bool includeBuffers)
+  void ConfigureStructuredExport(ChunkLookup lookup, bool includeBuffers, uint64_t timeBase,
+                                 double timeFreq)
   {
     m_ChunkLookup = lookup;
     m_ExportBuffers = includeBuffers;
     m_ExportStructured = (lookup != NULL);
+    m_TimerBase = timeBase;
+    m_TimerFrequency = timeFreq;
   }
 
   uint32_t BeginChunk(uint32_t chunkID, uint64_t byteLength);
@@ -244,9 +253,9 @@ public:
       byteSize = 0;
 
     {
-      m_InternalElement = true;
+      m_InternalElement++;
       DoSerialise(*this, byteSize);
-      m_InternalElement = false;
+      m_InternalElement--;
     }
 
     if(IsReading())
@@ -355,9 +364,9 @@ public:
     uint64_t count = (uint64_t)el.size();
 
     {
-      m_InternalElement = true;
+      m_InternalElement++;
       DoSerialise(*this, count);
-      m_InternalElement = false;
+      m_InternalElement--;
     }
 
     if(IsReading())
@@ -471,9 +480,9 @@ public:
     // size
     uint64_t count = N;
     {
-      m_InternalElement = true;
+      m_InternalElement++;
       DoSerialise(*this, count);
-      m_InternalElement = false;
+      m_InternalElement--;
 
       if(count != N)
         RDCWARN("Fixed-size array length %zu serialised with different size %llu", N, count);
@@ -532,11 +541,10 @@ public:
       if(count > N)
       {
         // prevent any trashing of structured data by these
-        bool wasInternal = m_InternalElement;
-        m_InternalElement = true;
+        m_InternalElement++;
         T dummy;
         SerialiseDispatch<Serialiser, T>::Do(*this, dummy);
-        m_InternalElement = wasInternal;
+        m_InternalElement--;
       }
 
       m_StructureStack.pop_back();
@@ -591,9 +599,9 @@ public:
       arrayCount = 0;
 
     {
-      m_InternalElement = true;
+      m_InternalElement++;
       DoSerialise(*this, arrayCount);
-      m_InternalElement = false;
+      m_InternalElement--;
     }
 
     if(IsReading())
@@ -684,9 +692,9 @@ public:
     uint64_t size = (uint64_t)el.size();
 
     {
-      m_InternalElement = true;
+      m_InternalElement++;
       DoSerialise(*this, size);
-      m_InternalElement = false;
+      m_InternalElement--;
     }
 
     if(IsReading())
@@ -837,9 +845,9 @@ public:
     bool present = (el != NULL);
 
     {
-      m_InternalElement = true;
+      m_InternalElement++;
       DoSerialise(*this, present);
-      m_InternalElement = false;
+      m_InternalElement--;
     }
 
     if(ExportStructure())
@@ -926,9 +934,9 @@ public:
     uint64_t totalSize = stream.GetSize();
 
     {
-      m_InternalElement = true;
+      m_InternalElement++;
       DoSerialise(*this, totalSize);
-      m_InternalElement = false;
+      m_InternalElement--;
     }
 
     // ensure byte alignment
@@ -947,9 +955,9 @@ public:
     uint64_t totalSize = 0;
 
     {
-      m_InternalElement = true;
+      m_InternalElement++;
       DoSerialise(*this, totalSize);
-      m_InternalElement = false;
+      m_InternalElement--;
     }
 
     size_t byteSize = (size_t)totalSize;
@@ -1087,6 +1095,10 @@ public:
     return *this;
   }
 
+  // these functions should be used very carefully, they completely disable structured export for
+  // anything serialised while internal is set.
+  void PushInternal() { m_InternalElement++; }
+  void PopInternal() { m_InternalElement--; }
   /////////////////////////////////////////////////////////////////////////////
 
   // for basic/leaf types. Read/written just as byte soup, MUST be plain old data
@@ -1309,13 +1321,15 @@ private:
 
   bool m_ExportStructured = false;
   bool m_ExportBuffers = false;
-  bool m_InternalElement = false;
+  int m_InternalElement = 0;
   SDFile m_StructData;
   SDFile *m_StructuredFile = &m_StructData;
   rdcarray<SDObject *> m_StructureStack;
 
   uint32_t m_ChunkFlags = 0;
   SDChunkMetaData m_ChunkMetadata;
+  double m_TimerFrequency = 1.0;
+  uint64_t m_TimerBase = 0;
 
   // a database of strings read from the file, useful when serialised structures
   // expect a char* to return and point to static memory
@@ -1366,7 +1380,7 @@ public:
   StructuredSerialiser(SDObject *obj, ChunkLookup lookup)
       : Serialiser(new StreamReader(StreamReader::DummyStream), Ownership::Stream, obj)
   {
-    ConfigureStructuredExport(lookup, false);
+    ConfigureStructuredExport(lookup, false, 0, 1.0);
     SetStreamingMode(true);
     SetDummy(true);
   }
@@ -1442,19 +1456,103 @@ DECLARE_STRINGISE_TYPE(SDObject *);
 
 class ScopedChunk;
 
+class ChunkAllocator
+{
+public:
+  ChunkAllocator(size_t PageSize) : BufferPageSize(PageSize), ChunkPageSize(PageSize / 4) {}
+  ChunkAllocator(const ChunkAllocator &) = delete;
+  ChunkAllocator(ChunkAllocator &&) = delete;
+  ChunkAllocator &operator=(const ChunkAllocator &) = delete;
+  ~ChunkAllocator();
+  byte *AllocAlignedBuffer(uint64_t size);
+  byte *AllocChunk();
+
+  // really free any unused pages
+  void Trim();
+
+  // reset all pages to free
+  void Reset();
+
+  // reset a page set, other pages will remain in use
+  void ResetPageSet(const rdcarray<uint32_t> &pages);
+
+  // get the pages that have been used since the last reset, or call to GetPageSet.
+  // these can then be freed later without affecting any other pages.
+  // note that not all pages will be full (e.g. even if only one 64-bit chunk is used in the last
+  // page it will be marked as full so it can be freed without another allocation overlapping).
+  rdcarray<uint32_t> GetPageSet();
+
+private:
+  size_t BufferPageSize;
+  size_t ChunkPageSize;
+
+  struct Page
+  {
+    // this is an ID we can use to find this page in a pageset
+    uint32_t ID;
+
+    // we allocate at two granularities, chunks are 16 bytes, buffers are multiples of 64-bytes
+    // to keep things simple we allocate the chunk memory as 16/64 = a quarter the size of the
+    // buffer memory. This will waste a bit of memory because we expect buffers to be on average
+    // larger than 64 bytes.
+
+    // base of the buffer
+    byte *bufferBase;
+    // head of the buffer
+    byte *bufferHead;
+
+    byte *chunkBase;
+    byte *chunkHead;
+  };
+
+  // a page is in precisely ONE of these arrays at any time, either it's free (and the last free
+  // page may be partially used) or it's "full".
+  // Reset() will move all full pages back to free pages and reclaim all that memory
+  // ResetPageSet() will move any referenced pages from fullPages back to freePages
+  rdcarray<Page> freePages;
+  rdcarray<Page> fullPages;
+
+  // as we're recording each new page we start gets added here. If the user calls GetPageSet we
+  // return this and the user can then free it later without freeing all pages.
+  // note, the *current* page (freePages.back) isn't in this list, we only append to this list when
+  // we retire a full page. That means GetPageSet checks if the last page has been used at all and
+  // includes it there
+  rdcarray<uint32_t> usedPages;
+
+  size_t GetRemainingBufferBytes(const Page &p)
+  {
+    return BufferPageSize - (p.bufferHead - p.bufferBase);
+  }
+  size_t GetRemainingChunkBytes(const Page &p)
+  {
+    return ChunkPageSize - (p.chunkHead - p.chunkBase);
+  }
+  byte *AllocateFromPages(bool chunkAlloc, size_t size);
+};
+
 // holds the memory, length and type for a given chunk, so that it can be
 // passed around and moved between owners before being serialised out
 class Chunk
 {
-public:
+  Chunk(bool fromAllocator) : m_FromAllocator(fromAllocator) {}
   ~Chunk()
   {
-    FreeAlignedBuffer(m_Data);
+    if(!m_FromAllocator)
+      FreeAlignedBuffer(m_Data);
 
 #if ENABLED(RDOC_DEVEL)
     Atomic::Dec64(&m_LiveChunks);
     Atomic::ExchAdd64(&m_TotalMem, -int64_t(m_Length));
 #endif
+  }
+
+public:
+  void Delete()
+  {
+    if(m_FromAllocator)
+      this->~Chunk();
+    else
+      delete this;
   }
 
   template <typename ChunkType>
@@ -1470,26 +1568,9 @@ public:
   static uint64_t TotalMem() { return 0; }
 #endif
 
-  // grab current contents of the serialiser into this chunk
-  Chunk(Serialiser<SerialiserMode::Writing> &ser, uint32_t chunkType)
-  {
-    m_Length = (uint32_t)ser.GetWriter()->GetOffset();
-
-    RDCASSERT(ser.GetWriter()->GetOffset() < 0xffffffff);
-
-    m_ChunkType = chunkType;
-
-    m_Data = AllocAlignedBuffer(m_Length);
-
-    memcpy(m_Data, ser.GetWriter()->GetData(), (size_t)m_Length);
-
-    ser.GetWriter()->Rewind();
-
-#if ENABLED(RDOC_DEVEL)
-    Atomic::Inc64(&m_LiveChunks);
-    Atomic::ExchAdd64(&m_TotalMem, int64_t(m_Length));
-#endif
-  }
+  // grab current contents of the serialiser into a new chunk
+  static Chunk *Create(Serialiser<SerialiserMode::Writing> &ser, uint16_t chunkType,
+                       ChunkAllocator *allocator = NULL);
 
   byte *GetData() const { return m_Data; }
   Chunk *Duplicate()
@@ -1499,6 +1580,7 @@ public:
     ret->m_ChunkType = m_ChunkType;
 
     ret->m_Data = AllocAlignedBuffer(m_Length);
+    ret->m_FromAllocator = false;
 
     memcpy(ret->m_Data, m_Data, (size_t)m_Length);
 
@@ -1520,9 +1602,9 @@ private:
   Chunk(const Chunk &) = delete;
   Chunk &operator=(const Chunk &) = delete;
 
-  friend class ScopedChunk;
+  uint16_t m_ChunkType;
 
-  uint32_t m_ChunkType;
+  bool m_FromAllocator = false;
 
   uint32_t m_Length;
   byte *m_Data;
@@ -1538,7 +1620,7 @@ class ScopedChunk
 public:
   template <typename ChunkType>
   ScopedChunk(WriteSerialiser &s, ChunkType i, uint64_t byteLength = 0)
-      : m_Idx(uint32_t(i)), m_Ser(s), m_Ended(false)
+      : m_Idx(uint16_t(i)), m_Ser(s), m_Ended(false)
   {
     m_Ser.WriteChunk(m_Idx, byteLength);
   }
@@ -1548,15 +1630,15 @@ public:
       End();
   }
 
-  Chunk *Get()
+  Chunk *Get(ChunkAllocator *allocator = NULL)
   {
     End();
-    return new Chunk(m_Ser, m_Idx);
+    return Chunk::Create(m_Ser, m_Idx, allocator);
   }
 
 private:
   WriteSerialiser &m_Ser;
-  uint32_t m_Idx;
+  uint16_t m_Idx;
   bool m_Ended;
 
   void End()

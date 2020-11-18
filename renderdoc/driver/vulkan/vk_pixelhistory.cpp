@@ -22,6 +22,83 @@
  * THE SOFTWARE.
  ******************************************************************************/
 
+/*
+ * The general algorithm for pixel history is this:
+ *
+ * we get passed a list of all events that could have touched the target texture
+ * We replay all events (up to and including the last event that could have
+ * touched the target texture) with a number of callbacks:
+ *
+ * - First callback: Occlusion callback (VulkanOcclusionCallback)
+ * This callback performs an occlusion query around each draw event that was
+ * passed in. Execute the draw with a modified pipeline that disables most tests,
+ * and uses a fixed color fragment shader, so that we get a non 0 occlusion
+ * result even if a test failed for the event.
+ *
+ * After this callback we collect all events where occlusion result > 0 and all
+ * other non-draw events (copy, render pass boundaries, resolve). We also filter
+ * out events where the image view used did not overlap in the array layer.
+ * The callbacks below will only deal with these events.
+ *
+ * - Second callback: Color and stencil callback (VulkanColorAndStencilCallback)
+ * This callback retrieves color/depth values before and after each event, and
+ * uses a stencil increment to count the number of fragments for each event.
+ * We have to stop the render pass before and after each event if there is one active,
+ * since we can't run vkCmdCopy* or vkCmdExecuteCommands inside a render pass.
+ * We then copy colour information and associated depth value, and resume a
+ * render pass, if there was one. Before each draw event we also execute the same
+ * draw twice with a stencil increment state: 1) with a fixed color fragment shader
+ * to count the number of fragments not accounting for shader discard, 2) with the
+ * original fragment shader to count the number of fragments accounting for shader
+ * discard.
+ *
+ * - Third callback: Tests failed callback (TestsFailedCallback)
+ * This callback is used to determine which tests (culling, depth, stencil, etc)
+ * failed (if any) for each draw event. This replays each draw event a number of times
+ * with an occlusion query for each test that might have failed (leaves the test
+ * under question in the original state, and disables all tests that come after).
+ *
+ * At this point we retrieve the stencil results that represent the number of fragments,
+ * and duplicate events that have multiple fragments.
+ *
+ * - Fourth callback: Per fragment callback (VulkanPixelHistoryPerFragmentCallback)
+ * This callback is used to get per fragment data for each event and fragment (primitive ID,
+ * shader output value, post event value for each fragment).
+ * For each fragment the draw is replayed 3 times:
+ * 1) with a fragment shader that outputs primitive ID only
+ * 2) with blending OFF, to get shader output value
+ * 3) with blending ON, to get post modification value
+ * For each such replay we set the stencil reference to the fragment number and set the
+ * stencil compare to equal, so it passes for that particular fragment only.
+ *
+ * - Fifth callback: Discarded fragments callback (VulkanPixelHistoryDiscardedFragmentsCallback)
+ * This callback is used to determine which individual fragments were discarded in a fragment
+ * shader.
+ * Only runs for the events where the number of fragments accounting for shader discard is less
+ * that the number of fragments not accounting for shader discard.
+ * This replays the particular fragment (by adjusting parameters in vkCmdDraw* call) with an
+ * occlusion query.
+ *
+ * We slot the per frament data correctly accounting for the fragments that were discarded.
+ *
+ * Current Limitations:
+ *
+ * - Multiple subpasses
+ * Currently if there are multiple subpasses used in a single render pass, pixel history will
+ * return only partial information. This is primarily because current implementation relies
+ * on stopping/resuming render passes. This only afects VulkanColorAndStencilCallback and
+ * VulkanPixelHistoryPerFragmentCallback callbacks, since they rely on copy operations.
+ * To support multiple subpasses we will have to:
+ * Create a mirror render pass for each render pass we need to stop, where the all
+ * loadOps are set to VK_ATTACHMENT_LOAD_OP_LOAD and store ops are set to
+ * VK_ATTACHMENT_STORE_OP_STORE.
+ * When we need to stop a render passs, we will repeatedly call vkCmdNextSubpass until we are
+ * on the last subpass. When we resume the subpass we will call vkCmdNextSubpass until we reach
+ * the original subpass. BeginRenderPassAndApplyState can be extended to provide an option
+ * not to override the used render pass (right now overrides with the load RP that has a single
+ * subpass).
+ */
+
 #include <float.h>
 #include "driver/shaders/spirv/spirv_editor.h"
 #include "driver/shaders/spirv/spirv_op_helpers.h"
@@ -38,32 +115,44 @@ bool isDirectWrite(ResourceUsage usage)
           usage == ResourceUsage::GenMips);
 }
 
-enum
+enum : uint32_t
 {
-  TestEnabled_Culling = 1 << 0,
-  TestEnabled_Scissor = 1 << 1,
-  TestEnabled_SampleMask = 1 << 2,
-  TestEnabled_DepthBounds = 1 << 3,
-  TestEnabled_StencilTesting = 1 << 4,
-  TestEnabled_DepthTesting = 1 << 5,
-  TestEnabled_FragmentDiscard = 1 << 6,
+  TestEnabled_DepthClipping = 1 << 0,
+  TestEnabled_Culling = 1 << 1,
+  TestEnabled_Scissor = 1 << 2,
+  TestEnabled_SampleMask = 1 << 3,
+  TestEnabled_DepthBounds = 1 << 4,
+  TestEnabled_StencilTesting = 1 << 5,
+  TestEnabled_DepthTesting = 1 << 6,
+  TestEnabled_FragmentDiscard = 1 << 7,
 
-  Blending_Enabled = 1 << 7,
-  UnboundFragmentShader = 1 << 8,
-  TestMustFail_Culling = 1 << 9,
-  TestMustFail_Scissor = 1 << 10,
-  TestMustPass_Scissor = 1 << 11,
-  TestMustFail_DepthTesting = 1 << 12,
-  TestMustFail_StencilTesting = 1 << 13,
-  TestMustFail_SampleMask = 1 << 14,
+  Blending_Enabled = 1 << 8,
+  UnboundFragmentShader = 1 << 9,
+  TestMustFail_Culling = 1 << 10,
+  TestMustFail_Scissor = 1 << 11,
+  TestMustPass_Scissor = 1 << 12,
+  TestMustFail_DepthTesting = 1 << 13,
+  TestMustFail_StencilTesting = 1 << 14,
+  TestMustFail_SampleMask = 1 << 15,
+
+  DepthTest_Shift = 29,
+  DepthTest_Always = 0U << DepthTest_Shift,
+  DepthTest_Never = 1U << DepthTest_Shift,
+  DepthTest_Equal = 2U << DepthTest_Shift,
+  DepthTest_NotEqual = 3U << DepthTest_Shift,
+  DepthTest_Less = 4U << DepthTest_Shift,
+  DepthTest_LessEqual = 5U << DepthTest_Shift,
+  DepthTest_Greater = 6U << DepthTest_Shift,
+  DepthTest_GreaterEqual = 7U << DepthTest_Shift,
 };
 
 struct CopyPixelParams
 {
-  bool depthCopy;
   VkImage srcImage;
   VkFormat srcImageFormat;
   VkImageLayout srcImageLayout;
+  bool multisampled;
+  bool multiview;
 };
 
 struct PixelHistoryResources
@@ -78,18 +167,6 @@ struct PixelHistoryResources
   VkImage dsImage;
   VkImageView dsImageView;
   VkDeviceMemory gpuMem;
-
-  // Following are only used and created for multi sampled images.
-  // This is an image view for colorImage which uses a UINT format.
-  VkImageView colorImageAliasView;
-  // Image view for target image which uses a UINT format.
-  VkImageView targetImageView;
-  // Image view for dsImage depth stencil image that includes depth
-  // aspect only.
-  VkImageView depthOnlyImageView;
-  // Image view for dsImage depth stencil image that includes stencil
-  // aspect only.
-  VkImageView stencilOnlyImageView;
 };
 
 struct PixelHistoryCallbackInfo
@@ -379,6 +456,9 @@ struct VulkanPixelHistoryCallback : public VulkanDrawcallCallback
         m_OcclusionPool(occlusionPool)
   {
     m_pDriver->SetDrawcallCB(this);
+
+    if(m_pDriver->GetDeviceEnabledFeatures().occlusionQueryPrecise)
+      m_QueryFlags |= VK_QUERY_CONTROL_PRECISE_BIT;
   }
 
   virtual ~VulkanPixelHistoryCallback()
@@ -388,6 +468,9 @@ struct VulkanPixelHistoryCallback : public VulkanDrawcallCallback
       m_pDriver->vkDestroyRenderPass(m_pDriver->GetDev(), rp, NULL);
     for(const VkFramebuffer &fb : m_FbsToDestroy)
       m_pDriver->vkDestroyFramebuffer(m_pDriver->GetDev(), fb, NULL);
+    for(const VkImageView &imageView : m_ImageViewsToDestroy)
+      m_pDriver->vkDestroyImageView(m_pDriver->GetDev(), imageView, NULL);
+    m_pDriver->GetReplay()->ResetPixelHistoryDescriptorPool();
   }
   // Update the given scissor to just the pixel for which pixel history was requested.
   void ScissorToPixel(const VkViewport &view, VkRect2D &scissor)
@@ -501,9 +584,6 @@ protected:
         atts[i].colorWriteMask = 0;
     }
 
-    // TODO: this is wrong, should take into account subpass.
-    pipeCreateInfo.subpass = 0;
-
     stages.resize(pipeCreateInfo.stageCount);
     memcpy(stages.data(), pipeCreateInfo.pStages, stages.byteSize());
 
@@ -559,14 +639,16 @@ protected:
   // depth-stencil attachment, and covers a single subpass. This will be used to replay
   // a single draw. The new renderpass also replaces the depth stencil attachment, so
   // it can be used to count the number of fragments. Optionally, the new renderpass
-  // changes the format for the color image that corresponds to subImage.
-  VkRenderPass CreateRenderPass(ResourceId rp, ResourceId fb, uint32_t subpassIdx,
-                                VkImage subImage = VK_NULL_HANDLE,
-                                VkFormat newFormat = VK_FORMAT_UNDEFINED)
+  // changes the format for the color image that corresponds to colorIdx attachment.
+  VkRenderPass CreateRenderPass(ResourceId rp, bool &multiview,
+                                VkFormat newColorFormat = VK_FORMAT_UNDEFINED, uint32_t colorIdx = 0)
   {
     const VulkanCreationInfo::RenderPass &rpInfo =
         m_pDriver->GetDebugManager()->GetRenderPassInfo(rp);
-    const VulkanCreationInfo::RenderPass::Subpass &sub = rpInfo.subpasses[subpassIdx];
+    // TODO: this should retrieve the correct subpass, once multiple subpasses
+    // are supported.
+    // Currently only single subpass render passes are supported.
+    const VulkanCreationInfo::RenderPass::Subpass &sub = rpInfo.subpasses.front();
 
     // Copy color and input attachments, and ignore resolve attachments.
     // Since we are only using this renderpass to replay a single draw, we don't
@@ -653,13 +735,34 @@ protected:
     subpassDesc.pDepthStencilAttachment = &dsAttachment;
 
     // If needed substitute the color attachment with the new format.
-    const VulkanCreationInfo::Framebuffer &fbInfo =
-        m_pDriver->GetDebugManager()->GetFramebufferInfo(fb);
-    for(uint32_t i = 0; i < fbInfo.attachments.size(); i++)
+    if(newColorFormat != VK_FORMAT_UNDEFINED)
     {
-      if(m_pDriver->GetDebugManager()->GetImageViewInfo(fbInfo.attachments[i].createdView).image ==
-         GetResID(subImage))
-        descs[i].format = newFormat;
+      if(colorIdx < descs.size())
+      {
+        // It is an existing attachment.
+        descs[colorIdx].format = newColorFormat;
+      }
+      else
+      {
+        // We are adding a new color attachment.
+        VkAttachmentReference attRef = {};
+        attRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        attRef.attachment = colorIdx;
+        colorAttachments.push_back(attRef);
+        subpassDesc.colorAttachmentCount = (uint32_t)colorAttachments.size();
+        subpassDesc.pColorAttachments = colorAttachments.data();
+
+        VkAttachmentDescription attDesc = {};
+        attDesc.format = newColorFormat;
+        attDesc.samples = m_CallbackInfo.samples;
+        attDesc.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        attDesc.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        attDesc.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attDesc.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attDesc.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        attDesc.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        descs.push_back(attDesc);
+      }
     }
 
     VkRenderPassCreateInfo rpCreateInfo = {};
@@ -671,6 +774,23 @@ protected:
     rpCreateInfo.dependencyCount = 0;
     rpCreateInfo.pDependencies = NULL;
 
+    uint32_t multiviewMask = 0;
+
+    VkRenderPassMultiviewCreateInfo multiviewRP = {
+        VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO};
+    multiviewRP.correlationMaskCount = 1;
+    multiviewRP.pCorrelationMasks = &multiviewMask;
+    multiviewRP.subpassCount = 1;
+    multiviewRP.pViewMasks = &multiviewMask;
+
+    multiview = false;
+    if(sub.multiviews.size() > 1)
+    {
+      multiviewMask = 1U << m_CallbackInfo.targetSubresource.slice;
+      rpCreateInfo.pNext = &multiviewRP;
+      multiview = true;
+    }
+
     VkRenderPass renderpass;
     VkResult vkr =
         m_pDriver->vkCreateRenderPass(m_pDriver->GetDev(), &rpCreateInfo, NULL, &renderpass);
@@ -681,14 +801,15 @@ protected:
 
   // CreateFrambuffer creates a new VkFramebuffer that is based on the original, but
   // substitutes the depth stencil image view. If there is no depth stencil attachment,
-  // it will be added. Optionally, also substitutes the original target image view.
-  VkFramebuffer CreateFramebuffer(ResourceId rp, VkRenderPass newRp, uint32_t subpassIndex,
-                                  ResourceId origFb, VkImageView newDsImageView,
-                                  VkImageView newImageView = VK_NULL_HANDLE)
+  // it will be added. Optionally, also substitutes the original target image view with
+  // the newColorAtt.
+  VkFramebuffer CreateFramebuffer(ResourceId rp, VkRenderPass newRp, ResourceId origFb,
+                                  VkImageView newColorAtt = VK_NULL_HANDLE, uint32_t colorIdx = 0)
   {
     const VulkanCreationInfo::RenderPass &rpInfo =
         m_pDriver->GetDebugManager()->GetRenderPassInfo(rp);
-    const VulkanCreationInfo::RenderPass::Subpass &sub = rpInfo.subpasses[subpassIndex];
+    // Currently only single subpass render passes are supported.
+    const VulkanCreationInfo::RenderPass::Subpass &sub = rpInfo.subpasses.front();
     const VulkanCreationInfo::Framebuffer &fbInfo =
         m_pDriver->GetDebugManager()->GetFramebufferInfo(origFb);
     rdcarray<VkImageView> atts(fbInfo.attachments.size());
@@ -697,19 +818,23 @@ protected:
     {
       atts[i] = m_pDriver->GetResourceManager()->GetCurrentHandle<VkImageView>(
           fbInfo.attachments[i].createdView);
-      if(newImageView != VK_NULL_HANDLE)
-      {
-        ResourceId img =
-            m_pDriver->GetDebugManager()->GetImageViewInfo(fbInfo.attachments[i].createdView).image;
-        if(img == GetResID(m_CallbackInfo.targetImage))
-          atts[i] = newImageView;
-      }
     }
 
+    // Either modify the existing color attachment view, or add a new one.
+    if(newColorAtt != VK_NULL_HANDLE)
+    {
+      if(colorIdx < atts.size())
+        atts[colorIdx] = newColorAtt;
+      else
+        atts.push_back(newColorAtt);
+    }
+
+    // Either modify the existing depth stencil attachment, or add one.
     if(sub.depthstencilAttachment != -1)
-      atts[sub.depthstencilAttachment] = newDsImageView;
+      atts[sub.depthstencilAttachment] = m_CallbackInfo.dsImageView;
     else
-      atts.push_back(newDsImageView);
+      atts.push_back(m_CallbackInfo.dsImageView);
+
     VkFramebufferCreateInfo fbCI = {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
     fbCI.renderPass = newRp;
     fbCI.attachmentCount = (uint32_t)atts.size();
@@ -725,10 +850,66 @@ protected:
     return framebuffer;
   }
 
+  VkDescriptorSet GetCopyDescriptor(VkImage image, VkFormat format, uint32_t baseMip,
+                                    uint32_t baseSlice)
+  {
+    auto it = m_CopyDescriptors.find(image);
+    if(it != m_CopyDescriptors.end())
+      return it->second;
+
+    VkImageViewCreateInfo viewInfo = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    viewInfo.image = image;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    viewInfo.format = format;
+    viewInfo.subresourceRange = {0, baseMip, 1, baseSlice, 1};
+
+    if(IsDepthOrStencilFormat(format))
+    {
+      viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    }
+    else
+    {
+      viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+      uint32_t bs = GetByteSize(1, 1, 1, format, 0);
+
+      if(bs == 1)
+        viewInfo.format = VK_FORMAT_R8_UINT;
+      else if(bs == 2)
+        viewInfo.format = VK_FORMAT_R16_UINT;
+      else if(bs == 4)
+        viewInfo.format = VK_FORMAT_R32_UINT;
+      else if(bs == 8)
+        viewInfo.format = VK_FORMAT_R32G32_UINT;
+      else if(bs == 16)
+        viewInfo.format = VK_FORMAT_R32G32B32A32_UINT;
+    }
+
+    VkImageView imageView;
+    VkResult vkr = m_pDriver->vkCreateImageView(m_pDriver->GetDev(), &viewInfo, NULL, &imageView);
+    RDCASSERTEQUAL(vkr, VK_SUCCESS);
+    m_ImageViewsToDestroy.push_back(imageView);
+
+    VkImageView imageView2 = VK_NULL_HANDLE;
+    if(IsStencilFormat(format))
+    {
+      viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+      vkr = m_pDriver->vkCreateImageView(m_pDriver->GetDev(), &viewInfo, NULL, &imageView2);
+      RDCASSERTEQUAL(vkr, VK_SUCCESS);
+      m_ImageViewsToDestroy.push_back(imageView2);
+    }
+
+    VkDescriptorSet descSet = m_pDriver->GetReplay()->GetPixelHistoryDescriptor();
+    m_pDriver->GetReplay()->UpdatePixelHistoryDescriptor(descSet, m_CallbackInfo.dstBuffer,
+                                                         imageView, imageView2);
+    m_CopyDescriptors.insert(std::make_pair(image, descSet));
+    return descSet;
+  }
+
   void CopyImagePixel(VkCommandBuffer cmd, CopyPixelParams &p, size_t offset)
   {
     VkImageAspectFlags aspectFlags = 0;
-    if(p.depthCopy)
+    bool depthCopy = IsDepthOrStencilFormat(p.srcImageFormat);
+    if(depthCopy)
     {
       if(IsDepthOnlyFormat(p.srcImageFormat) || IsDepthAndStencilFormat(p.srcImageFormat))
         aspectFlags |= VK_IMAGE_ASPECT_DEPTH_BIT;
@@ -743,8 +924,10 @@ protected:
     uint32_t baseMip = m_CallbackInfo.targetSubresource.mip;
     uint32_t baseSlice = m_CallbackInfo.targetSubresource.slice;
     // The images that are created specifically for evaluating pixel history are
-    // already based on the target mip/slice.
-    if((p.srcImage == m_CallbackInfo.subImage) || (p.srcImage == m_CallbackInfo.dsImage))
+    // already based on the target mip/slice. Unless we're using multiview, in which case the output
+    // is still view-dependent.
+    if(!p.multiview &&
+       ((p.srcImage == m_CallbackInfo.subImage) || (p.srcImage == m_CallbackInfo.dsImage)))
     {
       baseMip = 0;
       baseSlice = 0;
@@ -754,7 +937,7 @@ protected:
 
     // For multi-sampled images can't call vkCmdCopyImageToBuffer directly,
     // copy using a compute shader into a staging image first.
-    if(m_CallbackInfo.samples != VK_SAMPLE_COUNT_1_BIT)
+    if(p.multisampled)
     {
       VkImageMemoryBarrier barrier = {
           VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
@@ -763,61 +946,22 @@ protected:
               VK_ACCESS_MEMORY_WRITE_BIT,
           VK_ACCESS_SHADER_READ_BIT, p.srcImageLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
           VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, Unwrap(p.srcImage), subresource};
-
-      if(p.depthCopy && p.srcImage != m_CallbackInfo.dsImage)
-      {
-        // This is an original depth image that is used in a draw.
-        // The descriptor for MSAA copy has the dsImage created for pixel history.
-        // So copy the pixel value there first.
-        VkImageCopy region = {};
-        region.srcSubresource = {aspectFlags, baseMip, baseSlice, 1};
-        region.srcOffset = {(int32_t)m_CallbackInfo.x, (int32_t)m_CallbackInfo.y, 0};
-        region.dstSubresource = {aspectFlags, 0, 0, 1};
-        region.dstOffset = {(int32_t)m_CallbackInfo.x, (int32_t)m_CallbackInfo.y, 0};
-        region.extent = {1, 1, 1};
-
-        VkImageMemoryBarrier barriers[2];
-        barriers[0] = barrier;
-        barriers[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        barriers[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        barriers[1] = barriers[0];
-        barriers[1].image = Unwrap(m_CallbackInfo.dsImage);
-        barriers[1].oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        barriers[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-
-        DoPipelineBarrier(cmd, 2, barriers);
-
-        ObjDisp(cmd)->CmdCopyImage(
-            Unwrap(cmd), Unwrap(p.srcImage), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            Unwrap(m_CallbackInfo.dsImage), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-
-        // Return src image to its layout.
-        barrier.image = Unwrap(p.srcImage);
-        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        barrier.newLayout = p.srcImageLayout;
-        barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        barrier.dstAccessMask = VK_ACCESS_ALL_WRITE_BITS;
-        DoPipelineBarrier(cmd, 1, &barrier);
-
-        barrier.image = Unwrap(m_CallbackInfo.dsImage);
-        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-      }
+      SanitiseOldImageLayout(barrier.oldLayout);
+      VkDescriptorSet descSet = GetCopyDescriptor(p.srcImage, p.srcImageFormat, baseMip, baseSlice);
 
       // Transition src image to SHADER_READ_ONLY_OPTIMAL.
       DoPipelineBarrier(cmd, 1, &barrier);
 
       m_pDriver->GetReplay()->CopyPixelForPixelHistory(
           cmd, {(int32_t)m_CallbackInfo.x, (int32_t)m_CallbackInfo.y},
-          m_CallbackInfo.targetSubresource.sample, (uint32_t)offset / 16, p.depthCopy);
+          m_CallbackInfo.targetSubresource.sample, (uint32_t)offset / 16, p.srcImageFormat, descSet);
 
       // Transition src image back to its layout.
       barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
       barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
       barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
       barrier.newLayout = p.srcImageLayout;
+      SanitiseNewImageLayout(barrier.newLayout);
 
       DoPipelineBarrier(cmd, 1, &barrier);
     }
@@ -838,7 +982,7 @@ protected:
       region.imageSubresource.mipLevel = baseMip;
       region.imageSubresource.layerCount = 1;
 
-      if(!p.depthCopy)
+      if(!depthCopy)
       {
         region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         regions.push_back(region);
@@ -865,6 +1009,7 @@ protected:
               VK_ACCESS_MEMORY_WRITE_BIT,
           VK_ACCESS_TRANSFER_READ_BIT, p.srcImageLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
           VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, Unwrap(p.srcImage), subresource};
+      SanitiseOldImageLayout(barrier.oldLayout);
       DoPipelineBarrier(cmd, 1, &barrier);
 
       ObjDisp(cmd)->CmdCopyImageToBuffer(
@@ -875,17 +1020,62 @@ protected:
       barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
       barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
       barrier.newLayout = p.srcImageLayout;
+      SanitiseNewImageLayout(barrier.newLayout);
       DoPipelineBarrier(cmd, 1, &barrier);
     }
   }
 
+  bool HasMultipleSubpasses()
+  {
+    ResourceId rp = m_pDriver->GetCmdRenderState().renderPass;
+    if(rp == ResourceId())
+      return false;
+    const VulkanCreationInfo::RenderPass &rpInfo =
+        m_pDriver->GetDebugManager()->GetRenderPassInfo(rp);
+    return (rpInfo.subpasses.size() > 1);
+  }
+
+  // Returns teh color attachment index that corresponds to the target image for
+  // pixel history.
+  uint32_t GetColorAttachmentIndex(const VulkanRenderState &renderstate)
+  {
+    if(IsDepthOrStencilFormat(m_CallbackInfo.targetImageFormat))
+      return 0;
+
+    uint32_t framebufferIndex = 0;
+    const rdcarray<ResourceId> &atts = renderstate.GetFramebufferAttachments();
+
+    for(uint32_t i = 0; i < atts.size(); i++)
+    {
+      ResourceId img = m_pDriver->GetDebugManager()->GetImageViewInfo(atts[i]).image;
+      if(img == GetResID(m_CallbackInfo.targetImage))
+      {
+        framebufferIndex = i;
+        break;
+      }
+    }
+
+    const VulkanCreationInfo::RenderPass &rpInfo =
+        m_pDriver->GetDebugManager()->GetRenderPassInfo(renderstate.renderPass);
+    const VulkanCreationInfo::RenderPass::Subpass &sub = rpInfo.subpasses.front();
+    for(uint32_t i = 0; i < sub.colorAttachments.size(); i++)
+    {
+      if(framebufferIndex == sub.colorAttachments[i])
+        return i;
+    }
+    return 0;
+  }
+
   WrappedVulkan *m_pDriver;
+  VkQueryControlFlags m_QueryFlags = 0;
   PixelHistoryShaderCache *m_ShaderCache;
   PixelHistoryCallbackInfo m_CallbackInfo;
   VkQueryPool m_OcclusionPool;
   rdcarray<VkRenderPass> m_RpsToDestroy;
   rdcarray<VkFramebuffer> m_FbsToDestroy;
   rdcarray<VkDynamicState> m_DynamicStates;
+  std::map<VkImage, VkDescriptorSet> m_CopyDescriptors;
+  rdcarray<VkImageView> m_ImageViewsToDestroy;
 };
 
 // VulkanOcclusionCallback callback is used to determine which draw events might have
@@ -914,18 +1104,8 @@ struct VulkanOcclusionCallback : public VulkanPixelHistoryCallback
     VulkanRenderState prevState = m_pDriver->GetCmdRenderState();
     VulkanRenderState &pipestate = m_pDriver->GetCmdRenderState();
 
-    uint32_t framebufferIndex = 0;
-    const rdcarray<ResourceId> &atts = pipestate.GetFramebufferAttachments();
-    for(uint32_t i = 0; i < atts.size(); i++)
-    {
-      ResourceId img = m_pDriver->GetDebugManager()->GetImageViewInfo(atts[i]).image;
-      if(img == GetResID(m_CallbackInfo.targetImage))
-      {
-        framebufferIndex = i;
-        break;
-      }
-    }
-    VkPipeline pipe = GetPixelOcclusionPipeline(eid, prevState.graphics.pipeline, framebufferIndex);
+    VkPipeline pipe = GetPixelOcclusionPipeline(eid, prevState.graphics.pipeline,
+                                                GetColorAttachmentIndex(prevState));
     // set the scissor
     for(uint32_t i = 0; i < pipestate.views.size(); i++)
       ScissorToPixel(pipestate.views[i], pipestate.scissors[i]);
@@ -938,7 +1118,7 @@ struct VulkanOcclusionCallback : public VulkanPixelHistoryCallback
 
     m_pDriver->GetCmdRenderState() = prevState;
     m_pDriver->GetCmdRenderState().BindPipeline(m_pDriver, cmd, VulkanRenderState::BindGraphics,
-                                                true);
+                                                false);
   }
 
   bool PostDraw(uint32_t eid, VkCommandBuffer cmd) { return false; }
@@ -992,10 +1172,10 @@ private:
   {
     const DrawcallDescription *drawcall = m_pDriver->GetDrawcall(eventId);
     m_pDriver->GetCmdRenderState().BindPipeline(m_pDriver, cmd, VulkanRenderState::BindGraphics,
-                                                true);
+                                                false);
 
     uint32_t occlIndex = (uint32_t)m_OcclusionQueries.size();
-    ObjDisp(cmd)->CmdBeginQuery(Unwrap(cmd), m_OcclusionPool, occlIndex, 0);
+    ObjDisp(cmd)->CmdBeginQuery(Unwrap(cmd), m_OcclusionPool, occlIndex, m_QueryFlags);
 
     if(drawcall->flags & DrawFlags::Indexed)
       ObjDisp(cmd)->CmdDrawIndexed(Unwrap(cmd), drawcall->numIndices, drawcall->numInstances,
@@ -1009,7 +1189,7 @@ private:
     m_OcclusionQueries.insert(std::make_pair(eventId, occlIndex));
   }
 
-  VkPipeline GetPixelOcclusionPipeline(uint32_t eid, ResourceId pipeline, uint32_t framebufferIndex)
+  VkPipeline GetPixelOcclusionPipeline(uint32_t eid, ResourceId pipeline, uint32_t outputIndex)
   {
     auto it = m_PipeCache.find(pipeline);
     if(it != m_PipeCache.end())
@@ -1023,7 +1203,7 @@ private:
     {
       if(stages[i].stage == VK_SHADER_STAGE_FRAGMENT_BIT)
       {
-        stages[i].module = m_ShaderCache->GetFixedColShader(framebufferIndex);
+        stages[i].module = m_ShaderCache->GetFixedColShader(outputIndex);
         stages[i].pName = "main";
         break;
       }
@@ -1049,7 +1229,9 @@ struct VulkanColorAndStencilCallback : public VulkanPixelHistoryCallback
   VulkanColorAndStencilCallback(WrappedVulkan *vk, PixelHistoryShaderCache *shaderCache,
                                 const PixelHistoryCallbackInfo &callbackInfo,
                                 const rdcarray<uint32_t> &events)
-      : VulkanPixelHistoryCallback(vk, shaderCache, callbackInfo, VK_NULL_HANDLE), m_Events(events)
+      : VulkanPixelHistoryCallback(vk, shaderCache, callbackInfo, VK_NULL_HANDLE),
+        m_Events(events),
+        multipleSubpassWarningPrinted(false)
   {
   }
 
@@ -1067,7 +1249,16 @@ struct VulkanColorAndStencilCallback : public VulkanPixelHistoryCallback
     if(!m_Events.contains(eid) || !m_pDriver->IsCmdPrimary())
       return;
 
-    // TODO: can't end renderpass if we are not on the last subpass.
+    if(HasMultipleSubpasses())
+    {
+      if(!multipleSubpassWarningPrinted)
+      {
+        RDCWARN("Multiple subpasses in a render pass are not supported for pixel history.");
+        multipleSubpassWarningPrinted = true;
+      }
+      return;
+    }
+
     VulkanRenderState prevState = m_pDriver->GetCmdRenderState();
     VulkanRenderState &pipestate = m_pDriver->GetCmdRenderState();
 
@@ -1075,19 +1266,8 @@ struct VulkanColorAndStencilCallback : public VulkanPixelHistoryCallback
 
     // Get pre-modification values
     size_t storeOffset = m_EventIndices.size() * sizeof(EventInfo);
-    VkImage depthImage = VK_NULL_HANDLE;
-    VkFormat depthFormat = VK_FORMAT_UNDEFINED;
-    const DrawcallDescription *draw = m_pDriver->GetDrawcall(eid);
-    if(draw && draw->depthOut != ResourceId())
-    {
-      ResourceId resId = m_pDriver->GetResourceManager()->GetLiveID(draw->depthOut);
-      depthImage = m_pDriver->GetResourceManager()->GetCurrentHandle<VkImage>(resId);
-      const VulkanCreationInfo::Image &imginfo = m_pDriver->GetDebugManager()->GetImageInfo(resId);
-      depthFormat = imginfo.format;
-    }
 
-    CopyPixel(m_CallbackInfo.targetImage, m_CallbackInfo.targetImageFormat, depthImage, depthFormat,
-              cmd, storeOffset);
+    CopyPixel(eid, cmd, storeOffset);
 
     ResourceId prevRenderpass = pipestate.renderPass;
     ResourceId prevFramebuffer = pipestate.GetFramebuffer();
@@ -1096,23 +1276,13 @@ struct VulkanColorAndStencilCallback : public VulkanPixelHistoryCallback
     uint32_t prevSubpass = pipestate.subpass;
 
     {
-      VkRenderPass newRp =
-          CreateRenderPass(pipestate.renderPass, pipestate.GetFramebuffer(), pipestate.subpass);
-      VkFramebuffer newFb = CreateFramebuffer(pipestate.renderPass, newRp, pipestate.subpass,
-                                              pipestate.GetFramebuffer(), m_CallbackInfo.dsImageView);
-      uint32_t framebufferIndex = 0;
-      const rdcarray<ResourceId> &atts = pipestate.GetFramebufferAttachments();
-      for(uint32_t i = 0; i < atts.size(); i++)
-      {
-        ResourceId img = m_pDriver->GetDebugManager()->GetImageViewInfo(atts[i]).image;
-        if(img == GetResID(m_CallbackInfo.targetImage))
-        {
-          framebufferIndex = i;
-          break;
-        }
-      }
-      PipelineReplacements replacements =
-          GetPipelineReplacements(eid, pipestate.graphics.pipeline, newRp, framebufferIndex);
+      bool multiview = false;
+      VkRenderPass newRp = CreateRenderPass(pipestate.renderPass, multiview);
+      VkFramebuffer newFb =
+          CreateFramebuffer(pipestate.renderPass, newRp, pipestate.GetFramebuffer());
+
+      PipelineReplacements replacements = GetPipelineReplacements(
+          eid, pipestate.graphics.pipeline, newRp, GetColorAttachmentIndex(prevState));
 
       for(uint32_t i = 0; i < pipestate.views.size(); i++)
         ScissorToPixel(pipestate.views[i], pipestate.scissors[i]);
@@ -1124,7 +1294,6 @@ struct VulkanColorAndStencilCallback : public VulkanPixelHistoryCallback
       // not accounting for shader discard.
       pipestate.SetFramebuffer(m_pDriver, GetResID(newFb));
       pipestate.renderPass = GetResID(newRp);
-      pipestate.subpass = 0;
       pipestate.graphics.pipeline = GetResID(replacements.fixedShaderStencil);
       pipestate.front.compare = pipestate.front.write = 0xff;
       pipestate.front.ref = 0;
@@ -1135,7 +1304,8 @@ struct VulkanColorAndStencilCallback : public VulkanPixelHistoryCallback
       params.srcImage = m_CallbackInfo.dsImage;
       params.srcImageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
       params.srcImageFormat = m_CallbackInfo.dsFormat;
-      params.depthCopy = true;
+      params.multisampled = (m_CallbackInfo.samples != VK_SAMPLE_COUNT_1_BIT);
+      params.multiview = multiview;
       // Copy stencil value that indicates the number of fragments ignoring
       // shader discard.
       CopyImagePixel(cmd, params, storeOffset + offsetof(struct EventInfo, dsWithoutShaderDiscard));
@@ -1166,22 +1336,21 @@ struct VulkanColorAndStencilCallback : public VulkanPixelHistoryCallback
     if(!m_Events.contains(eid) || !m_pDriver->IsCmdPrimary())
       return false;
 
+    if(HasMultipleSubpasses())
+    {
+      if(!multipleSubpassWarningPrinted)
+      {
+        RDCWARN("Multiple subpasses in a render pass are not supported for pixel history.");
+        multipleSubpassWarningPrinted = true;
+      }
+      return false;
+    }
+
     m_pDriver->GetCmdRenderState().EndRenderPass(cmd);
 
     size_t storeOffset = m_EventIndices.size() * sizeof(EventInfo);
-    VkImage depthImage = VK_NULL_HANDLE;
-    VkFormat depthFormat = VK_FORMAT_UNDEFINED;
-    const DrawcallDescription *draw = m_pDriver->GetDrawcall(eid);
-    if(draw && draw->depthOut != ResourceId())
-    {
-      ResourceId resId = m_pDriver->GetResourceManager()->GetLiveID(draw->depthOut);
-      depthImage = m_pDriver->GetResourceManager()->GetCurrentHandle<VkImage>(resId);
-      const VulkanCreationInfo::Image &imginfo = m_pDriver->GetDebugManager()->GetImageInfo(resId);
-      depthFormat = imginfo.format;
-    }
 
-    CopyPixel(m_CallbackInfo.targetImage, m_CallbackInfo.targetImageFormat, depthImage, depthFormat,
-              cmd, storeOffset + offsetof(struct EventInfo, postmod));
+    CopyPixel(eid, cmd, storeOffset + offsetof(struct EventInfo, postmod));
 
     m_pDriver->GetCmdRenderState().BeginRenderPassAndApplyState(m_pDriver, cmd,
                                                                 VulkanRenderState::BindGraphics);
@@ -1214,12 +1383,21 @@ struct VulkanColorAndStencilCallback : public VulkanPixelHistoryCallback
     if(eventId == 0)
       return;
 
+    if(HasMultipleSubpasses())
+    {
+      if(!multipleSubpassWarningPrinted)
+      {
+        RDCWARN("Multiple subpasses in a render pass are not supported for pixel history.");
+        multipleSubpassWarningPrinted = true;
+      }
+      return;
+    }
+
     m_pDriver->GetCmdRenderState().EndRenderPass(cmd);
 
     // Copy
     size_t storeOffset = m_EventIndices.size() * sizeof(EventInfo);
-    CopyPixel(m_CallbackInfo.targetImage, m_CallbackInfo.targetImageFormat, VK_NULL_HANDLE,
-              VK_FORMAT_UNDEFINED, cmd, storeOffset);
+    CopyPixel(eventId, cmd, storeOffset);
     m_EventIndices.insert(std::make_pair(eventId, m_EventIndices.size()));
 
     m_pDriver->GetCmdRenderState().BeginRenderPassAndApplyState(m_pDriver, cmd,
@@ -1244,6 +1422,16 @@ struct VulkanColorAndStencilCallback : public VulkanPixelHistoryCallback
     if(eventId == 0)
       return;
 
+    if(HasMultipleSubpasses())
+    {
+      if(!multipleSubpassWarningPrinted)
+      {
+        RDCWARN("Multiple subpasses in a render pass are not supported for pixel history.");
+        multipleSubpassWarningPrinted = true;
+      }
+      return;
+    }
+
     m_pDriver->GetCmdRenderState().EndRenderPass(cmd);
     size_t storeOffset = 0;
     auto it = m_EventIndices.find(eventId);
@@ -1256,8 +1444,7 @@ struct VulkanColorAndStencilCallback : public VulkanPixelHistoryCallback
       storeOffset = m_EventIndices.size() * sizeof(EventInfo);
       m_EventIndices.insert(std::make_pair(eventId, m_EventIndices.size()));
     }
-    CopyPixel(m_CallbackInfo.targetImage, m_CallbackInfo.targetImageFormat, VK_NULL_HANDLE,
-              VK_FORMAT_UNDEFINED, cmd, storeOffset + offsetof(struct EventInfo, postmod));
+    CopyPixel(eventId, cmd, storeOffset + offsetof(struct EventInfo, postmod));
     m_pDriver->GetCmdRenderState().BeginRenderPassAndApplyState(m_pDriver, cmd,
                                                                 VulkanRenderState::BindNone);
   }
@@ -1266,28 +1453,47 @@ struct VulkanColorAndStencilCallback : public VulkanPixelHistoryCallback
   {
     if(!m_Events.contains(eid))
       return;
-
     size_t storeOffset = m_EventIndices.size() * sizeof(EventInfo);
-    CopyPixel(m_CallbackInfo.targetImage, m_CallbackInfo.targetImageFormat, VK_NULL_HANDLE,
-              VK_FORMAT_UNDEFINED, cmd, storeOffset);
+    CopyPixel(eid, cmd, storeOffset);
   }
   bool PostDispatch(uint32_t eid, VkCommandBuffer cmd)
   {
     if(!m_Events.contains(eid))
       return false;
-
     size_t storeOffset = m_EventIndices.size() * sizeof(EventInfo);
-    CopyPixel(m_CallbackInfo.targetImage, m_CallbackInfo.targetImageFormat, VK_NULL_HANDLE,
-              VK_FORMAT_UNDEFINED, cmd, storeOffset + offsetof(struct EventInfo, postmod));
+    CopyPixel(eid, cmd, storeOffset + offsetof(struct EventInfo, postmod));
     m_EventIndices.insert(std::make_pair(eid, m_EventIndices.size()));
     return false;
   }
   void PostRedispatch(uint32_t eid, VkCommandBuffer cmd) {}
-  void PreMisc(uint32_t eid, DrawFlags flags, VkCommandBuffer cmd) { PreDispatch(eid, cmd); }
+  void PreMisc(uint32_t eid, DrawFlags flags, VkCommandBuffer cmd)
+  {
+    if(!m_Events.contains(eid))
+      return;
+    if(HasMultipleSubpasses())
+    {
+      if(!multipleSubpassWarningPrinted)
+      {
+        RDCWARN("Multiple subpasses in a render pass are not supported for pixel history.");
+        multipleSubpassWarningPrinted = true;
+      }
+      return;
+    }
+    PreDispatch(eid, cmd);
+  }
   bool PostMisc(uint32_t eid, DrawFlags flags, VkCommandBuffer cmd)
   {
     if(!m_Events.contains(eid))
       return false;
+    if(HasMultipleSubpasses())
+    {
+      if(!multipleSubpassWarningPrinted)
+      {
+        RDCWARN("Multiple subpasses in a render pass are not supported for pixel history.");
+        multipleSubpassWarningPrinted = true;
+      }
+      return false;
+    }
     if(flags & DrawFlags::BeginPass)
       m_pDriver->GetCmdRenderState().EndRenderPass(cmd);
 
@@ -1322,26 +1528,52 @@ struct VulkanColorAndStencilCallback : public VulkanPixelHistoryCallback
     return (int32_t)it->second;
   }
 
-private:
-  void CopyPixel(VkImage srcImage, VkFormat srcFormat, VkImage depthImage, VkFormat depthFormat,
-                 VkCommandBuffer cmd, size_t offset)
+  VkFormat GetDepthFormat(uint32_t eventId)
   {
-    CopyPixelParams colourCopyParams = {};
-    colourCopyParams.srcImage = srcImage;
-    colourCopyParams.srcImageFormat = srcFormat;
-    colourCopyParams.srcImageLayout = m_pDriver->GetDebugManager()->GetImageLayout(
-        GetResID(srcImage), VK_IMAGE_ASPECT_COLOR_BIT, m_CallbackInfo.targetSubresource.mip,
-        m_CallbackInfo.targetSubresource.slice);
-    CopyImagePixel(cmd, colourCopyParams, offset);
+    if(IsDepthOrStencilFormat(m_CallbackInfo.targetImageFormat))
+      return m_CallbackInfo.targetImageFormat;
+    auto it = m_DepthFormats.find(eventId);
+    if(it == m_DepthFormats.end())
+      return VK_FORMAT_UNDEFINED;
+    return it->second;
+  }
 
-    if(depthImage != VK_NULL_HANDLE)
+private:
+  void CopyPixel(uint32_t eid, VkCommandBuffer cmd, size_t offset)
+  {
+    CopyPixelParams targetCopyParams = {};
+    targetCopyParams.srcImage = m_CallbackInfo.targetImage;
+    targetCopyParams.srcImageFormat = m_CallbackInfo.targetImageFormat;
+    targetCopyParams.multisampled = (m_CallbackInfo.samples != VK_SAMPLE_COUNT_1_BIT);
+    VkImageAspectFlagBits aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+    if(IsDepthOrStencilFormat(m_CallbackInfo.targetImageFormat))
     {
-      CopyPixelParams depthCopyParams = colourCopyParams;
-      depthCopyParams.depthCopy = true;
+      offset += offsetof(struct PixelHistoryValue, depth);
+      aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+    }
+    targetCopyParams.srcImageLayout = m_pDriver->GetDebugManager()->GetImageLayout(
+        GetResID(m_CallbackInfo.targetImage), aspect, m_CallbackInfo.targetSubresource.mip,
+        m_CallbackInfo.targetSubresource.slice);
+    CopyImagePixel(cmd, targetCopyParams, offset);
+
+    // If the target image is a depth/stencil attachment, we already
+    // copied the value above.
+    if(IsDepthOrStencilFormat(m_CallbackInfo.targetImageFormat))
+      return;
+
+    const DrawcallDescription *draw = m_pDriver->GetDrawcall(eid);
+    if(draw && draw->depthOut != ResourceId())
+    {
+      ResourceId resId = m_pDriver->GetResourceManager()->GetLiveID(draw->depthOut);
+      VkImage depthImage = m_pDriver->GetResourceManager()->GetCurrentHandle<VkImage>(resId);
+      const VulkanCreationInfo::Image &imginfo = m_pDriver->GetDebugManager()->GetImageInfo(resId);
+      CopyPixelParams depthCopyParams = targetCopyParams;
       depthCopyParams.srcImage = depthImage;
       depthCopyParams.srcImageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-      depthCopyParams.srcImageFormat = depthFormat;
+      depthCopyParams.srcImageFormat = imginfo.format;
+      depthCopyParams.multisampled = (imginfo.samples != VK_SAMPLE_COUNT_1_BIT);
       CopyImagePixel(cmd, depthCopyParams, offset + offsetof(struct PixelHistoryValue, depth));
+      m_DepthFormats.insert(std::make_pair(eid, imginfo.format));
     }
   }
 
@@ -1365,7 +1597,7 @@ private:
       rect.rect.extent.width = 1;
       rect.rect.extent.height = 1;
       rect.baseArrayLayer = 0;
-      rect.layerCount = 1;
+      rect.layerCount = m_CallbackInfo.layers;
       ObjDisp(cmd)->CmdClearAttachments(Unwrap(cmd), 1, &att, 1, &rect);
     }
 
@@ -1385,7 +1617,7 @@ private:
   // and use either fixed or original fragment shader, and shaders that don't
   // have side effects.
   PipelineReplacements GetPipelineReplacements(uint32_t eid, ResourceId pipeline, VkRenderPass rp,
-                                               uint32_t framebufferIndex)
+                                               uint32_t outputIndex)
   {
     // The map does not keep track of the event ID, event ID is only used to figure out
     // which shaders need to be modified. Those flags are based on the shaders bound,
@@ -1412,7 +1644,7 @@ private:
     {
       if(stages[i].stage == VK_SHADER_STAGE_FRAGMENT_BIT)
       {
-        stages[i].module = m_ShaderCache->GetFixedColShader(framebufferIndex);
+        stages[i].module = m_ShaderCache->GetFixedColShader(outputIndex);
         stages[i].pName = "main";
         break;
       }
@@ -1432,6 +1664,8 @@ private:
   rdcarray<uint32_t> m_Events;
   // Key is event ID, and value is an index of where the event data is stored.
   std::map<uint32_t, size_t> m_EventIndices;
+  bool multipleSubpassWarningPrinted;
+  std::map<uint32_t, VkFormat> m_DepthFormats;
 };
 
 // TestsFailedCallback replays draws to figure out which tests failed (for ex., depth,
@@ -1463,23 +1697,11 @@ struct TestsFailedCallback : public VulkanPixelHistoryCallback
     m_HasEarlyFragments[eid] = earlyFragmentTests;
 
     ResourceId curPipeline = pipestate.graphics.pipeline;
-    VulkanRenderState m_PrevState = m_pDriver->GetCmdRenderState();
+    VulkanRenderState prevState = m_pDriver->GetCmdRenderState();
 
-    uint32_t framebufferIndex = 0;
-    const rdcarray<ResourceId> &atts = pipestate.GetFramebufferAttachments();
-    for(uint32_t i = 0; i < atts.size(); i++)
-    {
-      ResourceId img = m_pDriver->GetDebugManager()->GetImageViewInfo(atts[i]).image;
-      if(img == GetResID(m_CallbackInfo.targetImage))
-      {
-        framebufferIndex = i;
-        break;
-      }
-    }
+    ReplayDrawWithTests(cmd, eid, eventFlags, curPipeline, GetColorAttachmentIndex(prevState));
 
-    ReplayDrawWithTests(cmd, eid, eventFlags, curPipeline, framebufferIndex);
-
-    m_pDriver->GetCmdRenderState() = m_PrevState;
+    m_pDriver->GetCmdRenderState() = prevState;
     m_pDriver->GetCmdRenderState().BindPipeline(m_pDriver, cmd, VulkanRenderState::BindGraphics,
                                                 false);
   }
@@ -1511,6 +1733,7 @@ struct TestsFailedCallback : public VulkanPixelHistoryCallback
   {
   }
   void PreEndCommandBuffer(VkCommandBuffer cmd) {}
+  bool HasEventFlags(uint32_t eventId) { return m_EventFlags.find(eventId) != m_EventFlags.end(); }
   uint32_t GetEventFlags(uint32_t eventId)
   {
     auto it = m_EventFlags.find(eventId);
@@ -1559,36 +1782,64 @@ private:
 
     // Culling
     {
-      if(p.cullMode != VK_CULL_MODE_NONE)
+      if(p.depthClipEnable && !p.depthClampEnable)
+        flags |= TestEnabled_DepthClipping;
+
+      if(pipestate.cullMode != VK_CULL_MODE_NONE)
         flags |= TestEnabled_Culling;
 
-      if(p.cullMode == VK_CULL_MODE_FRONT_AND_BACK)
+      if(pipestate.cullMode == VK_CULL_MODE_FRONT_AND_BACK)
         flags |= TestMustFail_Culling;
     }
 
     // Depth and Stencil tests.
     {
-      if(p.depthBoundsEnable)
+      if(pipestate.depthBoundsTestEnable)
         flags |= TestEnabled_DepthBounds;
 
-      if(p.depthTestEnable)
+      if(pipestate.depthTestEnable)
       {
-        if(p.depthCompareOp != VK_COMPARE_OP_ALWAYS)
+        if(pipestate.depthCompareOp != VK_COMPARE_OP_ALWAYS)
           flags |= TestEnabled_DepthTesting;
-        if(p.depthCompareOp == VK_COMPARE_OP_NEVER)
+        if(pipestate.depthCompareOp == VK_COMPARE_OP_NEVER)
           flags |= TestMustFail_DepthTesting;
+
+        if(pipestate.depthCompareOp == VK_COMPARE_OP_NEVER)
+          flags |= DepthTest_Never;
+        if(pipestate.depthCompareOp == VK_COMPARE_OP_LESS)
+          flags |= DepthTest_Less;
+        if(pipestate.depthCompareOp == VK_COMPARE_OP_EQUAL)
+          flags |= DepthTest_Equal;
+        if(pipestate.depthCompareOp == VK_COMPARE_OP_LESS_OR_EQUAL)
+          flags |= DepthTest_LessEqual;
+        if(pipestate.depthCompareOp == VK_COMPARE_OP_GREATER)
+          flags |= DepthTest_Greater;
+        if(pipestate.depthCompareOp == VK_COMPARE_OP_NOT_EQUAL)
+          flags |= DepthTest_NotEqual;
+        if(pipestate.depthCompareOp == VK_COMPARE_OP_GREATER_OR_EQUAL)
+          flags |= DepthTest_GreaterEqual;
+        if(pipestate.depthCompareOp == VK_COMPARE_OP_ALWAYS)
+          flags |= DepthTest_Always;
+      }
+      else
+      {
+        flags |= DepthTest_Always;
       }
 
-      if(p.stencilTestEnable)
+      if(pipestate.stencilTestEnable)
       {
-        if(p.front.compareOp != VK_COMPARE_OP_ALWAYS || p.back.compareOp != VK_COMPARE_OP_ALWAYS)
+        if(pipestate.front.compareOp != VK_COMPARE_OP_ALWAYS ||
+           pipestate.back.compareOp != VK_COMPARE_OP_ALWAYS)
           flags |= TestEnabled_StencilTesting;
 
-        if(p.front.compareOp == VK_COMPARE_OP_NEVER && p.back.compareOp == VK_COMPARE_OP_NEVER)
+        if(pipestate.front.compareOp == VK_COMPARE_OP_NEVER &&
+           pipestate.back.compareOp == VK_COMPARE_OP_NEVER)
           flags |= TestMustFail_StencilTesting;
-        else if(p.front.compareOp == VK_COMPARE_OP_NEVER && p.cullMode == VK_CULL_MODE_BACK_BIT)
+        else if(pipestate.front.compareOp == VK_COMPARE_OP_NEVER &&
+                pipestate.cullMode == VK_CULL_MODE_BACK_BIT)
           flags |= TestMustFail_StencilTesting;
-        else if(p.cullMode == VK_CULL_MODE_FRONT_BIT && p.back.compareOp == VK_COMPARE_OP_NEVER)
+        else if(pipestate.cullMode == VK_CULL_MODE_FRONT_BIT &&
+                pipestate.back.compareOp == VK_COMPARE_OP_NEVER)
           flags |= TestMustFail_StencilTesting;
       }
     }
@@ -1598,25 +1849,16 @@ private:
       bool inRegion = false;
       bool inAllRegions = true;
       // Do we even need to know viewerport here?
-      const VkRect2D *pScissors;
-      uint32_t scissorCount;
-      if(p.dynamicStates[VkDynamicScissor])
-      {
-        pScissors = pipestate.scissors.data();
-        scissorCount = (uint32_t)pipestate.scissors.size();
-      }
-      else
-      {
-        pScissors = p.scissors.data();
-        scissorCount = (uint32_t)p.scissors.size();
-      }
+      const VkRect2D *pScissors = pipestate.scissors.data();
+      uint32_t scissorCount = (uint32_t)pipestate.scissors.size();
+
       for(uint32_t i = 0; i < scissorCount; i++)
       {
         const VkOffset2D &offset = pScissors[i].offset;
         const VkExtent2D &extent = pScissors[i].extent;
-        if((m_CallbackInfo.x >= (uint32_t)offset.x) && (m_CallbackInfo.y >= (uint32_t)offset.y) &&
-           (m_CallbackInfo.x < (offset.x + extent.width)) &&
-           (m_CallbackInfo.y < (offset.y + extent.height)))
+        if(((int32_t)m_CallbackInfo.x >= offset.x) && ((int32_t)m_CallbackInfo.y >= offset.y) &&
+           ((int32_t)m_CallbackInfo.x < ((int64_t)offset.x + (int64_t)extent.width)) &&
+           ((int32_t)m_CallbackInfo.y < ((int64_t)offset.y + (int64_t)extent.height)))
           inRegion = true;
         else
           inAllRegions = false;
@@ -1674,12 +1916,13 @@ private:
     PipelineCreationFlags_DisableDepthTest = 1 << 1,
     PipelineCreationFlags_DisableStencilTest = 1 << 2,
     PipelineCreationFlags_DisableDepthBoundsTest = 1 << 3,
-    PipelineCreationFlags_FixedColorShader = 1 << 4,
-    PipelineCreationFlags_IntersectOriginalScissor = 1 << 5,
+    PipelineCreationFlags_DisableDepthClipping = 1 << 4,
+    PipelineCreationFlags_FixedColorShader = 1 << 5,
+    PipelineCreationFlags_IntersectOriginalScissor = 1 << 6,
   };
 
   void ReplayDrawWithTests(VkCommandBuffer cmd, uint32_t eid, uint32_t eventFlags,
-                           ResourceId basePipeline, uint32_t framebufferIndex)
+                           ResourceId basePipeline, uint32_t outputIndex)
   {
     // Backface culling
     if(eventFlags & TestMustFail_Culling)
@@ -1711,10 +1954,22 @@ private:
     if(eventFlags & TestEnabled_Culling)
     {
       uint32_t pipeFlags =
+          PipelineCreationFlags_DisableDepthTest | PipelineCreationFlags_DisableDepthClipping |
+          PipelineCreationFlags_DisableDepthBoundsTest | PipelineCreationFlags_DisableStencilTest |
+          PipelineCreationFlags_FixedColorShader;
+      VkPipeline pipe = CreatePipeline(basePipeline, pipeFlags, replacementShaders, outputIndex);
+      VkMarkerRegion::Set(StringFormat::Fmt("Test culling on %u", eid), cmd);
+      ReplayDraw(cmd, pipe, eid, TestEnabled_Culling);
+    }
+
+    if(eventFlags & TestEnabled_DepthClipping)
+    {
+      uint32_t pipeFlags =
           PipelineCreationFlags_DisableDepthTest | PipelineCreationFlags_DisableDepthBoundsTest |
           PipelineCreationFlags_DisableStencilTest | PipelineCreationFlags_FixedColorShader;
-      VkPipeline pipe = CreatePipeline(basePipeline, pipeFlags, replacementShaders, framebufferIndex);
-      ReplayDraw(cmd, pipe, eid, TestEnabled_Culling);
+      VkPipeline pipe = CreatePipeline(basePipeline, pipeFlags, replacementShaders, outputIndex);
+      VkMarkerRegion::Set(StringFormat::Fmt("Test depth clipping on %u", eid), cmd);
+      ReplayDraw(cmd, pipe, eid, TestEnabled_DepthClipping);
     }
 
     // Scissor
@@ -1727,11 +1982,12 @@ private:
           PipelineCreationFlags_IntersectOriginalScissor | PipelineCreationFlags_DisableDepthTest |
           PipelineCreationFlags_DisableDepthBoundsTest | PipelineCreationFlags_DisableStencilTest |
           PipelineCreationFlags_FixedColorShader;
-      VkPipeline pipe = CreatePipeline(basePipeline, pipeFlags, replacementShaders, framebufferIndex);
+      VkPipeline pipe = CreatePipeline(basePipeline, pipeFlags, replacementShaders, outputIndex);
       // This will change the scissor for the later tests, but since those
       // tests happen later in the pipeline, it does not matter.
       for(uint32_t i = 0; i < pipestate.views.size(); i++)
         IntersectScissors(prevScissors[i], pipestate.scissors[i]);
+      VkMarkerRegion::Set(StringFormat::Fmt("Test scissor on %u", eid), cmd);
       ReplayDraw(cmd, pipe, eid, TestEnabled_Scissor);
     }
 
@@ -1744,7 +2000,8 @@ private:
       uint32_t pipeFlags =
           PipelineCreationFlags_DisableDepthBoundsTest | PipelineCreationFlags_DisableStencilTest |
           PipelineCreationFlags_DisableDepthTest | PipelineCreationFlags_FixedColorShader;
-      VkPipeline pipe = CreatePipeline(basePipeline, pipeFlags, replacementShaders, framebufferIndex);
+      VkPipeline pipe = CreatePipeline(basePipeline, pipeFlags, replacementShaders, outputIndex);
+      VkMarkerRegion::Set(StringFormat::Fmt("Test sample mask on %u", eid), cmd);
       ReplayDraw(cmd, pipe, eid, TestEnabled_SampleMask);
     }
 
@@ -1754,7 +2011,8 @@ private:
       uint32_t pipeFlags = PipelineCreationFlags_DisableStencilTest |
                            PipelineCreationFlags_DisableDepthTest |
                            PipelineCreationFlags_FixedColorShader;
-      VkPipeline pipe = CreatePipeline(basePipeline, pipeFlags, replacementShaders, framebufferIndex);
+      VkPipeline pipe = CreatePipeline(basePipeline, pipeFlags, replacementShaders, outputIndex);
+      VkMarkerRegion::Set(StringFormat::Fmt("Test depth bounds on %u", eid), cmd);
       ReplayDraw(cmd, pipe, eid, TestEnabled_DepthBounds);
     }
 
@@ -1766,7 +2024,8 @@ private:
     {
       uint32_t pipeFlags =
           PipelineCreationFlags_DisableDepthTest | PipelineCreationFlags_FixedColorShader;
-      VkPipeline pipe = CreatePipeline(basePipeline, pipeFlags, replacementShaders, framebufferIndex);
+      VkPipeline pipe = CreatePipeline(basePipeline, pipeFlags, replacementShaders, outputIndex);
+      VkMarkerRegion::Set(StringFormat::Fmt("Test stencil on %u", eid), cmd);
       ReplayDraw(cmd, pipe, eid, TestEnabled_StencilTesting);
     }
 
@@ -1781,7 +2040,8 @@ private:
       uint32_t pipeFlags =
           PipelineCreationFlags_DisableStencilTest | PipelineCreationFlags_FixedColorShader;
 
-      VkPipeline pipe = CreatePipeline(basePipeline, pipeFlags, replacementShaders, framebufferIndex);
+      VkPipeline pipe = CreatePipeline(basePipeline, pipeFlags, replacementShaders, outputIndex);
+      VkMarkerRegion::Set(StringFormat::Fmt("Test depth on %u", eid), cmd);
       ReplayDraw(cmd, pipe, eid, TestEnabled_DepthTesting);
     }
 
@@ -1794,7 +2054,8 @@ private:
       uint32_t pipeFlags = PipelineCreationFlags_DisableDepthBoundsTest |
                            PipelineCreationFlags_DisableStencilTest |
                            PipelineCreationFlags_DisableDepthTest;
-      VkPipeline pipe = CreatePipeline(basePipeline, pipeFlags, replacementShaders, framebufferIndex);
+      VkPipeline pipe = CreatePipeline(basePipeline, pipeFlags, replacementShaders, outputIndex);
+      VkMarkerRegion::Set(StringFormat::Fmt("Test shader discard on %u", eid), cmd);
       ReplayDraw(cmd, pipe, eid, TestEnabled_FragmentDiscard);
     }
   }
@@ -1803,8 +2064,7 @@ private:
   // pipeline flags. Modifies the base pipeline according to the flags, and
   // leaves the original pipeline behavior if a flag is not set.
   VkPipeline CreatePipeline(ResourceId basePipeline, uint32_t pipeCreateFlags,
-                            const rdcarray<VkShaderModule> &replacementShaders,
-                            uint32_t framebufferIndex)
+                            const rdcarray<VkShaderModule> &replacementShaders, uint32_t outputIndex)
   {
     rdcpair<ResourceId, uint32_t> pipeKey(basePipeline, pipeCreateFlags);
     auto it = m_PipeCache.find(pipeKey);
@@ -1837,6 +2097,8 @@ private:
       ds->stencilTestEnable = VK_FALSE;
     if(pipeCreateFlags & PipelineCreationFlags_DisableDepthBoundsTest)
       ds->depthBoundsTestEnable = VK_FALSE;
+    if(pipeCreateFlags & PipelineCreationFlags_DisableDepthClipping)
+      rs->depthClampEnable = VK_TRUE;
 
     rdcarray<VkPipelineShaderStageCreateInfo> stages;
     stages.resize(ci.stageCount);
@@ -1847,7 +2109,7 @@ private:
       if((ci.pStages[i].stage == VK_SHADER_STAGE_FRAGMENT_BIT) &&
          (pipeCreateFlags & PipelineCreationFlags_FixedColorShader))
       {
-        stages[i].module = m_ShaderCache->GetFixedColShader(framebufferIndex);
+        stages[i].module = m_ShaderCache->GetFixedColShader(outputIndex);
         stages[i].pName = "main";
       }
       else if(replacementShaders[StageIndex(stages[i].stage)] != VK_NULL_HANDLE)
@@ -1876,7 +2138,7 @@ private:
       RDCERR("A query already exist for event id %u and test %u", eventId, test);
     m_OcclusionQueries.insert(std::make_pair(rdcpair<uint32_t, uint32_t>(eventId, test), index));
 
-    ObjDisp(cmd)->CmdBeginQuery(Unwrap(cmd), m_OcclusionPool, index, 0);
+    ObjDisp(cmd)->CmdBeginQuery(Unwrap(cmd), m_OcclusionPool, index, m_QueryFlags);
 
     const DrawcallDescription *drawcall = m_pDriver->GetDrawcall(eventId);
     if(drawcall->flags & DrawFlags::Indexed)
@@ -1944,29 +2206,57 @@ struct VulkanPixelHistoryPerFragmentCallback : VulkanPixelHistoryCallback
 
     uint32_t numFragmentsInEvent = m_EventFragments[eid];
 
-    VkRenderPass newRp = CreateRenderPass(state.renderPass, state.GetFramebuffer(), state.subpass,
-                                          m_CallbackInfo.targetImage, VK_FORMAT_R32G32B32A32_SFLOAT);
-
-    VkFramebuffer newFb =
-        CreateFramebuffer(state.renderPass, newRp, state.subpass, state.GetFramebuffer(),
-                          m_CallbackInfo.dsImageView, m_CallbackInfo.subImageView);
-
     uint32_t framebufferIndex = 0;
+    uint32_t colorOutputIndex = 0;
     const rdcarray<ResourceId> &atts = prevState.GetFramebufferAttachments();
-    for(uint32_t i = 0; i < atts.size(); i++)
+    const VulkanCreationInfo::RenderPass &rpInfo =
+        m_pDriver->GetDebugManager()->GetRenderPassInfo(prevState.renderPass);
+    const VulkanCreationInfo::RenderPass::Subpass &sub = rpInfo.subpasses.front();
+
+    if(IsDepthOrStencilFormat(m_CallbackInfo.targetImageFormat))
     {
-      ResourceId img = m_pDriver->GetDebugManager()->GetImageViewInfo(atts[i]).image;
-      if(img == GetResID(m_CallbackInfo.targetImage))
+      // Going to add another color attachment.
+      framebufferIndex = (uint32_t)atts.size();
+      colorOutputIndex = (uint32_t)sub.colorAttachments.size();
+    }
+    else
+    {
+      for(uint32_t i = 0; i < atts.size(); i++)
       {
-        framebufferIndex = i;
-        break;
+        ResourceId img = m_pDriver->GetDebugManager()->GetImageViewInfo(atts[i]).image;
+        if(img == GetResID(m_CallbackInfo.targetImage))
+        {
+          framebufferIndex = i;
+          break;
+        }
+      }
+      for(uint32_t i = 0; i < sub.colorAttachments.size(); i++)
+      {
+        if(framebufferIndex == sub.colorAttachments[i])
+        {
+          colorOutputIndex = i;
+          break;
+        }
       }
     }
 
-    Pipelines pipes = CreatePerFragmentPipelines(curPipeline, newRp, eid, 0, framebufferIndex);
+    bool multiview = false;
+    VkRenderPass newRp = CreateRenderPass(state.renderPass, multiview,
+                                          VK_FORMAT_R32G32B32A32_SFLOAT, framebufferIndex);
+
+    VkFramebuffer newFb = CreateFramebuffer(state.renderPass, newRp, state.GetFramebuffer(),
+                                            m_CallbackInfo.subImageView, framebufferIndex);
+
+    Pipelines pipes = CreatePerFragmentPipelines(curPipeline, newRp, eid, 0, colorOutputIndex);
 
     for(uint32_t i = 0; i < state.views.size(); i++)
+    {
       ScissorToPixel(state.views[i], state.scissors[i]);
+
+      state.scissors[i].offset.x &= ~0x1;
+      state.scissors[i].offset.y &= ~0x1;
+      state.scissors[i].extent = {2, 2};
+    }
 
     state.renderPass = GetResID(newRp);
     state.SetFramebuffer(m_pDriver, GetResID(newFb));
@@ -1977,39 +2267,70 @@ struct VulkanPixelHistoryPerFragmentCallback : VulkanPixelHistoryCallback
 
     CopyPixelParams colourCopyParams = {};
     colourCopyParams.srcImage = m_CallbackInfo.subImage;
-    // Use the layout of the image we are substituting for.
-    VkImageLayout srcImageLayout = m_pDriver->GetDebugManager()->GetImageLayout(
-        GetResID(m_CallbackInfo.targetImage), VK_IMAGE_ASPECT_COLOR_BIT,
-        m_CallbackInfo.targetSubresource.mip, m_CallbackInfo.targetSubresource.slice);
-    colourCopyParams.srcImageLayout = srcImageLayout;
-    colourCopyParams.srcImageFormat = m_CallbackInfo.targetImageFormat;
+    colourCopyParams.srcImageFormat = VK_FORMAT_R32G32B32A32_SFLOAT;
+    colourCopyParams.multisampled = (m_CallbackInfo.samples != VK_SAMPLE_COUNT_1_BIT);
+    colourCopyParams.multiview = multiview;
+    if(IsDepthOrStencilFormat(m_CallbackInfo.targetImageFormat))
+    {
+      colourCopyParams.srcImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    }
+    else
+    {
+      // Use the layout of the image we are substituting for.
+      VkImageLayout srcImageLayout = m_pDriver->GetDebugManager()->GetImageLayout(
+          GetResID(m_CallbackInfo.targetImage), VK_IMAGE_ASPECT_COLOR_BIT,
+          m_CallbackInfo.targetSubresource.mip, m_CallbackInfo.targetSubresource.slice);
+      colourCopyParams.srcImageLayout = srcImageLayout;
+    }
 
-    const VulkanCreationInfo::Pipeline &p =
-        m_pDriver->GetDebugManager()->GetPipelineInfo(prevState.graphics.pipeline);
-    bool depthEnabled = p.depthTestEnable;
+    bool depthEnabled = prevState.depthTestEnable != VK_FALSE;
+
+    VkMarkerRegion::Set(StringFormat::Fmt("Event %u has %u fragments", eid, numFragmentsInEvent),
+                        cmd);
 
     // Get primitive ID and shader output value for each fragment.
     for(uint32_t f = 0; f < numFragmentsInEvent; f++)
     {
       for(uint32_t i = 0; i < 2; i++)
       {
+        uint32_t storeOffset = (fragsProcessed + f) * sizeof(PerFragmentInfo);
+
+        VkMarkerRegion region(cmd, StringFormat::Fmt("Getting %s for %u",
+                                                     i == 0 ? "primitive ID" : "shader output", eid));
+
         if(i == 0 && !m_pDriver->GetDeviceEnabledFeatures().geometryShader)
         {
           // without geometryShader, can't read primitive ID in pixel shader
+          VkMarkerRegion::Set("Can't get primitive ID without geometryShader feature", cmd);
+
+          ObjDisp(cmd)->CmdFillBuffer(Unwrap(cmd), Unwrap(m_CallbackInfo.dstBuffer), storeOffset,
+                                      16, ~0U);
           continue;
         }
 
-        VkImageMemoryBarrier barrier = {
-            VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-            NULL,
-            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-            VK_ACCESS_TRANSFER_WRITE_BIT,
-            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            VK_QUEUE_FAMILY_IGNORED,
-            VK_QUEUE_FAMILY_IGNORED,
-            Unwrap(m_CallbackInfo.dsImage),
-            {VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, 1}};
+        if(pipesIter[i] == VK_NULL_HANDLE)
+        {
+          // without one of the pipelines (e.g. if there was a geometry shader in use and we can't
+          // read primitive ID in the fragment shader) we can't continue.
+          // technically we can if the geometry shader outs a primitive ID, but that is unlikely.
+          VkMarkerRegion::Set("Can't get primitive ID with geometry shader in use", cmd);
+
+          ObjDisp(cmd)->CmdFillBuffer(Unwrap(cmd), Unwrap(m_CallbackInfo.dstBuffer), storeOffset,
+                                      16, ~0U);
+          continue;
+        }
+
+        VkImageMemoryBarrier barrier = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                                        NULL,
+                                        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                                        VK_ACCESS_TRANSFER_WRITE_BIT,
+                                        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                        VK_QUEUE_FAMILY_IGNORED,
+                                        VK_QUEUE_FAMILY_IGNORED,
+                                        Unwrap(m_CallbackInfo.dsImage),
+                                        {VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0,
+                                         1, 0, m_CallbackInfo.layers}};
 
         DoPipelineBarrier(cmd, 1, &barrier);
 
@@ -2023,7 +2344,7 @@ struct VulkanPixelHistoryPerFragmentCallback : VulkanPixelHistoryCallback
         range.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
         range.baseArrayLayer = 0;
         range.baseMipLevel = 0;
-        range.layerCount = 1;
+        range.layerCount = m_CallbackInfo.layers;
         range.levelCount = 1;
 
         ObjDisp(cmd)->CmdClearDepthStencilImage(Unwrap(cmd), Unwrap(m_CallbackInfo.dsImage),
@@ -2056,14 +2377,12 @@ struct VulkanPixelHistoryPerFragmentCallback : VulkanPixelHistoryCallback
                                 drawcall->vertexOffset, drawcall->instanceOffset);
         state.EndRenderPass(cmd);
 
-        uint32_t storeOffset = (fragsProcessed + f) * sizeof(PerFragmentInfo);
         if(i == 1)
         {
           storeOffset += offsetof(struct PerFragmentInfo, shaderOut);
           if(depthEnabled)
           {
             CopyPixelParams depthCopyParams = colourCopyParams;
-            depthCopyParams.depthCopy = true;
             depthCopyParams.srcImage = m_CallbackInfo.dsImage;
             depthCopyParams.srcImageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
             depthCopyParams.srcImageFormat = m_CallbackInfo.dsFormat;
@@ -2086,11 +2405,27 @@ struct VulkanPixelHistoryPerFragmentCallback : VulkanPixelHistoryCallback
       depthFormat = imginfo.format;
     }
 
+    // use the original renderpass and framebuffer attachment
+    state.renderPass = prevState.renderPass;
+    state.SetFramebuffer(prevState.GetFramebuffer(), prevState.GetFramebufferAttachments());
+
+    colourCopyParams.srcImage = m_CallbackInfo.targetImage;
+    colourCopyParams.srcImageFormat = m_CallbackInfo.targetImageFormat;
+    colourCopyParams.multisampled = (m_CallbackInfo.samples != VK_SAMPLE_COUNT_1_BIT);
+    VkImageAspectFlagBits aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+    if(IsDepthOrStencilFormat(m_CallbackInfo.targetImageFormat))
+      aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+    colourCopyParams.srcImageLayout = m_pDriver->GetDebugManager()->GetImageLayout(
+        GetResID(m_CallbackInfo.targetImage), aspect, m_CallbackInfo.targetSubresource.mip,
+        m_CallbackInfo.targetSubresource.slice);
+
     const ModificationValue &premod = m_EventPremods[eid];
     // For every fragment except the last one, retrieve post-modification
     // value.
     for(uint32_t f = 0; f < numFragmentsInEvent - 1; f++)
     {
+      VkMarkerRegion region(cmd, StringFormat::Fmt("Getting postmod for fragment %u in %u", f, eid));
+
       // Get post-modification value, use the original framebuffer attachment.
       state.graphics.pipeline = GetResID(pipes.postModPipe);
       state.BeginRenderPassAndApplyState(m_pDriver, cmd, VulkanRenderState::BindGraphics);
@@ -2109,17 +2444,21 @@ struct VulkanPixelHistoryPerFragmentCallback : VulkanPixelHistoryCallback
       if(f == 0)
       {
         // Before starting the draw, initialize the pixel to the premodification value
-        // for this event, for both color and stencil.
+        // for this event, for both color and depth.
         VkClearAttachment clearAtts[2] = {};
+
         clearAtts[0].aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        clearAtts[0].colorAttachment = framebufferIndex;
+        clearAtts[0].colorAttachment = colorOutputIndex;
         memcpy(clearAtts[0].clearValue.color.float32, premod.col.floatValue,
                sizeof(clearAtts[0].clearValue.color));
 
         clearAtts[1].aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
         clearAtts[1].clearValue.depthStencil.depth = premod.depth;
 
-        ObjDisp(cmd)->CmdClearAttachments(Unwrap(cmd), 2, clearAtts, 1, &rect);
+        if(IsDepthOrStencilFormat(m_CallbackInfo.targetImageFormat))
+          ObjDisp(cmd)->CmdClearAttachments(Unwrap(cmd), 1, clearAtts + 1, 1, &rect);
+        else
+          ObjDisp(cmd)->CmdClearAttachments(Unwrap(cmd), 2, clearAtts, 1, &rect);
       }
 
       ObjDisp(cmd)->CmdSetStencilCompareMask(Unwrap(cmd), VK_STENCIL_FACE_FRONT_AND_BACK, 0xff);
@@ -2141,9 +2480,8 @@ struct VulkanPixelHistoryPerFragmentCallback : VulkanPixelHistoryCallback
       if(depthImage != VK_NULL_HANDLE)
       {
         CopyPixelParams depthCopyParams = colourCopyParams;
-        depthCopyParams.depthCopy = true;
-        depthCopyParams.srcImage = m_CallbackInfo.dsImage;
-        depthCopyParams.srcImageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        depthCopyParams.srcImage = depthImage;
+        depthCopyParams.srcImageLayout = sub.depthLayout;
         depthCopyParams.srcImageFormat = depthFormat;
         CopyImagePixel(cmd, depthCopyParams, (fragsProcessed + f) * sizeof(PerFragmentInfo) +
                                                  offsetof(struct PerFragmentInfo, postMod) +
@@ -2162,7 +2500,7 @@ struct VulkanPixelHistoryPerFragmentCallback : VulkanPixelHistoryCallback
   void PostRedraw(uint32_t eid, VkCommandBuffer cmd) {}
   // CreatePerFragmentPipelines for getting per fragment information.
   Pipelines CreatePerFragmentPipelines(ResourceId pipe, VkRenderPass rp, uint32_t eid,
-                                       uint32_t fragmentIndex, uint32_t framebufferIndex)
+                                       uint32_t fragmentIndex, uint32_t colorOutputIndex)
   {
     const VulkanCreationInfo::Pipeline &p = m_pDriver->GetDebugManager()->GetPipelineInfo(pipe);
     VkGraphicsPipelineCreateInfo pipeCreateInfo = {};
@@ -2173,11 +2511,7 @@ struct VulkanPixelHistoryPerFragmentCallback : VulkanPixelHistoryCallback
 
     VkPipelineDepthStencilStateCreateInfo *ds =
         (VkPipelineDepthStencilStateCreateInfo *)pipeCreateInfo.pDepthStencilState;
-    VkPipelineMultisampleStateCreateInfo *ms =
-        (VkPipelineMultisampleStateCreateInfo *)pipeCreateInfo.pMultisampleState;
 
-    VkRect2D newScissors[16];
-    memset(newScissors, 0, sizeof(newScissors));
     // Modify the stencil state, so that only one fragment passes.
     {
       ds->stencilTestEnable = VK_TRUE;
@@ -2189,12 +2523,7 @@ struct VulkanPixelHistoryPerFragmentCallback : VulkanPixelHistoryCallback
       ds->front.writeMask = 0xff;
       ds->front.reference = 0;
       ds->back = ds->front;
-
-      ms->pSampleMask = &m_CallbackInfo.sampleMask;
     }
-
-    // TODO: this is wrong, should take into account subpass.
-    pipeCreateInfo.subpass = 0;
 
     stages.resize(pipeCreateInfo.stageCount);
     memcpy(stages.data(), pipeCreateInfo.pStages, stages.byteSize());
@@ -2217,31 +2546,53 @@ struct VulkanPixelHistoryPerFragmentCallback : VulkanPixelHistoryCallback
         stages[i].module = replacement;
     }
     pipeCreateInfo.pStages = stages.data();
-    pipeCreateInfo.renderPass = rp;
 
+    // the postmod pipe is used with the original renderpass and attachment setup
     Pipelines pipes = {};
     VkResult vkr = m_pDriver->vkCreateGraphicsPipelines(m_pDriver->GetDev(), VK_NULL_HANDLE, 1,
                                                         &pipeCreateInfo, NULL, &pipes.postModPipe);
     RDCASSERTEQUAL(vkr, VK_SUCCESS);
     m_PipesToDestroy.push_back(pipes.postModPipe);
 
+    pipeCreateInfo.renderPass = rp;
+
     VkPipelineColorBlendStateCreateInfo *cbs =
         (VkPipelineColorBlendStateCreateInfo *)pipeCreateInfo.pColorBlendState;
     // Turn off blending so that we can get shader output values.
     VkPipelineColorBlendAttachmentState *atts =
         (VkPipelineColorBlendAttachmentState *)cbs->pAttachments;
-    for(uint32_t i = 0; i < cbs->attachmentCount; i++)
+    rdcarray<VkPipelineColorBlendAttachmentState> newAtts;
+
+    // Check if we need to add a new color attachment.
+    if(colorOutputIndex == cbs->attachmentCount)
     {
-      if(i == framebufferIndex)
+      newAtts.resize(cbs->attachmentCount + 1);
+      memcpy(newAtts.data(), cbs->pAttachments,
+             cbs->attachmentCount * sizeof(VkPipelineColorBlendAttachmentState));
+      VkPipelineColorBlendAttachmentState newAtt = {};
+      if(cbs->attachmentCount > 0)
       {
-        atts[i].blendEnable = 0;
-        atts[i].colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                                 VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        // If there are existing color attachments, copy the blend information from it.
+        // It will be adjusted later.
+        newAtt = cbs->pAttachments[0];
       }
       else
       {
-        atts[i].colorWriteMask = 0;
+        newAtt.blendEnable = VK_FALSE;
+        newAtt.srcColorBlendFactor = VK_BLEND_FACTOR_DST_COLOR;
       }
+      newAtts[cbs->attachmentCount] = newAtt;
+      cbs->attachmentCount = (uint32_t)newAtts.size();
+      cbs->pAttachments = newAtts.data();
+
+      atts = newAtts.data();
+    }
+
+    for(uint32_t i = 0; i < cbs->attachmentCount; i++)
+    {
+      atts[i].blendEnable = 0;
+      atts[i].colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                               VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
     }
 
     {
@@ -2264,16 +2615,21 @@ struct VulkanPixelHistoryPerFragmentCallback : VulkanPixelHistoryCallback
     VkPipelineShaderStageCreateInfo stageCI = {};
     stageCI.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stageCI.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    stageCI.module = m_ShaderCache->GetPrimitiveIdShader(framebufferIndex);
+    stageCI.module = m_ShaderCache->GetPrimitiveIdShader(colorOutputIndex);
     stageCI.pName = "main";
+    bool gsFound = false;
     bool fsFound = false;
     for(uint32_t i = 0; i < pipeCreateInfo.stageCount; i++)
     {
+      if(stages[i].stage == VK_SHADER_STAGE_GEOMETRY_BIT)
+      {
+        gsFound = true;
+        break;
+      }
       if(stages[i].stage == VK_SHADER_STAGE_FRAGMENT_BIT)
       {
         stages[i] = stageCI;
         fsFound = true;
-        break;
       }
     }
     if(!fsFound)
@@ -2283,10 +2639,18 @@ struct VulkanPixelHistoryPerFragmentCallback : VulkanPixelHistoryCallback
       pipeCreateInfo.pStages = stages.data();
     }
 
-    vkr = m_pDriver->vkCreateGraphicsPipelines(m_pDriver->GetDev(), VK_NULL_HANDLE, 1,
-                                               &pipeCreateInfo, NULL, &pipes.primitiveIdPipe);
-    RDCASSERTEQUAL(vkr, VK_SUCCESS);
-    m_PipesToDestroy.push_back(pipes.primitiveIdPipe);
+    if(!gsFound)
+    {
+      vkr = m_pDriver->vkCreateGraphicsPipelines(m_pDriver->GetDev(), VK_NULL_HANDLE, 1,
+                                                 &pipeCreateInfo, NULL, &pipes.primitiveIdPipe);
+      RDCASSERTEQUAL(vkr, VK_SUCCESS);
+      m_PipesToDestroy.push_back(pipes.primitiveIdPipe);
+    }
+    else
+    {
+      pipes.primitiveIdPipe = VK_NULL_HANDLE;
+      RDCWARN("Can't get primitive ID at event %u due to geometry shader usage", eid);
+    }
 
     return pipes;
   }
@@ -2369,7 +2733,7 @@ struct VulkanPixelHistoryDiscardedFragmentsCallback : VulkanPixelHistoryCallback
     for(uint32_t i = 0; i < primIds.size(); i++)
     {
       uint32_t queryId = (uint32_t)m_OcclusionIndices.size();
-      ObjDisp(cmd)->CmdBeginQuery(Unwrap(cmd), m_OcclusionPool, queryId, 0);
+      ObjDisp(cmd)->CmdBeginQuery(Unwrap(cmd), m_OcclusionPool, queryId, m_QueryFlags);
       const DrawcallDescription *drawcall = m_pDriver->GetDrawcall(eid);
       uint32_t primId = primIds[i];
       // TODO once pixel history distinguishes between instances, draw only the instance for
@@ -2478,11 +2842,6 @@ bool VulkanDebugManager::PixelHistorySetupResources(PixelHistoryResources &resou
   VkImage dsImage;
   VkImageView dsImageView;
 
-  VkImageView colorImageAliasView = VK_NULL_HANDLE;
-  VkImageView targetImageView = VK_NULL_HANDLE;
-  VkImageView depthOnlyImageView = VK_NULL_HANDLE;
-  VkImageView stencilOnlyImageView = VK_NULL_HANDLE;
-
   VkDeviceMemory gpuMem;
 
   VkBuffer dstBuffer;
@@ -2557,11 +2916,14 @@ bool VulkanDebugManager::PixelHistorySetupResources(PixelHistoryResources &resou
   vkr = m_pDriver->vkBindImageMemory(m_Device, dsImage, gpuMem, offset);
   RDCASSERTEQUAL(vkr, VK_SUCCESS);
 
+  NameVulkanObject(colorImage, "Pixel History color image");
+  NameVulkanObject(dsImage, "Pixel History depth image");
+
   VkImageViewCreateInfo viewInfo = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
   viewInfo.image = colorImage;
   viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
   viewInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
-  viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+  viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, imgInfo.arrayLayers};
 
   if(samples != VK_SAMPLE_COUNT_1_BIT)
     viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
@@ -2571,52 +2933,15 @@ bool VulkanDebugManager::PixelHistorySetupResources(PixelHistoryResources &resou
 
   viewInfo.image = dsImage;
   viewInfo.format = dsFormat;
-  viewInfo.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, 1};
+  viewInfo.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0,
+                               imgInfo.arrayLayers};
 
   vkr = m_pDriver->vkCreateImageView(m_Device, &viewInfo, NULL, &dsImageView);
   RDCASSERTEQUAL(vkr, VK_SUCCESS);
 
-  if(samples != VK_SAMPLE_COUNT_1_BIT)
-  {
-    uint32_t bs = GetByteSize(1, 1, 1, format, 0);
-
-    if(bs == 1)
-      viewInfo.format = VK_FORMAT_R8_UINT;
-    else if(bs == 2)
-      viewInfo.format = VK_FORMAT_R16_UINT;
-    else if(bs == 4)
-      viewInfo.format = VK_FORMAT_R32_UINT;
-    else if(bs == 8)
-      viewInfo.format = VK_FORMAT_R32G32_UINT;
-    else if(bs == 16)
-      viewInfo.format = VK_FORMAT_R32G32B32A32_UINT;
-
-    if(viewInfo.format == VK_FORMAT_UNDEFINED)
-    {
-      RDCERR("Can't copy 2D to Array with format %s", ToStr(format).c_str());
-    }
-
-    viewInfo.image = targetImage;
-    viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, sub.mip, 1, sub.slice, 1};
-    vkr = m_pDriver->vkCreateImageView(m_Device, &viewInfo, NULL, &targetImageView);
-    RDCASSERTEQUAL(vkr, VK_SUCCESS);
-
-    viewInfo.format = VK_FORMAT_R32G32B32A32_UINT;
-    viewInfo.image = colorImage;
-    viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    vkr = m_pDriver->vkCreateImageView(m_Device, &viewInfo, NULL, &colorImageAliasView);
-    RDCASSERTEQUAL(vkr, VK_SUCCESS);
-
-    viewInfo.image = dsImage;
-    viewInfo.format = dsFormat;
-    viewInfo.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
-    vkr = m_pDriver->vkCreateImageView(m_Device, &viewInfo, NULL, &depthOnlyImageView);
-
-    viewInfo.subresourceRange = {VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, 1};
-    vkr = m_pDriver->vkCreateImageView(m_Device, &viewInfo, NULL, &stencilOnlyImageView);
-  }
-
   VkBufferCreateInfo bufferInfo = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+  // TODO: the size for memory is calculated to fit pre and post modification values and
+  // stencil values. But we might run out of space when getting per fragment data.
   bufferInfo.size = AlignUp((uint32_t)(numEvents * sizeof(EventInfo)), 4096U);
   bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 
@@ -2660,59 +2985,69 @@ bool VulkanDebugManager::PixelHistorySetupResources(PixelHistoryResources &resou
   resources.dsImageView = dsImageView;
   resources.gpuMem = gpuMem;
 
-  resources.colorImageAliasView = colorImageAliasView;
-  resources.targetImageView = targetImageView;
-  resources.depthOnlyImageView = depthOnlyImageView;
-  resources.stencilOnlyImageView = stencilOnlyImageView;
-
   resources.bufferMemory = bufferMemory;
   resources.dstBuffer = dstBuffer;
 
   return true;
 }
 
-void VulkanReplay::UpdatePixelHistoryDescriptor(VkImageView sourceView, VkImageView depthImageView,
-                                                VkImageView stencilImageView, VkBuffer destBuffer)
+VkDescriptorSet VulkanReplay::GetPixelHistoryDescriptor()
+{
+  VkDescriptorSet descSet;
+
+  VkDescriptorSetAllocateInfo descSetAllocInfo = {
+      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      NULL,
+      m_PixelHistory.MSCopyDescPool,
+      1,
+      &m_PixelHistory.MSCopyDescSetLayout,
+  };
+
+  // don't expect this to fail (or if it does then it should be immediately obvious, not transient).
+  VkResult vkr =
+      m_pDriver->vkAllocateDescriptorSets(m_pDriver->GetDev(), &descSetAllocInfo, &descSet);
+  if(vkr != VK_SUCCESS)
+    RDCERR("Failed creating object");
+  m_PixelHistory.allocedSets.push_back(descSet);
+  return descSet;
+}
+
+void VulkanReplay::ResetPixelHistoryDescriptorPool()
+{
+  for(VkDescriptorSet descset : m_PixelHistory.allocedSets)
+    GetResourceManager()->ReleaseWrappedResource(descset, true);
+  m_PixelHistory.allocedSets.clear();
+  m_pDriver->vkResetDescriptorPool(m_pDriver->GetDev(), m_PixelHistory.MSCopyDescPool, 0);
+}
+
+void VulkanReplay::UpdatePixelHistoryDescriptor(VkDescriptorSet descSet, VkBuffer buffer,
+                                                VkImageView imgView1, VkImageView imgView2)
 {
   VkDescriptorBufferInfo destdesc = {0};
-  destdesc.buffer = Unwrap(destBuffer);
+  destdesc.buffer = Unwrap(buffer);
   destdesc.range = VK_WHOLE_SIZE;
 
   {
     VkDescriptorImageInfo srcdesc = {};
     srcdesc.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    srcdesc.imageView = Unwrap(sourceView);
+    srcdesc.imageView = Unwrap(imgView1);
     srcdesc.sampler = Unwrap(m_General.PointSampler);    // not used - we use texelFetch
 
-    VkWriteDescriptorSet writeSet[] = {
-        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Unwrap(m_PixelHistory.MSCopyDescSet), 0, 0,
-         1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &srcdesc, NULL, NULL},
-        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Unwrap(m_PixelHistory.MSCopyDescSet), 1, 0,
-         1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &srcdesc, NULL, NULL},
-        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Unwrap(m_PixelHistory.MSCopyDescSet), 2, 0,
-         1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &destdesc, NULL},
-    };
-
-    ObjDisp(m_pDriver->GetDev())
-        ->UpdateDescriptorSets(Unwrap(m_pDriver->GetDev()), ARRAY_COUNT(writeSet), writeSet, 0, NULL);
-  }
-
-  {
-    VkDescriptorImageInfo srcdesc[2] = {};
-    srcdesc[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    srcdesc[0].imageView = Unwrap(depthImageView);
-    srcdesc[0].sampler = Unwrap(m_General.PointSampler);    // not used - we use texelFetch
-
-    srcdesc[1] = srcdesc[0];
-    srcdesc[1].imageView = Unwrap(stencilImageView);
+    VkDescriptorImageInfo srcdesc2 = {};
+    srcdesc2.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if(imgView2 != VK_NULL_HANDLE)
+      srcdesc2.imageView = Unwrap(imgView2);
+    else
+      srcdesc2.imageView = Unwrap(imgView1);
+    srcdesc2.sampler = Unwrap(m_General.PointSampler);
 
     VkWriteDescriptorSet writeSet[] = {
-        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Unwrap(m_PixelHistory.MSDepthCopyDescSet), 0,
-         0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &srcdesc[0], NULL, NULL},
-        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Unwrap(m_PixelHistory.MSDepthCopyDescSet), 1,
-         0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &srcdesc[1], NULL, NULL},
-        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Unwrap(m_PixelHistory.MSDepthCopyDescSet), 2,
-         0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &destdesc, NULL},
+        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Unwrap(descSet), 0, 0, 1,
+         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &srcdesc, NULL, NULL},
+        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Unwrap(descSet), 1, 0, 1,
+         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &srcdesc2, NULL, NULL},
+        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, Unwrap(descSet), 2, 0, 1,
+         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &destdesc, NULL},
     };
 
     ObjDisp(m_pDriver->GetDev())
@@ -2733,14 +3068,6 @@ bool VulkanDebugManager::PixelHistoryDestroyResources(const PixelHistoryResource
     m_pDriver->vkDestroyImage(dev, r.dsImage, NULL);
   if(r.dsImageView != VK_NULL_HANDLE)
     m_pDriver->vkDestroyImageView(dev, r.dsImageView, NULL);
-  if(r.colorImageAliasView != VK_NULL_HANDLE)
-    m_pDriver->vkDestroyImageView(dev, r.colorImageAliasView, NULL);
-  if(r.targetImageView != VK_NULL_HANDLE)
-    m_pDriver->vkDestroyImageView(dev, r.targetImageView, NULL);
-  if(r.depthOnlyImageView != VK_NULL_HANDLE)
-    m_pDriver->vkDestroyImageView(dev, r.depthOnlyImageView, NULL);
-  if(r.stencilOnlyImageView != VK_NULL_HANDLE)
-    m_pDriver->vkDestroyImageView(dev, r.stencilOnlyImageView, NULL);
   if(r.dstBuffer != VK_NULL_HANDLE)
     m_pDriver->vkDestroyBuffer(dev, r.dstBuffer, NULL);
   if(r.bufferMemory != VK_NULL_HANDLE)
@@ -2809,6 +3136,15 @@ void UpdateTestsFailed(const TestsFailedCallback *tfCb, uint32_t eventId, uint32
   if(mod.backfaceCulled)
     return;
 
+  if(eventFlags & TestEnabled_DepthClipping)
+  {
+    uint64_t occlData = tfCb->GetOcclusionResult(eventId, TestEnabled_DepthClipping);
+    mod.depthClipped = (occlData == 0);
+  }
+
+  if(mod.depthClipped)
+    return;
+
   if((eventFlags & (TestEnabled_Scissor | TestMustPass_Scissor | TestMustFail_Scissor)) ==
      TestEnabled_Scissor)
   {
@@ -2840,9 +3176,9 @@ void UpdateTestsFailed(const TestsFailedCallback *tfCb, uint32_t eventId, uint32
   if(eventFlags & TestEnabled_DepthBounds)
   {
     uint64_t occlData = tfCb->GetOcclusionResult(eventId, TestEnabled_DepthBounds);
-    mod.depthClipped = (occlData == 0);
+    mod.depthBoundsFailed = (occlData == 0);
   }
-  if(mod.depthClipped)
+  if(mod.depthBoundsFailed)
     return;
 
   if((eventFlags & (TestEnabled_StencilTesting | TestMustFail_StencilTesting)) ==
@@ -2872,20 +3208,20 @@ void UpdateTestsFailed(const TestsFailedCallback *tfCb, uint32_t eventId, uint32
 
 void FillInColor(ResourceFormat fmt, const PixelHistoryValue &value, ModificationValue &mod)
 {
-  FloatVector v4 = ConvertComponents(fmt, value.color);
-  memcpy(mod.col.floatValue, &v4.x, sizeof(v4));
+  FloatVector v4 = DecodeFormattedComponents(fmt, value.color);
+  memcpy(mod.col.floatValue, &v4, sizeof(v4));
+}
+
+float GetDepthValue(VkFormat depthFormat, const PixelHistoryValue &value)
+{
+  FloatVector v4 = DecodeFormattedComponents(MakeResourceFormat(depthFormat), (byte *)&value.depth);
+  return v4.x;
 }
 
 rdcarray<PixelModification> VulkanReplay::PixelHistory(rdcarray<EventUsage> events,
                                                        ResourceId target, uint32_t x, uint32_t y,
                                                        const Subresource &sub, CompType typeCast)
 {
-  if(!GetAPIProperties().pixelHistory)
-  {
-    VULKANNOTIMP("PixelHistory");
-    return rdcarray<PixelModification>();
-  }
-
   rdcarray<PixelModification> history;
 
   if(events.empty())
@@ -2931,9 +3267,6 @@ rdcarray<PixelModification> VulkanReplay::PixelHistory(rdcarray<EventUsage> even
   GetDebugManager()->PixelHistorySetupResources(resources, targetImage, imginfo.extent,
                                                 imginfo.format, imginfo.samples, sub,
                                                 (uint32_t)events.size());
-  if(multisampled)
-    UpdatePixelHistoryDescriptor(resources.targetImageView, resources.depthOnlyImageView,
-                                 resources.stencilOnlyImageView, resources.dstBuffer);
 
   PixelHistoryShaderCache *shaderCache = new PixelHistoryShaderCache(m_pDriver);
 
@@ -3065,8 +3398,6 @@ rdcarray<PixelModification> VulkanReplay::PixelHistory(rdcarray<EventUsage> even
     }
   }
 
-  SAFE_DELETE(tfCb);
-
   // Try to read memory back
 
   EventInfo *eventsInfo;
@@ -3086,16 +3417,31 @@ rdcarray<PixelModification> VulkanReplay::PixelHistory(rdcarray<EventUsage> even
     if(eventIndex == -1)
     {
       // There is no information, skip the event.
+      mod.preMod.SetInvalid();
+      mod.postMod.SetInvalid();
+      mod.shaderOut.SetInvalid();
       h++;
       continue;
     }
     const EventInfo &ei = eventsInfo[eventIndex];
     FillInColor(fmt, ei.premod, mod.preMod);
     FillInColor(fmt, ei.postmod, mod.postMod);
-    mod.preMod.depth = ei.premod.depth.fdepth;
-    mod.preMod.stencil = ei.premod.stencil;
-    mod.postMod.depth = ei.postmod.depth.fdepth;
-    mod.postMod.stencil = ei.postmod.stencil;
+    VkFormat depthFormat = cb.GetDepthFormat(mod.eventId);
+    if(depthFormat != VK_FORMAT_UNDEFINED)
+    {
+      mod.preMod.stencil = ei.premod.stencil;
+      mod.postMod.stencil = ei.postmod.stencil;
+      if(multisampled)
+      {
+        mod.preMod.depth = ei.premod.depth.fdepth;
+        mod.postMod.depth = ei.postmod.depth.fdepth;
+      }
+      else
+      {
+        mod.preMod.depth = GetDepthValue(depthFormat, ei.premod);
+        mod.postMod.depth = GetDepthValue(depthFormat, ei.postmod);
+      }
+    }
 
     int32_t frags = int32_t(ei.dsWithoutShaderDiscard[4]);
     int32_t fragsClipped = int32_t(ei.dsWithShaderDiscard[4]);
@@ -3129,9 +3475,6 @@ rdcarray<PixelModification> VulkanReplay::PixelHistory(rdcarray<EventUsage> even
   {
     // Replay to get shader output value, post modification value and primitive ID for every
     // fragment.
-    if(multisampled)
-      UpdatePixelHistoryDescriptor(resources.colorImageAliasView, resources.depthOnlyImageView,
-                                   resources.stencilOnlyImageView, resources.dstBuffer);
     VulkanPixelHistoryPerFragmentCallback perFragmentCB(m_pDriver, shaderCache, callbackInfo,
                                                         eventsWithFrags, eventPremods);
     {
@@ -3223,8 +3566,12 @@ rdcarray<PixelModification> VulkanReplay::PixelHistory(rdcarray<EventUsage> even
         if((h < history.size() - 1) && (history[h].eventId == history[h + 1].eventId))
         {
           // Get post-modification value if this is not the last fragment for the event.
-          FillInColor(shaderOutFormat, bp[offset].postMod, history[h].postMod);
-          history[h].postMod.depth = bp[offset].postMod.depth.fdepth;
+          FillInColor(fmt, bp[offset].postMod, history[h].postMod);
+          // MSAA depth is expanded out to floats in the compute shader
+          if((uint32_t)callbackInfo.samples > 1)
+            history[h].postMod.depth = bp[offset].postMod.depth.fdepth;
+          else
+            history[h].postMod.depth = GetDepthValue(cb.GetDepthFormat(eid), bp[offset].postMod);
         }
         // If it is not the first fragment for the event, set the preMod to the
         // postMod of the previous fragment.
@@ -3233,8 +3580,49 @@ rdcarray<PixelModification> VulkanReplay::PixelHistory(rdcarray<EventUsage> even
           history[h].preMod = history[h - 1].postMod;
         }
       }
+
+      // check the depth value between premod/shaderout against the known test if we have valid
+      // depth values, as we don't have per-fragment depth test information.
+      if(history[h].preMod.depth >= 0.0f && history[h].shaderOut.depth >= 0.0f && tfCb &&
+         tfCb->HasEventFlags(history[h].eventId))
+      {
+        uint32_t flags = tfCb->GetEventFlags(history[h].eventId);
+
+        flags &= 0x7 << DepthTest_Shift;
+
+        VkFormat dfmt = cb.GetDepthFormat(eid);
+        float shadDepth = history[h].shaderOut.depth;
+
+        // quantise depth to match before comparing
+        if(dfmt == VK_FORMAT_D24_UNORM_S8_UINT || dfmt == VK_FORMAT_X8_D24_UNORM_PACK32)
+        {
+          shadDepth = float(uint32_t(float(shadDepth * 0xffffff))) / float(0xffffff);
+        }
+        else if(dfmt == VK_FORMAT_D16_UNORM || dfmt == VK_FORMAT_D16_UNORM_S8_UINT)
+        {
+          shadDepth = float(uint32_t(float(shadDepth * 0xffff))) / float(0xffff);
+        }
+
+        bool passed = true;
+        if(flags == DepthTest_Equal)
+          passed = (shadDepth == history[h].preMod.depth);
+        else if(flags == DepthTest_NotEqual)
+          passed = (shadDepth != history[h].preMod.depth);
+        else if(flags == DepthTest_Less)
+          passed = (shadDepth < history[h].preMod.depth);
+        else if(flags == DepthTest_LessEqual)
+          passed = (shadDepth <= history[h].preMod.depth);
+        else if(flags == DepthTest_Greater)
+          passed = (shadDepth > history[h].preMod.depth);
+        else if(flags == DepthTest_GreaterEqual)
+          passed = (shadDepth >= history[h].preMod.depth);
+
+        history[h].depthTestFailed = !passed;
+      }
     }
   }
+
+  SAFE_DELETE(tfCb);
 
   GetDebugManager()->PixelHistoryDestroyResources(resources);
   ObjDisp(dev)->DestroyQueryPool(Unwrap(dev), occlusionPool, NULL);

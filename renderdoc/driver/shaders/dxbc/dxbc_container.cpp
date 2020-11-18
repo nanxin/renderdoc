@@ -27,12 +27,17 @@
 #include <algorithm>
 #include "api/app/renderdoc_app.h"
 #include "common/common.h"
+#include "core/settings.h"
 #include "driver/shaders/dxil/dxil_bytecode.h"
+#include "lz4/lz4.h"
 #include "serialise/serialiser.h"
 #include "strings/string_utils.h"
 #include "dxbc_bytecode.h"
 
 #include "driver/dx/official/d3dcompiler.h"
+
+RDOC_CONFIG(rdcarray<rdcstr>, DXBC_Debug_SearchDirPaths, {},
+            "Paths to search for separated shader debug PDBs.");
 
 namespace DXBC
 {
@@ -110,6 +115,17 @@ struct ILDNHeader
   uint16_t Flags;
   uint16_t NameLength;
   char Name[1];
+};
+
+enum class HASHFlags : uint32_t
+{
+  INCLUDES_SOURCE = 0x1,
+};
+
+struct HASHHeader
+{
+  HASHFlags Flags;
+  uint32_t hashValue[4];
 };
 
 struct RDEFHeader
@@ -250,32 +266,9 @@ static const uint32_t FOURCC_PRIV = MAKE_FOURCC('P', 'R', 'I', 'V');
 static const uint32_t FOURCC_DXIL = MAKE_FOURCC('D', 'X', 'I', 'L');
 static const uint32_t FOURCC_ILDB = MAKE_FOURCC('I', 'L', 'D', 'B');
 static const uint32_t FOURCC_ILDN = MAKE_FOURCC('I', 'L', 'D', 'N');
-
-int TypeByteSize(VariableType t)
-{
-  switch(t)
-  {
-    case VARTYPE_UINT8: return 1;
-    case VARTYPE_BOOL:
-    case VARTYPE_INT:
-    case VARTYPE_FLOAT:
-    case VARTYPE_UINT:
-      return 4;
-    // we pretend for our purposes that the 'min' formats round up to 4 bytes. For any external
-    // interfaces they are treated as regular types, only using lower precision internally.
-    case VARTYPE_MIN8FLOAT:
-    case VARTYPE_MIN10FLOAT:
-    case VARTYPE_MIN16FLOAT:
-    case VARTYPE_MIN12INT:
-    case VARTYPE_MIN16INT:
-    case VARTYPE_MIN16UINT: return 4;
-    case VARTYPE_DOUBLE:
-      return 8;
-    // 'virtual' type. Just return 1
-    case VARTYPE_INTERFACE_POINTER: return 1;
-    default: RDCERR("Trying to take size of undefined type %d", t); return 1;
-  }
-}
+static const uint32_t FOURCC_HASH = MAKE_FOURCC('H', 'A', 'S', 'H');
+static const uint32_t FOURCC_SFI0 = MAKE_FOURCC('S', 'F', 'I', '0');
+static const uint32_t FOURCC_PSV0 = MAKE_FOURCC('P', 'S', 'V', '0');
 
 ShaderBuiltin GetSystemValue(SVSemantic systemValue)
 {
@@ -319,22 +312,15 @@ rdcstr TypeName(CBufferVariableType::Descriptor desc)
   rdcstr ret;
 
   char *type = "";
-  switch(desc.type)
+  switch(desc.varType)
   {
-    case VARTYPE_BOOL: type = "bool"; break;
-    case VARTYPE_INT: type = "int"; break;
-    case VARTYPE_FLOAT: type = "float"; break;
-    case VARTYPE_DOUBLE: type = "double"; break;
-    case VARTYPE_UINT: type = "uint"; break;
-    case VARTYPE_UINT8: type = "ubyte"; break;
-    case VARTYPE_VOID: type = "void"; break;
-    case VARTYPE_INTERFACE_POINTER: type = "interface"; break;
-    case VARTYPE_MIN8FLOAT: type = "min8float"; break;
-    case VARTYPE_MIN10FLOAT: type = "min10float"; break;
-    case VARTYPE_MIN16FLOAT: type = "min16float"; break;
-    case VARTYPE_MIN12INT: type = "min12int"; break;
-    case VARTYPE_MIN16INT: type = "min16int"; break;
-    case VARTYPE_MIN16UINT: type = "min16uint"; break;
+    case VarType::Bool: type = "bool"; break;
+    case VarType::SInt: type = "int"; break;
+    case VarType::Float: type = "float"; break;
+    case VarType::Double: type = "double"; break;
+    case VarType::UInt: type = "uint"; break;
+    case VarType::UByte: type = "ubyte"; break;
+    case VarType::Unknown: type = "void"; break;
     default: RDCERR("Unexpected type in RDEF variable type %d", type);
   }
 
@@ -370,22 +356,37 @@ rdcstr TypeName(CBufferVariableType::Descriptor desc)
   return ret;
 }
 
-CBufferVariableType DXBCContainer::ParseRDEFType(RDEFHeader *h, char *chunkContents,
+CBufferVariableType DXBCContainer::ParseRDEFType(const RDEFHeader *h, const byte *chunkContents,
                                                  uint32_t typeOffset)
 {
   if(m_Variables.find(typeOffset) != m_Variables.end())
     return m_Variables[typeOffset];
 
-  RDEFCBufferType *type = (RDEFCBufferType *)(chunkContents + typeOffset);
+  const RDEFCBufferType *type = (const RDEFCBufferType *)(chunkContents + typeOffset);
 
   CBufferVariableType ret;
 
   ret.descriptor.varClass = (VariableClass)type->varClass;
-  ret.descriptor.cols = type->cols;
-  ret.descriptor.elements = type->numElems;
-  ret.descriptor.members = type->numMembers;
-  ret.descriptor.rows = type->rows;
-  ret.descriptor.type = (VariableType)type->varType;
+  ret.descriptor.cols = RDCMAX(1U, (uint32_t)type->cols);
+  ret.descriptor.elements = RDCMAX(1U, (uint32_t)type->numElems);
+  ret.descriptor.rows = RDCMAX(1U, (uint32_t)type->rows);
+
+  switch((VariableType)type->varType)
+  {
+    // DXBC treats all cbuffer variables as 32-bit regardless of declaration
+    case DXBC::VARTYPE_MIN12INT:
+    case DXBC::VARTYPE_MIN16INT:
+    case DXBC::VARTYPE_INT: ret.descriptor.varType = VarType::SInt; break;
+    case DXBC::VARTYPE_BOOL: ret.descriptor.varType = VarType::Bool; break;
+    case DXBC::VARTYPE_MIN16UINT:
+    case DXBC::VARTYPE_UINT: ret.descriptor.varType = VarType::UInt; break;
+    case DXBC::VARTYPE_DOUBLE: ret.descriptor.varType = VarType::Double; break;
+    case DXBC::VARTYPE_FLOAT:
+    case DXBC::VARTYPE_MIN8FLOAT:
+    case DXBC::VARTYPE_MIN10FLOAT:
+    case DXBC::VARTYPE_MIN16FLOAT:
+    default: ret.descriptor.varType = VarType::Float; break;
+  }
 
   ret.descriptor.name = TypeName(ret.descriptor);
 
@@ -393,7 +394,7 @@ CBufferVariableType DXBCContainer::ParseRDEFType(RDEFHeader *h, char *chunkConte
   {
     if(h->targetVersion >= 0x500 && type->nameOffset > 0)
     {
-      ret.descriptor.name += " " + rdcstr(chunkContents + type->nameOffset);
+      ret.descriptor.name += " " + rdcstr((const char *)chunkContents + type->nameOffset);
     }
     else
     {
@@ -406,7 +407,7 @@ CBufferVariableType DXBCContainer::ParseRDEFType(RDEFHeader *h, char *chunkConte
   {
     if(h->targetVersion >= 0x500 && type->nameOffset > 0)
     {
-      ret.descriptor.name = chunkContents + type->nameOffset;
+      ret.descriptor.name = (const char *)chunkContents + type->nameOffset;
     }
     else
     {
@@ -416,7 +417,8 @@ CBufferVariableType DXBCContainer::ParseRDEFType(RDEFHeader *h, char *chunkConte
 
   if(type->memberOffset)
   {
-    RDEFCBufferChildType *members = (RDEFCBufferChildType *)(chunkContents + type->memberOffset);
+    const RDEFCBufferChildType *members =
+        (const RDEFCBufferChildType *)(chunkContents + type->memberOffset);
 
     ret.members.reserve(type->numMembers);
 
@@ -426,19 +428,11 @@ CBufferVariableType DXBCContainer::ParseRDEFType(RDEFHeader *h, char *chunkConte
     {
       CBufferVariable v;
 
-      v.name = chunkContents + members[j].nameOffset;
+      v.name = (const char *)(chunkContents + members[j].nameOffset);
       v.type = ParseRDEFType(h, chunkContents, members[j].typeOffset);
-      v.descriptor.offset = members[j].memberOffset;
+      v.offset = members[j].memberOffset;
 
-      ret.descriptor.bytesize = v.descriptor.offset + v.type.descriptor.bytesize;
-
-      // N/A
-      v.descriptor.flags = 0;
-      v.descriptor.startTexture = 0;
-      v.descriptor.numTextures = 0;
-      v.descriptor.startSampler = 0;
-      v.descriptor.numSamplers = 0;
-      v.descriptor.defaultValue.clear();
+      ret.descriptor.bytesize = v.offset + v.type.descriptor.bytesize;
 
       ret.members.push_back(v);
     }
@@ -451,12 +445,12 @@ CBufferVariableType DXBCContainer::ParseRDEFType(RDEFHeader *h, char *chunkConte
     // the other dimension
     if(ret.descriptor.varClass == CLASS_MATRIX_COLUMNS)
     {
-      ret.descriptor.bytesize = TypeByteSize(ret.descriptor.type) * ret.descriptor.cols * 4 *
+      ret.descriptor.bytesize = VarTypeByteSize(ret.descriptor.varType) * ret.descriptor.cols * 4 *
                                 RDCMAX(1U, ret.descriptor.elements);
     }
     else if(ret.descriptor.varClass == CLASS_MATRIX_ROWS)
     {
-      ret.descriptor.bytesize = TypeByteSize(ret.descriptor.type) * ret.descriptor.rows * 4 *
+      ret.descriptor.bytesize = VarTypeByteSize(ret.descriptor.varType) * ret.descriptor.rows * 4 *
                                 RDCMAX(1U, ret.descriptor.elements);
     }
     else
@@ -464,10 +458,10 @@ CBufferVariableType DXBCContainer::ParseRDEFType(RDEFHeader *h, char *chunkConte
       // arrays also take up a full vector for each element
       if(ret.descriptor.elements > 1)
         ret.descriptor.bytesize =
-            TypeByteSize(ret.descriptor.type) * 4 * RDCMAX(1U, ret.descriptor.elements);
+            VarTypeByteSize(ret.descriptor.varType) * 4 * RDCMAX(1U, ret.descriptor.elements);
       else
         ret.descriptor.bytesize =
-            TypeByteSize(ret.descriptor.type) * ret.descriptor.rows * ret.descriptor.cols;
+            VarTypeByteSize(ret.descriptor.varType) * ret.descriptor.rows * ret.descriptor.cols;
     }
   }
 
@@ -494,16 +488,94 @@ const rdcstr &DXBCContainer::GetDisassembly()
 {
   if(m_Disassembly.empty())
   {
-    uint32_t *hash =
-        (uint32_t *)&m_ShaderBlob[4];    // hash is 4 uints, starting after the FOURCC of 'DXBC'
+    rdcstr globalFlagsString;
 
-    m_Disassembly =
-        StringFormat::Fmt("Shader hash %08x-%08x-%08x-%08x\n\n", hash[0], hash[1], hash[2], hash[3]);
+    const rdcstr commentString = m_DXBCByteCode ? "//" : ";";
+
+    if(m_GlobalFlags != GlobalShaderFlags::None)
+    {
+      globalFlagsString += commentString + " Note: shader requires additional functionality:\n";
+
+      if(m_GlobalFlags & GlobalShaderFlags::DoublePrecision)
+        globalFlagsString += commentString + "       Double-precision floating point\n";
+      if(m_GlobalFlags & GlobalShaderFlags::RawStructured)
+        globalFlagsString += commentString + "       Raw and Structured buffers\n";
+      if(m_GlobalFlags & GlobalShaderFlags::UAVsEveryStage)
+        globalFlagsString += commentString + "       UAVs at every shader stage\n";
+      if(m_GlobalFlags & GlobalShaderFlags::UAVCount64)
+        globalFlagsString += commentString + "       64 UAV slots\n";
+      if(m_GlobalFlags & GlobalShaderFlags::MinPrecision)
+        globalFlagsString += commentString + "       Minimum-precision data types\n";
+      if(m_GlobalFlags & GlobalShaderFlags::DoubleExtensions11_1)
+        globalFlagsString += commentString + "       Double-precision extensions for 11.1\n";
+      if(m_GlobalFlags & GlobalShaderFlags::ShaderExtensions11_1)
+        globalFlagsString += commentString + "       Shader extensions for 11.1\n";
+      if(m_GlobalFlags & GlobalShaderFlags::ComparisonFilter)
+        globalFlagsString += commentString + "       Comparison filtering for feature level 9\n";
+      if(m_GlobalFlags & GlobalShaderFlags::TiledResources)
+        globalFlagsString += commentString + "       Tiled resources\n";
+      if(m_GlobalFlags & GlobalShaderFlags::PSOutStencilref)
+        globalFlagsString += commentString + "       PS Output Stencil Ref\n";
+      if(m_GlobalFlags & GlobalShaderFlags::PSInnerCoverage)
+        globalFlagsString += commentString + "       PS Inner Coverage\n";
+      if(m_GlobalFlags & GlobalShaderFlags::TypedUAVAdditional)
+        globalFlagsString += commentString + "       Typed UAV Load Additional Formats\n";
+      if(m_GlobalFlags & GlobalShaderFlags::RasterOrderViews)
+        globalFlagsString += commentString + "       Raster Ordered UAVs\n";
+      if(m_GlobalFlags & GlobalShaderFlags::ArrayIndexFromVert)
+        globalFlagsString += commentString +
+                             "       SV_RenderTargetArrayIndex or SV_ViewportArrayIndex from any "
+                             "shader feeding rasterizer\n";
+      if(m_GlobalFlags & GlobalShaderFlags::WaveOps)
+        globalFlagsString += commentString + "       Wave level operations\n";
+      if(m_GlobalFlags & GlobalShaderFlags::Int64)
+        globalFlagsString += commentString + "       64-Bit integer\n";
+      if(m_GlobalFlags & GlobalShaderFlags::ViewInstancing)
+        globalFlagsString += commentString + "       View Instancing\n";
+      if(m_GlobalFlags & GlobalShaderFlags::Barycentrics)
+        globalFlagsString += commentString + "       Barycentrics\n";
+      if(m_GlobalFlags & GlobalShaderFlags::NativeLowPrecision)
+        globalFlagsString += commentString + "       Use native low precision\n";
+      if(m_GlobalFlags & GlobalShaderFlags::ShadingRate)
+        globalFlagsString += commentString + "       Shading Rate\n";
+      if(m_GlobalFlags & GlobalShaderFlags::Raytracing1_1)
+        globalFlagsString += commentString + "       Raytracing tier 1.1 features\n";
+      if(m_GlobalFlags & GlobalShaderFlags::SamplerFeedback)
+        globalFlagsString += commentString + "       Sampler feedback\n";
+      globalFlagsString += commentString + "\n";
+    }
 
     if(m_DXBCByteCode)
+    {
+      m_Disassembly = StringFormat::Fmt("Shader hash %08x-%08x-%08x-%08x\n\n", m_Hash[0], m_Hash[1],
+                                        m_Hash[2], m_Hash[3]);
+
+      if(m_GlobalFlags != GlobalShaderFlags::None)
+        m_Disassembly += globalFlagsString;
+
+      if(!m_DebugFileName.empty())
+        m_Disassembly += StringFormat::Fmt("// Debug name: %s\n", m_DebugFileName.c_str());
+
       m_Disassembly += m_DXBCByteCode->GetDisassembly();
+    }
     else if(m_DXILByteCode)
+    {
+      m_Disassembly.clear();
+
+      if(m_GlobalFlags != GlobalShaderFlags::None)
+        m_Disassembly += globalFlagsString;
+
+      if(!m_DebugFileName.empty())
+        m_Disassembly += StringFormat::Fmt("; shader debug name: %s\n", m_DebugFileName.c_str());
+
+      m_Disassembly += "; shader hash: ";
+      byte *hashBytes = (byte *)m_Hash;
+      for(size_t i = 0; i < sizeof(m_Hash); i++)
+        m_Disassembly += StringFormat::Fmt("%02x", hashBytes[i]);
+      m_Disassembly += "\n\n";
+
       m_Disassembly += m_DXILByteCode->GetDisassembly();
+    }
   }
 
   return m_Disassembly;
@@ -521,9 +593,19 @@ void DXBCContainer::FillTraceLineInfo(ShaderDebugTrace &trace) const
       if(m_DebugInfo)
         m_DebugInfo->GetLineInfo(i, op.offset, trace.lineInfo[i]);
 
-      // we add two lines for the shader hash on top of what the bytecode disassembler did
+      // we add some number of lines for the header we added with shader hash, debug name, etc on
+      // top of what the bytecode disassembler did
+
+      // 2 minimum for the shader hash we always print
+      uint32_t extraLines = 2;
+      if(!m_DebugFileName.empty())
+        extraLines++;
+
+      if(m_GlobalFlags != GlobalShaderFlags::None)
+        extraLines += (uint32_t)Bits::CountOnes((uint32_t)m_GlobalFlags) + 2;
+
       if(op.line > 0)
-        trace.lineInfo[i].disassemblyLine = 2 + op.line;
+        trace.lineInfo[i].disassemblyLine = extraLines + op.line;
     }
   }
 }
@@ -542,7 +624,7 @@ void DXBCContainer::FillStateInstructionInfo(ShaderDebugState &state) const
       offset = m_DXBCByteCode->GetInstruction(instruction).offset;
 
     if(m_DebugInfo)
-      m_DebugInfo->GetLocals(m_DXBCByteCode, instruction, offset, state.sourceVars);
+      m_DebugInfo->GetLocals(this, instruction, offset, state.sourceVars);
   }
 
   if(m_DebugInfo)
@@ -563,9 +645,36 @@ void DXBCContainer::GetHash(uint32_t hash[4], const void *ByteCode, size_t Bytec
     return;
   }
 
+  const byte *data = (byte *)ByteCode;    // just for convenience
+
   FileHeader *header = (FileHeader *)ByteCode;
 
+  memset(hash, 0, sizeof(uint32_t) * 4);
+
+  if(header->fourcc != FOURCC_DXBC)
+    return;
+
+  if(header->fileLength != (uint32_t)BytecodeLength)
+    return;
+
   memcpy(hash, header->hashValue, sizeof(header->hashValue));
+
+  uint32_t *chunkOffsets = (uint32_t *)(header + 1);    // right after the header
+
+  for(uint32_t chunkIdx = 0; chunkIdx < header->numChunks; chunkIdx++)
+  {
+    uint32_t *fourcc = (uint32_t *)(data + chunkOffsets[chunkIdx]);
+    uint32_t *chunkSize = (uint32_t *)(fourcc + 1);
+
+    char *chunkContents = (char *)(chunkSize + 1);
+
+    if(*fourcc == FOURCC_HASH)
+    {
+      HASHHeader *hashHeader = (HASHHeader *)chunkContents;
+
+      memcpy(hash, hashHeader->hashValue, sizeof(hashHeader->hashValue));
+    }
+  }
 }
 
 bool DXBCContainer::CheckForDebugInfo(const void *ByteCode, size_t ByteCodeLength)
@@ -586,20 +695,14 @@ bool DXBCContainer::CheckForDebugInfo(const void *ByteCode, size_t ByteCodeLengt
   {
     uint32_t *fourcc = (uint32_t *)(data + chunkOffsets[chunkIdx]);
 
-    if(*fourcc == FOURCC_SDBG)
-    {
+    if(*fourcc == FOURCC_SDBG || *fourcc == FOURCC_SPDB || *fourcc == FOURCC_ILDB)
       return true;
-    }
-    else if(*fourcc == FOURCC_SPDB)
-    {
-      return true;
-    }
   }
 
   return false;
 }
 
-bool DXBCContainer::CheckForShaderCode(const void *ByteCode, size_t ByteCodeLength)
+bool DXBCContainer::CheckForDXIL(const void *ByteCode, size_t ByteCodeLength)
 {
   FileHeader *header = (FileHeader *)ByteCode;
 
@@ -617,7 +720,7 @@ bool DXBCContainer::CheckForShaderCode(const void *ByteCode, size_t ByteCodeLeng
   {
     uint32_t *fourcc = (uint32_t *)(data + chunkOffsets[chunkIdx]);
 
-    if(*fourcc == FOURCC_SHEX || *fourcc == FOURCC_SHDR)
+    if(*fourcc == FOURCC_ILDB || *fourcc == FOURCC_DXIL)
       return true;
   }
 
@@ -639,6 +742,7 @@ rdcstr DXBCContainer::GetDebugBinaryPath(const void *ByteCode, size_t ByteCodeLe
 
   uint32_t *chunkOffsets = (uint32_t *)(header + 1);    // right after the header
 
+  // prefer RenderDoc's magic value which pre-dated D3D's support
   for(uint32_t chunkIdx = 0; chunkIdx < header->numChunks; chunkIdx++)
   {
     uint32_t *fourcc = (uint32_t *)(data + chunkOffsets[chunkIdx]);
@@ -660,44 +764,200 @@ rdcstr DXBCContainer::GetDebugBinaryPath(const void *ByteCode, size_t ByteCodeLe
     }
   }
 
+  for(uint32_t chunkIdx = 0; chunkIdx < header->numChunks; chunkIdx++)
+  {
+    uint32_t *fourcc = (uint32_t *)(data + chunkOffsets[chunkIdx]);
+    if(*fourcc == FOURCC_ILDN)
+    {
+      const ILDNHeader *h = (const ILDNHeader *)(fourcc + 2);
+
+      debugPath.append(h->Name, h->NameLength);
+      return debugPath;
+    }
+  }
+
   return debugPath;
 }
 
-DXBCContainer::DXBCContainer(const void *ByteCode, size_t ByteCodeLength)
+void DXBCContainer::TryFetchSeparateDebugInfo(bytebuf &byteCode, const rdcstr &debugInfoPath)
 {
-  RDCASSERT(ByteCodeLength < UINT32_MAX);
+  if(!CheckForDebugInfo((const void *)&byteCode[0], byteCode.size()))
+  {
+    rdcstr originalPath = debugInfoPath;
 
+    if(originalPath.empty())
+      originalPath = GetDebugBinaryPath((const void *)&byteCode[0], byteCode.size());
+
+    if(!originalPath.empty())
+    {
+      bool lz4 = false;
+
+      if(!strncmp(originalPath.c_str(), "lz4#", 4))
+      {
+        originalPath = originalPath.substr(4);
+        lz4 = true;
+      }
+      // could support more if we're willing to compile in the decompressor
+
+      FILE *originalShaderFile = NULL;
+
+      const rdcarray<rdcstr> &searchPaths = DXBC_Debug_SearchDirPaths();
+
+      size_t numSearchPaths = searchPaths.size();
+
+      rdcstr foundPath;
+
+      // keep searching until we've exhausted all possible path options, or we've found a file that
+      // opens
+      while(originalShaderFile == NULL && !originalPath.empty())
+      {
+        // while we haven't found a file, keep trying through the search paths. For i==0
+        // check the path on its own, in case it's an absolute path.
+        for(size_t i = 0; originalShaderFile == NULL && i <= numSearchPaths; i++)
+        {
+          if(i == 0)
+          {
+            originalShaderFile = FileIO::fopen(originalPath.c_str(), "rb");
+            foundPath = originalPath;
+            continue;
+          }
+          else
+          {
+            const rdcstr &searchPath = searchPaths[i - 1];
+            foundPath = searchPath + "/" + originalPath;
+            originalShaderFile = FileIO::fopen(foundPath.c_str(), "rb");
+          }
+        }
+
+        if(originalShaderFile == NULL)
+        {
+          // the "documented" behaviour for D3D debug info names is that when presented with a
+          // relative path containing subfolders like foo/bar/blah.pdb then we should first try to
+          // append it to all search paths as-is, then strip off the top-level subdirectory to get
+          // bar/blah.pdb and try that in all search directories, and keep going. So if we got here
+          // and didn't open a file, try to strip off the the top directory and continue.
+          int32_t offs = originalPath.find_first_of("\\/");
+
+          // if we couldn't find a directory separator there's nothing to do, stop looking
+          if(offs == -1)
+            break;
+
+          // otherwise strip up to there and keep going
+          originalPath.erase(0, offs + 1);
+        }
+      }
+
+      if(originalShaderFile == NULL)
+        return;
+
+      FileIO::fseek64(originalShaderFile, 0L, SEEK_END);
+      uint64_t originalShaderSize = FileIO::ftell64(originalShaderFile);
+      FileIO::fseek64(originalShaderFile, 0, SEEK_SET);
+
+      if(lz4 || originalShaderSize >= byteCode.size())
+      {
+        bytebuf debugBytecode;
+
+        debugBytecode.resize((size_t)originalShaderSize);
+        FileIO::fread(&debugBytecode[0], sizeof(byte), (size_t)originalShaderSize,
+                      originalShaderFile);
+
+        if(lz4)
+        {
+          rdcarray<byte> decompressed;
+
+          // first try decompressing to 1MB flat
+          decompressed.resize(100 * 1024);
+
+          int ret = LZ4_decompress_safe((const char *)&debugBytecode[0], (char *)&decompressed[0],
+                                        (int)debugBytecode.size(), (int)decompressed.size());
+
+          if(ret < 0)
+          {
+            // if it failed, either source is corrupt or we didn't allocate enough space.
+            // Just allocate 255x compressed size since it can't need any more than that.
+            decompressed.resize(255 * debugBytecode.size());
+
+            ret = LZ4_decompress_safe((const char *)&debugBytecode[0], (char *)&decompressed[0],
+                                      (int)debugBytecode.size(), (int)decompressed.size());
+
+            if(ret < 0)
+            {
+              RDCERR("Failed to decompress LZ4 data from %s", foundPath.c_str());
+              return;
+            }
+          }
+
+          RDCASSERT(ret > 0, ret);
+
+          // we resize and memcpy instead of just doing .swap() because that would
+          // transfer over the over-large pessimistic capacity needed for decompression
+          debugBytecode.resize(ret);
+          memcpy(&debugBytecode[0], &decompressed[0], debugBytecode.size());
+        }
+
+        if(IsPDBFile(&debugBytecode[0], debugBytecode.size()))
+        {
+          UnwrapEmbeddedPDBData(debugBytecode);
+          m_DebugShaderBlob = debugBytecode;
+        }
+        else if(CheckForDebugInfo((const void *)&debugBytecode[0], debugBytecode.size()))
+        {
+          byteCode.swap(debugBytecode);
+        }
+      }
+
+      FileIO::fclose(originalShaderFile);
+    }
+  }
+}
+
+DXBCContainer::DXBCContainer(bytebuf &ByteCode, const rdcstr &debugInfoPath)
+{
   RDCEraseEl(m_ShaderStats);
 
-  m_ShaderBlob.resize(ByteCodeLength);
-  memcpy(&m_ShaderBlob[0], ByteCode, m_ShaderBlob.size());
+  TryFetchSeparateDebugInfo(ByteCode, debugInfoPath);
 
-  char *data = (char *)&m_ShaderBlob[0];    // just for convenience
+  m_ShaderBlob = ByteCode;
 
-  FileHeader *header = (FileHeader *)&m_ShaderBlob[0];
+  // just for convenience
+  char *data = (char *)m_ShaderBlob.data();
+  char *debugData = (char *)m_DebugShaderBlob.data();
+
+  FileHeader *header = (FileHeader *)data;
+  FileHeader *debugHeader = (FileHeader *)debugData;
 
   if(header->fourcc != FOURCC_DXBC)
     return;
 
-  if(header->fileLength != (uint32_t)ByteCodeLength)
+  if(header->fileLength != (uint32_t)ByteCode.size())
     return;
+
+  if(debugHeader && debugHeader->fourcc != FOURCC_DXBC)
+    debugHeader = NULL;
+
+  if(debugHeader && debugHeader->fileLength != m_DebugShaderBlob.size())
+    debugHeader = NULL;
+
+  memcpy(m_Hash, header->hashValue, sizeof(m_Hash));
 
   // default to vertex shader to support blobs without RDEF chunks (e.g. used with
   // input layouts if they're super stripped down)
   m_Type = DXBC::ShaderType::Vertex;
 
   uint32_t *chunkOffsets = (uint32_t *)(header + 1);    // right after the header
+  uint32_t *debugChunkOffsets = debugHeader ? (uint32_t *)(debugHeader + 1) : NULL;
 
   for(uint32_t chunkIdx = 0; chunkIdx < header->numChunks; chunkIdx++)
   {
-    uint32_t *fourcc = (uint32_t *)(data + chunkOffsets[chunkIdx]);
-    uint32_t *chunkSize = (uint32_t *)(fourcc + 1);
+    const uint32_t *fourcc = (const uint32_t *)(data + chunkOffsets[chunkIdx]);
+    const uint32_t *chunkSize = (const uint32_t *)(fourcc + 1);
 
-    char *chunkContents = (char *)(chunkSize + 1);
+    const byte *chunkContents = (const byte *)(chunkSize + 1);
 
     if(*fourcc == FOURCC_RDEF)
     {
-      RDEFHeader *h = (RDEFHeader *)chunkContents;
+      const RDEFHeader *h = (const RDEFHeader *)chunkContents;
 
       // for target version 0x500, unknown[0] is FOURCC_RD11.
       // for 0x501 it's "\x13\x13\D%"
@@ -745,27 +1005,21 @@ DXBCContainer::DXBCContainer(const void *ByteCode, size_t ByteCodeLength)
 
         ShaderInputBind desc;
 
-        desc.name = chunkContents + res->nameOffset;
+        desc.name = (const char *)(chunkContents + res->nameOffset);
         desc.type = (ShaderInputBind::InputType)res->type;
         desc.space = h->targetVersion >= 0x501 ? res->space : 0;
         desc.reg = res->bindPoint;
         desc.bindCount = res->bindCount;
-        desc.flags = res->flags;
         desc.retType = (DXBC::ResourceRetType)res->retType;
         desc.dimension = (ShaderInputBind::Dimension)res->dimension;
-        desc.numSamples = res->sampleCount;
 
         // Bindless resources report a bind count of 0 from the shader bytecode, but many other
         // places in this codebase assume ~0U means bindless. Patch it up now.
         if(h->targetVersion >= 0x501 && desc.bindCount == 0)
           desc.bindCount = ~0U;
 
-        if(desc.numSamples == ~0 && desc.retType != RETURN_TYPE_MIXED &&
-           desc.retType != RETURN_TYPE_UNKNOWN && desc.retType != RETURN_TYPE_CONTINUED)
-        {
-          // uint, uint2, uint3, uint4 seem to be in these bits of flags.
-          desc.numSamples = 1 + ((desc.flags & 0xC) >> 2);
-        }
+        // component count seem to be in these lower bits of flags.
+        desc.numComps = 1 + ((res->flags & 0xC) >> 2);
 
         // for cbuffers the names can be duplicated, so handle this by assuming
         // the order will match between binding declaration and cbuffer declaration
@@ -859,13 +1113,10 @@ DXBCContainer::DXBCContainer(const void *ByteCode, size_t ByteCodeLength)
         if(cbuf->nameOffset == 0)
           continue;
 
-        cb.name = chunkContents + cbuf->nameOffset;
+        cb.name = (const char *)(chunkContents + cbuf->nameOffset);
 
-        cb.descriptor.name = chunkContents + cbuf->nameOffset;
         cb.descriptor.byteSize = cbuf->size;
         cb.descriptor.type = (CBuffer::Descriptor::Type)cbuf->type;
-        cb.descriptor.flags = cbuf->flags;
-        cb.descriptor.numVars = cbuf->variables.count;
 
         cb.variables.reserve(cbuf->variables.count);
 
@@ -885,7 +1136,7 @@ DXBCContainer::DXBCContainer(const void *ByteCode, size_t ByteCodeLength)
             RDEFCBufferVariable *var =
                 (RDEFCBufferVariable *)(chunkContents + cbuf->variables.offset + varStride);
 
-            if(var->nameOffset > ByteCodeLength)
+            if(var->nameOffset > ByteCode.size())
             {
               varStride += extraData;
             }
@@ -897,28 +1148,14 @@ DXBCContainer::DXBCContainer(const void *ByteCode, size_t ByteCodeLength)
           RDEFCBufferVariable *var =
               (RDEFCBufferVariable *)(chunkContents + cbuf->variables.offset + vi * varStride);
 
-          RDCASSERT(var->nameOffset < ByteCodeLength);
+          RDCASSERT(var->nameOffset < ByteCode.size());
 
           CBufferVariable v;
 
-          v.name = chunkContents + var->nameOffset;
+          v.name = (const char *)(chunkContents + var->nameOffset);
 
-          v.descriptor.defaultValue.resize(var->size);
-
-          if(var->defaultValueOffset && var->defaultValueOffset != ~0U)
-          {
-            memcpy(&v.descriptor.defaultValue[0], chunkContents + var->defaultValueOffset, var->size);
-          }
-
-          v.descriptor.name = v.name;
-          // v.descriptor.bytesize = var->size; // size with cbuffer padding
-          v.descriptor.offset = var->startOffset;
-          v.descriptor.flags = var->flags;
-
-          v.descriptor.startTexture = (uint32_t)-1;
-          v.descriptor.startSampler = (uint32_t)-1;
-          v.descriptor.numSamplers = 0;
-          v.descriptor.numTextures = 0;
+          // var->size; // size with cbuffer padding
+          v.offset = var->startOffset;
 
           v.type = ParseRDEFType(h, chunkContents, var->typeOffset);
 
@@ -953,13 +1190,22 @@ DXBCContainer::DXBCContainer(const void *ByteCode, size_t ByteCodeLength)
         else
         {
           RDCDEBUG("Unused information, buffer %d: %s", cb.descriptor.type,
-                   cb.descriptor.name.c_str());
+                   (const char *)(chunkContents + cbuf->nameOffset));
         }
       }
     }
     else if(*fourcc == FOURCC_STAT)
     {
-      if(*chunkSize == STATSizeDX10)
+      if(DXIL::Program::Valid(chunkContents, *chunkSize))
+      {
+        RDCEraseEl(m_ShaderStats);
+        m_ShaderStats.version = ShaderStatistics::STATS_DX12;
+
+        // this stats chunk is a whole program, just with the actual function definition removed
+        // (and any related debug metadata). We have to handle this later with the bytecode.
+        /* DXIL::Program prog(chunkContents, *chunkSize); */
+      }
+      else if(*chunkSize == STATSizeDX10)
       {
         memcpy(&m_ShaderStats, chunkContents, STATSizeDX10);
         m_ShaderStats.version = ShaderStatistics::STATS_DX10;
@@ -976,13 +1222,47 @@ DXBCContainer::DXBCContainer(const void *ByteCode, size_t ByteCodeLength)
     }
     else if(*fourcc == FOURCC_SHEX || *fourcc == FOURCC_SHDR)
     {
-      m_DXBCByteCode = new DXBCBytecode::Program((const byte *)chunkContents, *chunkSize);
+      m_DXBCByteCode = new DXBCBytecode::Program(chunkContents, *chunkSize);
+    }
+    else if(*fourcc == FOURCC_SPDB || *fourcc == FOURCC_SDBG)
+    {
+      // debug info is processed afterwards
+    }
+    else if(*fourcc == FOURCC_ILDB || *fourcc == FOURCC_DXIL)
+    {
+      // we avoiding parsing these immediately because you can get both in a dxbc, so we prefer the
+      // debug version.
     }
     else if(*fourcc == FOURCC_ILDN)
     {
-      ILDNHeader *h = (ILDNHeader *)chunkContents;
+      const ILDNHeader *h = (const ILDNHeader *)chunkContents;
 
       m_DebugFileName = rdcstr(h->Name, h->NameLength);
+    }
+    else if(*fourcc == FOURCC_HASH)
+    {
+      const HASHHeader *h = (const HASHHeader *)chunkContents;
+
+      memcpy(m_Hash, h->hashValue, sizeof(h->hashValue));
+    }
+    else if(*fourcc == FOURCC_SFI0)
+    {
+      m_GlobalFlags = *(const GlobalShaderFlags *)chunkContents;
+    }
+    else if(*fourcc == FOURCC_PSV0)
+    {
+      // this chunk contains some information we could use for reflection but it doesn't contain
+      // enough, and doesn't have anything else interesting so we skip it
+    }
+    else if(*fourcc == FOURCC_ISGN || *fourcc == FOURCC_OSGN || *fourcc == FOURCC_ISG1 ||
+            *fourcc == FOURCC_OSG1 || *fourcc == FOURCC_OSG5 || *fourcc == FOURCC_PCSG)
+    {
+      // processed later
+    }
+    else
+    {
+      RDCWARN("Unknown chunk %c%c%c%c", ((const char *)fourcc)[0], ((const char *)fourcc)[1],
+              ((const char *)fourcc)[2], ((const char *)fourcc)[3]);
     }
   }
 
@@ -1002,7 +1282,22 @@ DXBCContainer::DXBCContainer(const void *ByteCode, size_t ByteCodeLength)
       }
     }
 
-    // if we didn't find it, look for DXIL
+    // next search the debug file if it exists
+    for(uint32_t chunkIdx = 0;
+        debugHeader && m_DXILByteCode == NULL && chunkIdx < debugHeader->numChunks; chunkIdx++)
+    {
+      uint32_t *fourcc = (uint32_t *)(debugData + debugChunkOffsets[chunkIdx]);
+      uint32_t *chunkSize = (uint32_t *)(debugData + debugChunkOffsets[chunkIdx] + sizeof(uint32_t));
+
+      char *chunkContents = (char *)(debugData + debugChunkOffsets[chunkIdx] + sizeof(uint32_t) * 2);
+
+      if(*fourcc == FOURCC_ILDB)
+        m_DXILByteCode = new DXIL::Program((const byte *)chunkContents, *chunkSize);
+    }
+
+    // if we didn't find ILDB then we have to get the bytecode from DXIL. However we look for the
+    // STAT chunk and if we find it get reflection from there, since it will have better
+    // information. What a mess.
     if(m_DXILByteCode == NULL)
     {
       for(uint32_t chunkIdx = 0; chunkIdx < header->numChunks; chunkIdx++)
@@ -1010,11 +1305,21 @@ DXBCContainer::DXBCContainer(const void *ByteCode, size_t ByteCodeLength)
         uint32_t *fourcc = (uint32_t *)(data + chunkOffsets[chunkIdx]);
         uint32_t *chunkSize = (uint32_t *)(data + chunkOffsets[chunkIdx] + sizeof(uint32_t));
 
-        char *chunkContents = (char *)(data + chunkOffsets[chunkIdx] + sizeof(uint32_t) * 2);
+        const byte *chunkContents =
+            (const byte *)(data + chunkOffsets[chunkIdx] + sizeof(uint32_t) * 2);
 
         if(*fourcc == FOURCC_DXIL)
         {
-          m_DXILByteCode = new DXIL::Program((const byte *)chunkContents, *chunkSize);
+          m_DXILByteCode = new DXIL::Program(chunkContents, *chunkSize);
+        }
+        else if(*fourcc == FOURCC_STAT)
+        {
+          if(DXIL::Program::Valid(chunkContents, *chunkSize))
+          {
+            // unfortunate that we have to parse the whole blob just to get reflection as well as
+            // parsing the DXIL bytecode.
+            m_Reflection = DXIL::Program(chunkContents, *chunkSize).GetReflection();
+          }
         }
       }
     }
@@ -1034,8 +1339,6 @@ DXBCContainer::DXBCContainer(const void *ByteCode, size_t ByteCodeLength)
     m_Type = m_DXILByteCode->GetShaderType();
     m_Version.Major = m_DXILByteCode->GetMajorVersion();
     m_Version.Minor = m_DXILByteCode->GetMinorVersion();
-
-    // m_DXILByteCode->SetReflection(m_Reflection);
   }
 
   // if reflection information was stripped, attempt to reverse engineer basic info from
@@ -1114,7 +1417,7 @@ DXBCContainer::DXBCContainer(const void *ByteCode, size_t ByteCodeLength)
           el = &el7->elem;
         }
 
-        ComponentType compType = (ComponentType)el->componentType;
+        SigCompType compType = (SigCompType)el->componentType;
         desc.varType = VarType::Float;
         if(compType == COMPONENT_TYPE_UINT32)
           desc.varType = VarType::UInt;
@@ -1230,13 +1533,8 @@ DXBCContainer::DXBCContainer(const void *ByteCode, size_t ByteCodeLength)
   }
 
   // make sure to fetch the dispatch threads dimension from disassembly
-  if(m_Type == DXBC::ShaderType::Compute)
-  {
-    if(m_DXBCByteCode)
-      m_DXBCByteCode->FetchComputeProperties(m_Reflection);
-    else if(m_DXILByteCode)
-      m_DXILByteCode->FetchComputeProperties(m_Reflection);
-  }
+  if(m_Type == DXBC::ShaderType::Compute && m_DXBCByteCode)
+    m_DXBCByteCode->FetchComputeProperties(m_Reflection);
 
   // initialise debug chunks last
   for(uint32_t chunkIdx = 0; chunkIdx < header->numChunks; chunkIdx++)
@@ -1253,6 +1551,21 @@ DXBCContainer::DXBCContainer(const void *ByteCode, size_t ByteCodeLength)
     }
   }
 
+  // try to find SPDB in the separate debug info pdb now
+  for(uint32_t chunkIdx = 0;
+      debugHeader && m_DebugInfo == NULL && chunkIdx < debugHeader->numChunks; chunkIdx++)
+  {
+    uint32_t *fourcc = (uint32_t *)(debugData + debugChunkOffsets[chunkIdx]);
+
+    if(*fourcc == FOURCC_SPDB)
+    {
+      m_DebugInfo = MakeSPDBChunk(fourcc);
+    }
+  }
+
+  if(m_DXILByteCode)
+    m_DebugInfo = m_DXILByteCode;
+
   // we do a mini-preprocess of the files from the debug info to handle #line directives.
   // This means that any lines that our source file declares to be in another filename via a #line
   // get put in the right place for what the debug information hopefully matches.
@@ -1261,7 +1574,8 @@ DXBCContainer::DXBCContainer(const void *ByteCode, size_t ByteCodeLength)
 
   if(m_DebugInfo)
   {
-    m_DXBCByteCode->SetDebugInfo(m_DebugInfo);
+    if(m_DXBCByteCode)
+      m_DXBCByteCode->SetDebugInfo(m_DebugInfo);
 
     struct SplitFile
     {
@@ -1489,9 +1803,15 @@ DXBCContainer::DXBCContainer(const void *ByteCode, size_t ByteCodeLength)
 
 DXBCContainer::~DXBCContainer()
 {
+  // DXIL bytecode doubles as debug info, don't delete it twice
+  if(m_DXILByteCode)
+    m_DebugInfo = NULL;
+
   SAFE_DELETE(m_DebugInfo);
+
   SAFE_DELETE(m_DXBCByteCode);
   SAFE_DELETE(m_DXILByteCode);
+
   SAFE_DELETE(m_Reflection);
 }
 
@@ -1565,7 +1885,39 @@ uint32_t DecodeFlags(const ShaderCompileFlags &compileFlags)
   return ret;
 }
 
-ShaderCompileFlags EncodeFlags(const uint32_t flags)
+rdcstr GetProfile(const ShaderCompileFlags &compileFlags)
+{
+  for(const ShaderCompileFlag flag : compileFlags.flags)
+  {
+    if(flag.name == "@cmdline")
+    {
+      rdcstr cmdline = flag.value;
+
+      // ensure cmdline is surrounded by spaces and all whitespace is spaces. This means we can
+      // search for our flags surrounded by space and ensure we get exact matches.
+      for(char &c : cmdline)
+        if(isspace(c))
+          c = ' ';
+
+      cmdline = " " + cmdline + " ";
+
+      const char *prof = strstr(cmdline.c_str(), " /T ");
+      if(!prof)
+        prof = strstr(cmdline.c_str(), " -T ");
+
+      if(!prof)
+        return "";
+
+      prof += 4;
+
+      return rdcstr(prof, strchr(prof, ' ') - prof);
+    }
+  }
+
+  return "";
+}
+
+ShaderCompileFlags EncodeFlags(const uint32_t flags, const rdcstr &profile)
 {
   ShaderCompileFlags ret;
 
@@ -1594,7 +1946,10 @@ ShaderCompileFlags EncodeFlags(const uint32_t flags)
   else if(opt == D3DCOMPILE_OPTIMIZATION_LEVEL3)
     cmdline += " /O3";
 
-  ret.flags = {{"@cmdline", cmdline}};
+  if(!profile.empty())
+    cmdline += " /T " + profile;
+
+  ret.flags = {{"@cmdline", cmdline.trimmed()}};
 
   // If D3DCOMPILE_SKIP_OPTIMIZATION is set, then prefer source-level debugging as it should be
   // accurate enough to work with.
@@ -1602,11 +1957,6 @@ ShaderCompileFlags EncodeFlags(const uint32_t flags)
     ret.flags.push_back({"preferSourceDebug", "1"});
 
   return ret;
-}
-
-ShaderCompileFlags EncodeFlags(const IDebugInfo *dbg)
-{
-  return EncodeFlags(dbg ? dbg->GetShaderCompileFlags() : 0);
 }
 
 };    // namespace DXBC
@@ -1624,7 +1974,7 @@ TEST_CASE("DO NOT COMMIT - convenience test", "[dxbc]")
   bytebuf buf;
   FileIO::ReadAll("/path/to/container_file.dxbc", buf);
 
-  DXBC::DXBCContainer container(buf.data(), buf.size());
+  DXBC::DXBCContainer container(buf, rdcstr());
 
   // the only thing fetched lazily is the disassembly, so grab that here
 
@@ -1662,17 +2012,17 @@ TEST_CASE("Check DXBC flag encoding/decoding", "[dxbc]")
   {
     uint32_t flags = D3DCOMPILE_PARTIAL_PRECISION | D3DCOMPILE_SKIP_OPTIMIZATION |
                      D3DCOMPILE_ALL_RESOURCES_BOUND | D3DCOMPILE_OPTIMIZATION_LEVEL2;
-    uint32_t flags2 = DXBC::DecodeFlags(DXBC::EncodeFlags(flags));
+    uint32_t flags2 = DXBC::DecodeFlags(DXBC::EncodeFlags(flags, ""));
 
     CHECK(flags == flags2);
 
     flags = 0;
-    flags2 = DXBC::DecodeFlags(DXBC::EncodeFlags(flags));
+    flags2 = DXBC::DecodeFlags(DXBC::EncodeFlags(flags, ""));
 
     CHECK(flags == flags2);
 
     flags = D3DCOMPILE_OPTIMIZATION_LEVEL3 | D3DCOMPILE_DEBUG;
-    flags2 = DXBC::DecodeFlags(DXBC::EncodeFlags(flags));
+    flags2 = DXBC::DecodeFlags(DXBC::EncodeFlags(flags, ""));
 
     CHECK(flags == flags2);
   };
@@ -1680,7 +2030,7 @@ TEST_CASE("Check DXBC flag encoding/decoding", "[dxbc]")
   SECTION("encode/decode discards unrecognised parameters")
   {
     uint32_t flags = D3DCOMPILE_PARTIAL_PRECISION | (1 << 30);
-    uint32_t flags2 = DXBC::DecodeFlags(DXBC::EncodeFlags(flags));
+    uint32_t flags2 = DXBC::DecodeFlags(DXBC::EncodeFlags(flags, ""));
 
     CHECK(flags2 == D3DCOMPILE_PARTIAL_PRECISION);
 
@@ -1694,7 +2044,7 @@ TEST_CASE("Check DXBC flag encoding/decoding", "[dxbc]")
     CHECK(flags2 == (D3DCOMPILE_DEBUG | D3DCOMPILE_WARNINGS_ARE_ERRORS));
 
     flags = ~0U;
-    flags2 = DXBC::DecodeFlags(DXBC::EncodeFlags(flags));
+    flags2 = DXBC::DecodeFlags(DXBC::EncodeFlags(flags, ""));
 
     uint32_t allflags = 0;
     for(const DXBC::FxcArg &a : DXBC::fxc_flags)
@@ -1708,22 +2058,75 @@ TEST_CASE("Check DXBC flag encoding/decoding", "[dxbc]")
   SECTION("optimisation flags are properly decoded and encoded")
   {
     uint32_t flags = D3DCOMPILE_DEBUG | D3DCOMPILE_OPTIMIZATION_LEVEL0;
-    uint32_t flags2 = DXBC::DecodeFlags(DXBC::EncodeFlags(flags));
+    uint32_t flags2 = DXBC::DecodeFlags(DXBC::EncodeFlags(flags, ""));
 
     CHECK(flags == flags2);
 
     flags = D3DCOMPILE_DEBUG | D3DCOMPILE_OPTIMIZATION_LEVEL1;
-    flags2 = DXBC::DecodeFlags(DXBC::EncodeFlags(flags));
+    flags2 = DXBC::DecodeFlags(DXBC::EncodeFlags(flags, ""));
 
     CHECK(flags == flags2);
 
     flags = D3DCOMPILE_DEBUG | D3DCOMPILE_OPTIMIZATION_LEVEL2;
-    flags2 = DXBC::DecodeFlags(DXBC::EncodeFlags(flags));
+    flags2 = DXBC::DecodeFlags(DXBC::EncodeFlags(flags, ""));
 
     CHECK(flags == flags2);
 
     flags = D3DCOMPILE_DEBUG | D3DCOMPILE_OPTIMIZATION_LEVEL3;
-    flags2 = DXBC::DecodeFlags(DXBC::EncodeFlags(flags));
+    flags2 = DXBC::DecodeFlags(DXBC::EncodeFlags(flags, ""));
+
+    CHECK(flags == flags2);
+  };
+
+  SECTION("Profile is correctly encoded and decoded")
+  {
+    const uint32_t flags = D3DCOMPILE_DEBUG | D3DCOMPILE_WARNINGS_ARE_ERRORS;
+
+    rdcstr profile = "ps_5_0";
+    rdcstr profile2 = DXBC::GetProfile(DXBC::EncodeFlags(flags, profile));
+
+    CHECK(profile == profile2);
+
+    profile = "ps_4_0";
+    profile2 = DXBC::GetProfile(DXBC::EncodeFlags(flags, profile));
+
+    CHECK(profile == profile2);
+
+    profile = "";
+    profile2 = DXBC::GetProfile(DXBC::EncodeFlags(flags, profile));
+
+    CHECK(profile == profile2);
+
+    profile = "cs_5_0";
+    profile2 = DXBC::GetProfile(DXBC::EncodeFlags(flags, profile));
+
+    CHECK(profile == profile2);
+
+    profile = "??_9_9";
+    profile2 = DXBC::GetProfile(DXBC::EncodeFlags(flags, profile));
+
+    CHECK(profile == profile2);
+  };
+
+  SECTION("Profile does not affect flag encoding")
+  {
+    uint32_t flags = D3DCOMPILE_DEBUG | D3DCOMPILE_WARNINGS_ARE_ERRORS;
+    uint32_t flags2 = DXBC::DecodeFlags(DXBC::EncodeFlags(flags, ""));
+
+    CHECK(flags == flags2);
+
+    flags = D3DCOMPILE_DEBUG | D3DCOMPILE_WARNINGS_ARE_ERRORS;
+    flags2 = DXBC::DecodeFlags(DXBC::EncodeFlags(flags, "ps_5_0"));
+
+    CHECK(flags == flags2);
+
+    flags = D3DCOMPILE_DEBUG | D3DCOMPILE_WARNINGS_ARE_ERRORS;
+    flags2 = DXBC::DecodeFlags(DXBC::EncodeFlags(flags, "ps_4_0"));
+
+    CHECK(flags == flags2);
+
+    flags = D3DCOMPILE_DEBUG | D3DCOMPILE_WARNINGS_ARE_ERRORS;
+    flags2 = DXBC::DecodeFlags(DXBC::EncodeFlags(flags, "??_9_9"));
 
     CHECK(flags == flags2);
   };

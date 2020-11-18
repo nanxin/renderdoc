@@ -44,10 +44,30 @@ VkResult WrappedVulkan::vkCreateAndroidSurfaceKHR(VkInstance instance,
     WrappedVkSurfaceKHR *wrapped = GetWrapped(*pSurface);
 
     wrapped->record =
-        PackWindowHandleInRecord(WindowingSystem::Android, (void *)(uintptr_t)pCreateInfo->window);
+        RegisterSurface(WindowingSystem::Android, (void *)(uintptr_t)pCreateInfo->window);
   }
 
   return ret;
+}
+
+// VK_ANDROID_external_memory_android_hardware_buffer
+VkResult WrappedVulkan::vkGetAndroidHardwareBufferPropertiesANDROID(
+    VkDevice device, const struct AHardwareBuffer *buffer,
+    VkAndroidHardwareBufferPropertiesANDROID *pProperties)
+{
+  return ObjDisp(device)->GetAndroidHardwareBufferPropertiesANDROID(Unwrap(device), buffer,
+                                                                    pProperties);
+}
+
+// VK_ANDROID_external_memory_android_hardware_buffer
+VkResult WrappedVulkan::vkGetMemoryAndroidHardwareBufferANDROID(
+    VkDevice device, const VkMemoryGetAndroidHardwareBufferInfoANDROID *pInfo,
+    struct AHardwareBuffer **pBuffer)
+{
+  VkMemoryGetAndroidHardwareBufferInfoANDROID unwrappedInfo = *pInfo;
+  unwrappedInfo.memory = Unwrap(unwrappedInfo.memory);
+  return ObjDisp(device)->GetMemoryAndroidHardwareBufferANDROID(Unwrap(device), &unwrappedInfo,
+                                                                pBuffer);
 }
 
 void VulkanReplay::OutputWindow::SetWindowHandle(WindowingData window)

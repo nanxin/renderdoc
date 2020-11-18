@@ -878,7 +878,7 @@ Win32CallstackResolver::Win32CallstackResolver(bool interactive, byte *moduleDB,
 
     if(pdbIgnores.contains(m.name))
     {
-      RDCWARN("Not attempting to get symbols for %ls", m.name.c_str());
+      RDCWARN("Not attempting to get symbols for %s", m.name.c_str());
 
       modules.push_back(m);
       continue;
@@ -1044,8 +1044,6 @@ Callstack::AddressDetails Win32CallstackResolver::GetAddr(DWORD64 addr)
         // the module it came from, and an offset
         info.funcName = get_basename(info.fileName);
 
-        info.funcName = StringFormat::Fmt("%s+0x%08llx", info.funcName.c_str(), addr - base);
-
         int offs = info.funcName.find(".pdb");
 
         if(offs >= 0)
@@ -1057,6 +1055,8 @@ Callstack::AddressDetails Win32CallstackResolver::GetAddr(DWORD64 addr)
           else
             info.funcName += "dll";
         }
+
+        info.funcName = StringFormat::Fmt("%s+0x%08llx", info.funcName.c_str(), addr - base);
       }
 
       break;

@@ -160,7 +160,6 @@ rdcstr DoStringise(const CompType &el)
     STRINGISE_ENUM_CLASS(UScaled);
     STRINGISE_ENUM_CLASS(SScaled);
     STRINGISE_ENUM_CLASS_NAMED(Depth, "Depth/Stencil");
-    STRINGISE_ENUM_CLASS(Double);
     STRINGISE_ENUM_CLASS_NAMED(UNormSRGB, "sRGB");
   }
   END_ENUM_STRINGISE();
@@ -800,6 +799,7 @@ rdcstr DoStringise(const ResourceUsage &el)
     STRINGISE_ENUM_CLASS_NAMED(Indirect, "Indirect parameters");
 
     STRINGISE_ENUM_CLASS_NAMED(Clear, "Clear");
+    STRINGISE_ENUM_CLASS_NAMED(Discard, "Discard");
 
     STRINGISE_ENUM_CLASS_NAMED(GenMips, "Mip Generation");
     STRINGISE_ENUM_CLASS_NAMED(Resolve, "Resolve - Source&Dest");
@@ -1013,6 +1013,7 @@ rdcstr DoStringise(const SectionType &el)
     STRINGISE_ENUM_CLASS_NAMED(ResourceRenames, "renderdoc/ui/resrenames");
     STRINGISE_ENUM_CLASS_NAMED(AMDRGPProfile, "amd/rgp/profile");
     STRINGISE_ENUM_CLASS_NAMED(ExtendedThumbnail, "renderdoc/internal/exthumb");
+    STRINGISE_ENUM_CLASS_NAMED(EmbeddedLogfile, "renderdoc/internal/logfile");
   }
   END_ENUM_STRINGISE();
 }

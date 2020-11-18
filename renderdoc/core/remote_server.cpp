@@ -46,7 +46,7 @@ RDOC_DEBUG_CONFIG(bool, RemoteServer_DebugLogging, false,
                   "traffic to and from the remote server.");
 
 static const uint32_t RemoteServerProtocolVersion =
-    uint32_t(RENDERDOC_VERSION_MAJOR * 1000) | RENDERDOC_VERSION_MINOR;
+    uint32_t(RENDERDOC_VERSION_MAJOR * 1000) + RENDERDOC_VERSION_MINOR;
 
 enum RemoteServerPacket
 {
@@ -270,8 +270,8 @@ static void ActiveRemoteClientThread(ClientThread *threadData,
 
   if(RemoteServer_DebugLogging())
   {
-    reader.ConfigureStructuredExport(&GetRemoteServerChunkName, false);
-    writer.ConfigureStructuredExport(&GetRemoteServerChunkName, false);
+    reader.ConfigureStructuredExport(&GetRemoteServerChunkName, false, 0, 1.0);
+    writer.ConfigureStructuredExport(&GetRemoteServerChunkName, false, 0, 1.0);
 
     rdcstr filename = FileIO::GetTempFolderFilename() + "/RenderDoc/RemoteServer_Server.log";
 
@@ -1228,8 +1228,8 @@ RemoteServer::RemoteServer(Network::Socket *sock, const rdcstr &deviceID)
 
   if(RemoteServer_DebugLogging())
   {
-    reader->ConfigureStructuredExport(&GetRemoteServerChunkName, false);
-    writer->ConfigureStructuredExport(&GetRemoteServerChunkName, false);
+    reader->ConfigureStructuredExport(&GetRemoteServerChunkName, false, 0, 1.0);
+    writer->ConfigureStructuredExport(&GetRemoteServerChunkName, false, 0, 1.0);
 
     rdcstr filename = FileIO::GetTempFolderFilename() + "/RenderDoc/RemoteServer_Client.log";
 

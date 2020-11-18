@@ -136,12 +136,13 @@ bool WrappedOpenGL::Serialise_glObjectLabel(SerialiserType &ser, GLenum identifi
 
   if(IsReplayingAndReading() && Resource.name)
   {
-    ResourceId origId = GetResourceManager()->GetOriginalID(GetResourceManager()->GetID(Resource));
+    ResourceId origId = GetResourceManager()->GetOriginalID(GetResourceManager()->GetResID(Resource));
 
     GetResourceManager()->SetName(origId, Label);
 
     ResourceDescription &descr = GetReplay()->GetResourceDesc(origId);
-    descr.SetCustomName(Label);
+    if(!Label.empty())
+      descr.SetCustomName(Label);
     AddResourceCurChunk(descr);
   }
 
@@ -157,8 +158,7 @@ void WrappedOpenGL::glLabelObjectEXT(GLenum identifier, GLuint name, GLsizei len
   }
   else
   {
-    m_ScratchSerialiser.ChunkMetadata().timestampMicro = RenderDoc::Inst().GetMicrosecondTimestamp();
-    m_ScratchSerialiser.ChunkMetadata().durationMicro = 0;
+    SERIALISE_TIME_CALL();
   }
 
   if(IsCaptureMode(m_State))
@@ -188,8 +188,7 @@ void WrappedOpenGL::glObjectLabel(GLenum identifier, GLuint name, GLsizei length
   }
   else
   {
-    m_ScratchSerialiser.ChunkMetadata().timestampMicro = RenderDoc::Inst().GetMicrosecondTimestamp();
-    m_ScratchSerialiser.ChunkMetadata().durationMicro = 0;
+    SERIALISE_TIME_CALL();
   }
 
   if(IsCaptureMode(m_State))
@@ -219,8 +218,7 @@ void WrappedOpenGL::glObjectPtrLabel(const void *ptr, GLsizei length, const GLch
   }
   else
   {
-    m_ScratchSerialiser.ChunkMetadata().timestampMicro = RenderDoc::Inst().GetMicrosecondTimestamp();
-    m_ScratchSerialiser.ChunkMetadata().durationMicro = 0;
+    SERIALISE_TIME_CALL();
   }
 
   if(IsCaptureMode(m_State))
@@ -325,8 +323,7 @@ void WrappedOpenGL::glDebugMessageInsert(GLenum source, GLenum type, GLuint id, 
   }
   else
   {
-    m_ScratchSerialiser.ChunkMetadata().timestampMicro = RenderDoc::Inst().GetMicrosecondTimestamp();
-    m_ScratchSerialiser.ChunkMetadata().durationMicro = 0;
+    SERIALISE_TIME_CALL();
   }
 
   HandleVRFrameMarkers(buf, length);
@@ -411,6 +408,11 @@ void WrappedOpenGL::glInsertEventMarkerEXT(GLsizei length, const GLchar *marker)
 
 void WrappedOpenGL::glFrameTerminatorGREMEDY()
 {
+  PUSH_CURRENT_CHUNK;
+
+  // don't serialise this present as a separate chunk
+  gl_CurChunk = GLChunk::Max;
+
   SwapBuffers(WindowingSystem::Headless, (void *)m_ActiveContexts[Threading::GetCurrentID()].wnd);
 }
 
@@ -470,8 +472,7 @@ void WrappedOpenGL::glPushDebugGroup(GLenum source, GLuint id, GLsizei length, c
   }
   else
   {
-    m_ScratchSerialiser.ChunkMetadata().timestampMicro = RenderDoc::Inst().GetMicrosecondTimestamp();
-    m_ScratchSerialiser.ChunkMetadata().durationMicro = 0;
+    SERIALISE_TIME_CALL();
   }
 
   if(IsActiveCapturing(m_State))
@@ -514,8 +515,7 @@ void WrappedOpenGL::glPopDebugGroup()
   }
   else
   {
-    m_ScratchSerialiser.ChunkMetadata().timestampMicro = RenderDoc::Inst().GetMicrosecondTimestamp();
-    m_ScratchSerialiser.ChunkMetadata().durationMicro = 0;
+    SERIALISE_TIME_CALL();
   }
 
   if(IsActiveCapturing(m_State))

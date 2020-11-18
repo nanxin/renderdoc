@@ -857,7 +857,8 @@ bool LiveCapture::saveCapture(Capture *cap, QString path)
     {
       RDDialog::critical(this, tr("No active replay context"),
                          tr("This capture is on remote host %1 and there is no active replay "
-                            "context on that host.\n") +
+                            "context on that host.\n")
+                                 .arg(m_Hostname) +
                              tr("Without an active replay context the capture cannot be saved, "
                                 "try switching to a replay context on %1.")
                                  .arg(m_Hostname));
@@ -1076,6 +1077,9 @@ void LiveCapture::captureAdded(const QString &name, const NewCaptureData &newCap
 
 void LiveCapture::connectionClosed()
 {
+  ui->progressLabel->setVisible(false);
+  ui->progressBar->setVisible(false);
+
   if(m_IgnoreThreadClosed)
     return;
 
@@ -1325,6 +1329,10 @@ void LiveCapture::connectionThreadEntry()
           QMutexLocker l(&m_ChildrenLock);
           m_Children.push_back(c);
         }
+
+        // force a child update immediately, don't wait for the tick which is intended for decaying
+        // processes that exit
+        GUIInvoke::call(this, [this]() { childUpdate(); });
       }
     }
 

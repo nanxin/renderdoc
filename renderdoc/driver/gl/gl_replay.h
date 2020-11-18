@@ -31,6 +31,7 @@
 #include "gl_common.h"
 
 class AMDCounters;
+class ARMCounters;
 class IntelGlCounters;
 class WrappedOpenGL;
 struct GLCounterContext;
@@ -128,7 +129,7 @@ public:
   rdcarray<ShaderEntryPoint> GetShaderEntryPoints(ResourceId shader);
   ShaderReflection *GetShader(ResourceId pipeline, ResourceId shader, ShaderEntryPoint entry);
 
-  rdcarray<rdcstr> GetDisassemblyTargets();
+  rdcarray<rdcstr> GetDisassemblyTargets(bool withPipeline);
   rdcstr DisassembleShader(ResourceId pipeline, const ShaderReflection *refl, const rdcstr &target);
 
   rdcarray<DebugMessage> GetDebugMessages();
@@ -207,7 +208,7 @@ public:
   bool RenderTexture(TextureDisplay cfg);
   bool RenderTextureInternal(TextureDisplay cfg, TexDisplayFlags flags);
 
-  void RenderCheckerboard();
+  void RenderCheckerboard(FloatVector dark, FloatVector light);
 
   void RenderHighlightBox(float w, float h, float scale);
 
@@ -227,9 +228,11 @@ public:
   uint32_t PickVertex(uint32_t eventId, int32_t width, int32_t height, const MeshDisplay &cfg,
                       uint32_t x, uint32_t y);
 
-  ResourceId RenderOverlay(ResourceId texid, const Subresource &sub, CompType typeCast,
-                           FloatVector clearCol, DebugOverlay overlay, uint32_t eventId,
-                           const rdcarray<uint32_t> &passEvents);
+  ResourceId RenderOverlay(ResourceId texid, FloatVector clearCol, DebugOverlay overlay,
+                           uint32_t eventId, const rdcarray<uint32_t> &passEvents);
+
+  void BindFramebufferTexture(RenderOutputSubresource &sub, GLenum texBindingEnum, GLint numSamples);
+
   ResourceId ApplyCustomShader(ResourceId shader, ResourceId texid, const Subresource &sub,
                                CompType typeCast);
 
@@ -241,13 +244,20 @@ public:
   ResourceId CreateProxyBuffer(const BufferDescription &templateBuf);
   void SetProxyBufferData(ResourceId bufid, byte *data, size_t dataSize);
 
-  bool IsRenderOutput(ResourceId id);
-
+  RenderOutputSubresource GetRenderOutputSubresource(ResourceId id);
+  bool IsRenderOutput(ResourceId id) { return GetRenderOutputSubresource(id).mip != ~0U; }
   void FileChanged() {}
   void SetReplayData(GLWindowingData data);
 
   bool IsReplayContext(void *ctx) { return m_ReplayCtx.ctx == NULL || ctx == m_ReplayCtx.ctx; }
   bool HasDebugContext() { return m_DebugCtx != NULL; }
+  void FillWithDiscardPattern(DiscardType type, GLuint framebuffer, GLsizei numAttachments,
+                              const GLenum *attachments, GLint x, GLint y, GLsizei width,
+                              GLsizei height);
+  void FillWithDiscardPattern(DiscardType type, ResourceId id, GLuint mip, GLint xoffset = 0,
+                              GLint yoffset = 0, GLint zoffset = 0, GLsizei width = 65536,
+                              GLsizei height = 65536, GLsizei depth = 65536);
+
 private:
   void OpenGLFillCBufferVariables(ResourceId shader, GLuint prog, bool bufferBacked, rdcstr prefix,
                                   const rdcarray<ShaderConstant> &variables,
@@ -381,11 +391,15 @@ private:
     GLuint quadoverdrawFragShaderSPIRV;
     GLuint quadoverdrawResolveProg;
 
+    GLuint discardProg[4];
+    GLuint discardPatternBuffer;
+
     ResourceId overlayTexId;
     GLuint overlayTex;
     GLuint overlayFBO;
     GLuint overlayProg;
-    GLint overlayTexWidth, overlayTexHeight, overlayTexSamples, overlayTexMips;
+    GLint overlayTexWidth = 0, overlayTexHeight = 0, overlayTexSamples = 0, overlayTexMips = 0,
+          overlayTexSlices = 0;
 
     GLuint UBOs[3];
 
@@ -395,6 +409,8 @@ private:
   bool m_Degraded;
 
   HighlightCache m_HighlightCache;
+
+  std::map<GLenum, bytebuf> m_DiscardPatterns;
 
   // eventId -> data
   std::map<uint32_t, GLPostVSData> m_PostVSData;
@@ -465,4 +481,12 @@ private:
                        const DrawcallDescription &drawnode);
 
   rdcarray<CounterResult> FetchCountersIntel(const rdcarray<GPUCounter> &counters);
+
+  // ARM counter instance
+  ARMCounters *m_pARMCounters = NULL;
+
+  void FillTimersARM(uint32_t *eventStartID, uint32_t *sampleIndex, rdcarray<uint32_t> *eventIDs,
+                     const DrawcallDescription &drawnode);
+
+  rdcarray<CounterResult> FetchCountersARM(const rdcarray<GPUCounter> &counters);
 };

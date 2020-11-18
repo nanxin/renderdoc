@@ -48,6 +48,8 @@ class rdcliteral
 public:
   const char *c_str() const { return str; }
   size_t length() const { return len; }
+  const char *begin() const { return str; }
+  const char *end() const { return str + len; }
 };
 
 inline rdcliteral operator"" _lit(const char *str, size_t len)
@@ -810,7 +812,7 @@ public:
     if(empty())
       return;
 
-#define IS_WHITESPACE(c) ((c) == ' ' || (c) == '\t' || (c) == '\r' || (c) == '\n')
+#define IS_WHITESPACE(c) ((c) == ' ' || (c) == '\t' || (c) == '\r' || (c) == '\n' || (c) == '\0')
 
     const char *str = c_str();
     size_t sz = size();
@@ -819,16 +821,16 @@ public:
     while(start < sz && IS_WHITESPACE(str[start]))
       start++;
 
-    size_t end = sz - 1;
-    while(end > start && IS_WHITESPACE(str[end]))
-      end--;
-
     // no non-whitespace characters, become the empty string
-    if(start >= end)
+    if(start == sz)
     {
       clear();
       return;
     }
+
+    size_t end = sz - 1;
+    while(end > start && IS_WHITESPACE(str[end]))
+      end--;
 
     erase(end + 1, ~0U);
     erase(0, start);

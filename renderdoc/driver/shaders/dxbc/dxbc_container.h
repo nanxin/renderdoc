@@ -34,22 +34,14 @@
 #include "driver/dx/official/d3dcommon.h"
 #include "dxbc_common.h"
 
-namespace DXBCBytecode
-{
-class Program;
-};
-
-namespace DXIL
-{
-class Program;
-};
-
 namespace DXBC
 {
 class IDebugInfo;
 struct Reflection;
 IDebugInfo *MakeSDBGChunk(void *data);
 IDebugInfo *MakeSPDBChunk(void *data);
+bool IsPDBFile(void *data, size_t length);
+void UnwrapEmbeddedPDBData(bytebuf &bytes);
 };
 
 // many thanks to winehq for information of format of RDEF, STAT and SIGN chunks:
@@ -104,44 +96,53 @@ struct ShaderStatistics
     STATS_UNKNOWN = 0,
     STATS_DX10,
     STATS_DX11,
+    STATS_DX12,
   } version;
 };
+
+enum class GlobalShaderFlags : int64_t
+{
+  None = 0,
+  DoublePrecision = 0x000001,
+  RawStructured = 0x000002,
+  UAVsEveryStage = 0x000004,
+  UAVCount64 = 0x000008,
+  MinPrecision = 0x000010,
+  DoubleExtensions11_1 = 0x000020,
+  ShaderExtensions11_1 = 0x000040,
+  ComparisonFilter = 0x000080,
+  TiledResources = 0x000100,
+  PSOutStencilref = 0x000200,
+  PSInnerCoverage = 0x000400,
+  TypedUAVAdditional = 0x000800,
+  RasterOrderViews = 0x001000,
+  ArrayIndexFromVert = 0x002000,
+  WaveOps = 0x004000,
+  Int64 = 0x008000,
+  ViewInstancing = 0x010000,
+  Barycentrics = 0x020000,
+  NativeLowPrecision = 0x040000,
+  ShadingRate = 0x080000,
+  Raytracing1_1 = 0x100000,
+  SamplerFeedback = 0x200000,
+};
+
+BITMASK_OPERATORS(GlobalShaderFlags);
 
 rdcstr TypeName(CBufferVariableType::Descriptor desc);
 
 struct RDEFHeader;
 
-class IDebugInfo
-{
-public:
-  virtual ~IDebugInfo() {}
-  virtual rdcstr GetCompilerSig() const = 0;
-  virtual rdcstr GetEntryFunction() const = 0;
-  virtual rdcstr GetShaderProfile() const = 0;
-
-  virtual uint32_t GetShaderCompileFlags() const = 0;
-
-  rdcarray<rdcpair<rdcstr, rdcstr>> Files;    // <filename, source>
-
-  virtual void GetLineInfo(size_t instruction, uintptr_t offset, LineColumnInfo &lineInfo) const = 0;
-  virtual void GetCallstack(size_t instruction, uintptr_t offset,
-                            rdcarray<rdcstr> &callstack) const = 0;
-
-  virtual bool HasSourceMapping() const = 0;
-  virtual void GetLocals(DXBCBytecode::Program *program, size_t instruction, uintptr_t offset,
-                         rdcarray<SourceVariableMapping> &locals) const = 0;
-};
-
 uint32_t DecodeFlags(const ShaderCompileFlags &compileFlags);
-ShaderCompileFlags EncodeFlags(const IDebugInfo *dbg);
-ShaderCompileFlags EncodeFlags(const uint32_t flags);
+rdcstr GetProfile(const ShaderCompileFlags &compileFlags);
+ShaderCompileFlags EncodeFlags(const uint32_t flags, const rdcstr &profile);
 
 // declare one of these and pass in your shader bytecode, then inspect
 // the members that are populated with the shader information.
 class DXBCContainer
 {
 public:
-  DXBCContainer(const void *ByteCode, size_t ByteCodeLength);
+  DXBCContainer(bytebuf &ByteCode, const rdcstr &debugInfoPath);
   ~DXBCContainer();
   DXBC::ShaderType m_Type = DXBC::ShaderType::Max;
   struct
@@ -165,21 +166,28 @@ public:
   static void GetHash(uint32_t hash[4], const void *ByteCode, size_t BytecodeLength);
 
   static bool CheckForDebugInfo(const void *ByteCode, size_t ByteCodeLength);
-  static bool CheckForShaderCode(const void *ByteCode, size_t ByteCodeLength);
+  static bool CheckForDXIL(const void *ByteCode, size_t ByteCodeLength);
   static rdcstr GetDebugBinaryPath(const void *ByteCode, size_t ByteCodeLength);
 
 private:
   DXBCContainer(const DXBCContainer &o);
   DXBCContainer &operator=(const DXBCContainer &o);
 
+  void TryFetchSeparateDebugInfo(bytebuf &byteCode, const rdcstr &debugInfoPath);
+
+  bytebuf m_DebugShaderBlob;
+
   rdcstr m_Disassembly;
 
   D3D_PRIMITIVE_TOPOLOGY m_OutputTopology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
 
-  CBufferVariableType ParseRDEFType(RDEFHeader *h, char *chunk, uint32_t offset);
+  CBufferVariableType ParseRDEFType(const RDEFHeader *h, const byte *chunk, uint32_t offset);
   std::map<uint32_t, CBufferVariableType> m_Variables;
 
+  uint32_t m_Hash[4];
+
   rdcstr m_DebugFileName;
+  GlobalShaderFlags m_GlobalFlags = GlobalShaderFlags::None;
 
   ShaderStatistics m_ShaderStats;
   DXBCBytecode::Program *m_DXBCByteCode = NULL;

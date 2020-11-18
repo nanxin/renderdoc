@@ -1055,8 +1055,7 @@ MeshFormat ReplayProxy::GetPostVSBuffers(uint32_t eventId, uint32_t instID, uint
 
 template <typename ParamSerialiser, typename ReturnSerialiser>
 ResourceId ReplayProxy::Proxied_RenderOverlay(ParamSerialiser &paramser, ReturnSerialiser &retser,
-                                              ResourceId texid, const Subresource &sub,
-                                              CompType typeCast, FloatVector clearCol,
+                                              ResourceId texid, FloatVector clearCol,
                                               DebugOverlay overlay, uint32_t eventId,
                                               const rdcarray<uint32_t> &passEvents)
 {
@@ -1067,8 +1066,6 @@ ResourceId ReplayProxy::Proxied_RenderOverlay(ParamSerialiser &paramser, ReturnS
   {
     BEGIN_PARAMS();
     SERIALISE_ELEMENT(texid);
-    SERIALISE_ELEMENT(sub);
-    SERIALISE_ELEMENT(typeCast);
     SERIALISE_ELEMENT(overlay);
     SERIALISE_ELEMENT(clearCol);
     SERIALISE_ELEMENT(eventId);
@@ -1079,7 +1076,7 @@ ResourceId ReplayProxy::Proxied_RenderOverlay(ParamSerialiser &paramser, ReturnS
   {
     REMOTE_EXECUTION();
     if(paramser.IsReading() && !paramser.IsErrored() && !m_IsErrored)
-      ret = m_Remote->RenderOverlay(texid, sub, typeCast, clearCol, overlay, eventId, passEvents);
+      ret = m_Remote->RenderOverlay(texid, clearCol, overlay, eventId, passEvents);
   }
 
   SERIALISE_RETURN(ret);
@@ -1087,11 +1084,10 @@ ResourceId ReplayProxy::Proxied_RenderOverlay(ParamSerialiser &paramser, ReturnS
   return ret;
 }
 
-ResourceId ReplayProxy::RenderOverlay(ResourceId texid, const Subresource &sub, CompType typeCast,
-                                      FloatVector clearCol, DebugOverlay overlay, uint32_t eventId,
-                                      const rdcarray<uint32_t> &passEvents)
+ResourceId ReplayProxy::RenderOverlay(ResourceId texid, FloatVector clearCol, DebugOverlay overlay,
+                                      uint32_t eventId, const rdcarray<uint32_t> &passEvents)
 {
-  PROXY_FUNCTION(RenderOverlay, texid, sub, typeCast, clearCol, overlay, eventId, passEvents);
+  PROXY_FUNCTION(RenderOverlay, texid, clearCol, overlay, eventId, passEvents);
 }
 
 template <typename ParamSerialiser, typename ReturnSerialiser>
@@ -1227,7 +1223,8 @@ rdcstr ReplayProxy::DisassembleShader(ResourceId pipeline, const ShaderReflectio
 
 template <typename ParamSerialiser, typename ReturnSerialiser>
 rdcarray<rdcstr> ReplayProxy::Proxied_GetDisassemblyTargets(ParamSerialiser &paramser,
-                                                            ReturnSerialiser &retser)
+                                                            ReturnSerialiser &retser,
+                                                            bool withPipeline)
 {
   const ReplayProxyPacket expectedPacket = eReplayProxy_GetDisassemblyTargets;
   ReplayProxyPacket packet = eReplayProxy_GetDisassemblyTargets;
@@ -1235,13 +1232,14 @@ rdcarray<rdcstr> ReplayProxy::Proxied_GetDisassemblyTargets(ParamSerialiser &par
 
   {
     BEGIN_PARAMS();
+    SERIALISE_ELEMENT(withPipeline);
     END_PARAMS();
   }
 
   {
     REMOTE_EXECUTION();
     if(paramser.IsReading() && !paramser.IsErrored() && !m_IsErrored)
-      ret = m_Remote->GetDisassemblyTargets();
+      ret = m_Remote->GetDisassemblyTargets(withPipeline);
   }
 
   SERIALISE_RETURN(ret);
@@ -1249,9 +1247,9 @@ rdcarray<rdcstr> ReplayProxy::Proxied_GetDisassemblyTargets(ParamSerialiser &par
   return ret;
 }
 
-rdcarray<rdcstr> ReplayProxy::GetDisassemblyTargets()
+rdcarray<rdcstr> ReplayProxy::GetDisassemblyTargets(bool withPipeline)
 {
-  PROXY_FUNCTION(GetDisassemblyTargets);
+  PROXY_FUNCTION(GetDisassemblyTargets, withPipeline);
 }
 
 template <typename ParamSerialiser, typename ReturnSerialiser>
@@ -2513,7 +2511,8 @@ void ReplayProxy::RefreshPreviewWindow()
     int32_t winHeight = 1;
     m_Replay->GetOutputWindowDimensions(m_PreviewOutput, winWidth, winHeight);
 
-    m_Replay->RenderCheckerboard();
+    m_Replay->RenderCheckerboard(RenderDoc::Inst().DarkCheckerboardColor(),
+                                 RenderDoc::Inst().LightCheckerboardColor());
 
     const DrawcallDescription *curDraw = FindDraw(m_FrameRecord.drawcallList, m_EventID);
 
@@ -2832,14 +2831,13 @@ bool ReplayProxy::Tick(int type)
     case eReplayProxy_ContinueDebug: ContinueDebug(NULL); break;
     case eReplayProxy_FreeDebugger: FreeDebugger(NULL); break;
     case eReplayProxy_RenderOverlay:
-      RenderOverlay(ResourceId(), Subresource(), CompType::Typeless, FloatVector(),
-                    DebugOverlay::NoOverlay, 0, rdcarray<uint32_t>());
+      RenderOverlay(ResourceId(), FloatVector(), DebugOverlay::NoOverlay, 0, rdcarray<uint32_t>());
       break;
     case eReplayProxy_PixelHistory:
       PixelHistory(rdcarray<EventUsage>(), ResourceId(), 0, 0, Subresource(), CompType::Typeless);
       break;
     case eReplayProxy_DisassembleShader: DisassembleShader(ResourceId(), NULL, ""); break;
-    case eReplayProxy_GetDisassemblyTargets: GetDisassemblyTargets(); break;
+    case eReplayProxy_GetDisassemblyTargets: GetDisassemblyTargets(false); break;
     case eReplayProxy_GetTargetShaderEncodings: GetTargetShaderEncodings(); break;
     case eReplayProxy_GetDriverInfo: GetDriverInfo(); break;
     case eReplayProxy_GetAvailableGPUs: GetAvailableGPUs(); break;

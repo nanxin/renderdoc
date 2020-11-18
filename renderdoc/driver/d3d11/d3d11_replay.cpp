@@ -76,7 +76,8 @@ void D3D11Replay::Shutdown()
     m_ProxyResources[i]->Release();
   m_ProxyResources.clear();
 
-  m_pDevice->Release();
+  // explicitly delete the device, as all the replay resources created will be keeping refs on it
+  delete m_pDevice;
 }
 
 void D3D11Replay::CreateResources(IDXGIFactory *factory)
@@ -284,7 +285,7 @@ ShaderReflection *D3D11Replay::GetShader(ResourceId pipeline, ResourceId shader,
   return &ret;
 }
 
-rdcarray<rdcstr> D3D11Replay::GetDisassemblyTargets()
+rdcarray<rdcstr> D3D11Replay::GetDisassemblyTargets(bool withPipeline)
 {
   return {DXBCDisassemblyTarget};
 }
@@ -704,7 +705,7 @@ void D3D11Replay::SavePipelineState(uint32_t eventId)
   {
     const rdcarray<D3D11_INPUT_ELEMENT_DESC> &vec = m_pDevice->GetLayoutDesc(rs->IA.Layout);
 
-    ResourceId layoutId = GetIDForResource(rs->IA.Layout);
+    ResourceId layoutId = GetIDForDeviceChild(rs->IA.Layout);
 
     ret.inputAssembly.resourceId = rm->GetOriginalID(layoutId);
     ret.inputAssembly.bytecode = GetShader(ResourceId(), layoutId, ShaderEntryPoint());
@@ -729,12 +730,13 @@ void D3D11Replay::SavePipelineState(uint32_t eventId)
   {
     D3D11Pipe::VertexBuffer &vb = ret.inputAssembly.vertexBuffers[i];
 
-    vb.resourceId = rm->GetOriginalID(GetIDForResource(rs->IA.VBs[i]));
+    vb.resourceId = rm->GetOriginalID(GetIDForDeviceChild(rs->IA.VBs[i]));
     vb.byteOffset = rs->IA.Offsets[i];
     vb.byteStride = rs->IA.Strides[i];
   }
 
-  ret.inputAssembly.indexBuffer.resourceId = rm->GetOriginalID(GetIDForResource(rs->IA.IndexBuffer));
+  ret.inputAssembly.indexBuffer.resourceId =
+      rm->GetOriginalID(GetIDForDeviceChild(rs->IA.IndexBuffer));
   ret.inputAssembly.indexBuffer.byteOffset = rs->IA.IndexOffset;
 
   /////////////////////////////////////////////////
@@ -747,8 +749,6 @@ void D3D11Replay::SavePipelineState(uint32_t eventId)
     const D3D11RenderState::Shader *srcArr[] = {&rs->VS, &rs->HS, &rs->DS,
                                                 &rs->GS, &rs->PS, &rs->CS};
 
-    const char *stageNames[] = {"Vertex", "Hull", "Domain", "Geometry", "Pixel", "Compute"};
-
     for(size_t stage = 0; stage < 6; stage++)
     {
       D3D11Pipe::Shader &dst = *dstArr[stage];
@@ -756,7 +756,7 @@ void D3D11Replay::SavePipelineState(uint32_t eventId)
 
       dst.stage = (ShaderStage)stage;
 
-      ResourceId id = GetIDForResource(src.Object);
+      ResourceId id = GetIDForDeviceChild(src.Object);
 
       WrappedShader *shad = (WrappedShader *)(WrappedID3D11Shader<ID3D11VertexShader> *)src.Object;
 
@@ -779,7 +779,7 @@ void D3D11Replay::SavePipelineState(uint32_t eventId)
       for(size_t s = 0; s < D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT; s++)
       {
         dst.constantBuffers[s].resourceId =
-            rm->GetOriginalID(GetIDForResource(src.ConstantBuffers[s]));
+            rm->GetOriginalID(GetIDForDeviceChild(src.ConstantBuffers[s]));
         dst.constantBuffers[s].vecOffset = src.CBOffsets[s];
         dst.constantBuffers[s].vecCount = src.CBCounts[s];
       }
@@ -789,7 +789,7 @@ void D3D11Replay::SavePipelineState(uint32_t eventId)
       {
         D3D11Pipe::Sampler &samp = dst.samplers[s];
 
-        samp.resourceId = rm->GetOriginalID(GetIDForResource(src.Samplers[s]));
+        samp.resourceId = rm->GetOriginalID(GetIDForDeviceChild(src.Samplers[s]));
 
         if(samp.resourceId != ResourceId())
         {
@@ -818,7 +818,7 @@ void D3D11Replay::SavePipelineState(uint32_t eventId)
       {
         D3D11Pipe::View &view = dst.srvs[s];
 
-        view.viewResourceId = rm->GetOriginalID(GetIDForResource(src.SRVs[s]));
+        view.viewResourceId = rm->GetOriginalID(GetIDForDeviceChild(src.SRVs[s]));
 
         if(view.viewResourceId != ResourceId())
         {
@@ -836,7 +836,7 @@ void D3D11Replay::SavePipelineState(uint32_t eventId)
           view.elementByteSize =
               desc.Format == DXGI_FORMAT_UNKNOWN ? 1 : GetByteSize(1, 1, 1, desc.Format, 0);
 
-          view.resourceResourceId = rm->GetOriginalID(GetIDForResource(res));
+          view.resourceResourceId = rm->GetOriginalID(GetIDForDeviceChild(res));
 
           view.type = MakeTextureDim(desc.ViewDimension);
 
@@ -871,31 +871,41 @@ void D3D11Replay::SavePipelineState(uint32_t eventId)
           {
             view.firstMip = desc.Texture1D.MostDetailedMip;
             view.numMips = desc.Texture1D.MipLevels;
+            view.firstSlice = 0;
+            view.numSlices = 1;
           }
           else if(desc.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE1DARRAY)
           {
-            view.numSlices = desc.Texture1DArray.ArraySize;
-            view.firstSlice = desc.Texture1DArray.FirstArraySlice;
             view.firstMip = desc.Texture1DArray.MostDetailedMip;
             view.numMips = desc.Texture1DArray.MipLevels;
+            view.numSlices = desc.Texture1DArray.ArraySize;
+            view.firstSlice = desc.Texture1DArray.FirstArraySlice;
           }
           else if(desc.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D)
           {
             view.firstMip = desc.Texture2D.MostDetailedMip;
             view.numMips = desc.Texture2D.MipLevels;
+            view.firstSlice = 0;
+            view.numSlices = 1;
           }
           else if(desc.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2DARRAY)
           {
-            view.numSlices = desc.Texture2DArray.ArraySize;
-            view.firstSlice = desc.Texture2DArray.FirstArraySlice;
             view.firstMip = desc.Texture2DArray.MostDetailedMip;
             view.numMips = desc.Texture2DArray.MipLevels;
+            view.firstSlice = desc.Texture2DArray.FirstArraySlice;
+            view.numSlices = desc.Texture2DArray.ArraySize;
           }
           else if(desc.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2DMS)
           {
+            view.firstMip = 0;
+            view.numMips = 1;
+            view.firstSlice = 0;
+            view.numSlices = 1;
           }
           else if(desc.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2DMSARRAY)
           {
+            view.firstMip = 0;
+            view.numMips = 1;
             view.numSlices = desc.Texture2DMSArray.ArraySize;
             view.firstSlice = desc.Texture2DMSArray.FirstArraySlice;
           }
@@ -903,19 +913,22 @@ void D3D11Replay::SavePipelineState(uint32_t eventId)
           {
             view.firstMip = desc.Texture3D.MostDetailedMip;
             view.numMips = desc.Texture3D.MipLevels;
+            view.firstSlice = 0;
+            view.numSlices = 1;
           }
           else if(desc.ViewDimension == D3D11_SRV_DIMENSION_TEXTURECUBE)
           {
-            view.numSlices = 6;
             view.firstMip = desc.TextureCube.MostDetailedMip;
             view.numMips = desc.TextureCube.MipLevels;
+            view.firstSlice = 0;
+            view.numSlices = 6;
           }
           else if(desc.ViewDimension == D3D11_SRV_DIMENSION_TEXTURECUBEARRAY)
           {
-            view.numSlices = desc.TextureCubeArray.NumCubes * 6;
-            view.firstSlice = desc.TextureCubeArray.First2DArrayFace;
             view.firstMip = desc.TextureCubeArray.MostDetailedMip;
             view.numMips = desc.TextureCubeArray.MipLevels;
+            view.firstSlice = desc.TextureCubeArray.First2DArrayFace;
+            view.numSlices = desc.TextureCubeArray.NumCubes * 6;
           }
 
           SAFE_RELEASE(res);
@@ -931,7 +944,7 @@ void D3D11Replay::SavePipelineState(uint32_t eventId)
       {
         D3D11Pipe::View &view = dst.uavs[s];
 
-        view.viewResourceId = rm->GetOriginalID(GetIDForResource(rs->CSUAVs[s]));
+        view.viewResourceId = rm->GetOriginalID(GetIDForDeviceChild(rs->CSUAVs[s]));
 
         if(view.viewResourceId != ResourceId())
         {
@@ -957,7 +970,7 @@ void D3D11Replay::SavePipelineState(uint32_t eventId)
             view.counterResourceId = GetDebugManager()->GetCounterBufferID(rs->CSUAVs[s]);
           }
 
-          view.resourceResourceId = rm->GetOriginalID(GetIDForResource(res));
+          view.resourceResourceId = rm->GetOriginalID(GetIDForDeviceChild(res));
 
           view.viewFormat = MakeResourceFormat(desc.Format);
           view.type = MakeTextureDim(desc.ViewDimension);
@@ -1043,7 +1056,7 @@ void D3D11Replay::SavePipelineState(uint32_t eventId)
     ret.streamOut.outputs.resize(D3D11_SO_BUFFER_SLOT_COUNT);
     for(size_t s = 0; s < D3D11_SO_BUFFER_SLOT_COUNT; s++)
     {
-      ret.streamOut.outputs[s].resourceId = rm->GetOriginalID(GetIDForResource(rs->SO.Buffers[s]));
+      ret.streamOut.outputs[s].resourceId = rm->GetOriginalID(GetIDForDeviceChild(rs->SO.Buffers[s]));
       ret.streamOut.outputs[s].byteOffset = rs->SO.Offsets[s];
     }
   }
@@ -1104,7 +1117,7 @@ void D3D11Replay::SavePipelineState(uint32_t eventId)
                 : ConservativeRaster::Disabled;
       }
 
-      ret.rasterizer.state.resourceId = rm->GetOriginalID(GetIDForResource(rs->RS.State));
+      ret.rasterizer.state.resourceId = rm->GetOriginalID(GetIDForDeviceChild(rs->RS.State));
     }
     else
     {
@@ -1153,7 +1166,7 @@ void D3D11Replay::SavePipelineState(uint32_t eventId)
     {
       D3D11Pipe::View &view = ret.outputMerger.renderTargets[i];
 
-      view.viewResourceId = rm->GetOriginalID(GetIDForResource(rs->OM.RenderTargets[i]));
+      view.viewResourceId = rm->GetOriginalID(GetIDForDeviceChild(rs->OM.RenderTargets[i]));
 
       if(view.viewResourceId != ResourceId())
       {
@@ -1168,7 +1181,7 @@ void D3D11Replay::SavePipelineState(uint32_t eventId)
         view.elementByteSize =
             desc.Format == DXGI_FORMAT_UNKNOWN ? 1 : GetByteSize(1, 1, 1, desc.Format, 0);
 
-        view.resourceResourceId = rm->GetOriginalID(GetIDForResource(res));
+        view.resourceResourceId = rm->GetOriginalID(GetIDForDeviceChild(res));
 
         view.viewFormat = MakeResourceFormat(desc.Format);
         view.type = MakeTextureDim(desc.ViewDimension);
@@ -1230,7 +1243,7 @@ void D3D11Replay::SavePipelineState(uint32_t eventId)
     {
       D3D11Pipe::View view;
 
-      view.viewResourceId = rm->GetOriginalID(GetIDForResource(rs->OM.UAVs[s]));
+      view.viewResourceId = rm->GetOriginalID(GetIDForDeviceChild(rs->OM.UAVs[s]));
 
       if(view.viewResourceId != ResourceId())
       {
@@ -1253,7 +1266,7 @@ void D3D11Replay::SavePipelineState(uint32_t eventId)
           view.counterResourceId = GetDebugManager()->GetCounterBufferID(rs->OM.UAVs[s]);
         }
 
-        view.resourceResourceId = rm->GetOriginalID(GetIDForResource(res));
+        view.resourceResourceId = rm->GetOriginalID(GetIDForDeviceChild(res));
 
         view.viewFormat = MakeResourceFormat(desc.Format);
         view.type = MakeTextureDim(desc.ViewDimension);
@@ -1317,7 +1330,7 @@ void D3D11Replay::SavePipelineState(uint32_t eventId)
     {
       D3D11Pipe::View &view = ret.outputMerger.depthTarget;
 
-      view.viewResourceId = rm->GetOriginalID(GetIDForResource(rs->OM.DepthView));
+      view.viewResourceId = rm->GetOriginalID(GetIDForDeviceChild(rs->OM.DepthView));
 
       if(view.viewResourceId != ResourceId())
       {
@@ -1340,7 +1353,7 @@ void D3D11Replay::SavePipelineState(uint32_t eventId)
         if(desc.Flags & D3D11_DSV_READ_ONLY_STENCIL)
           ret.outputMerger.stencilReadOnly = true;
 
-        view.resourceResourceId = rm->GetOriginalID(GetIDForResource(res));
+        view.resourceResourceId = rm->GetOriginalID(GetIDForDeviceChild(res));
 
         view.viewFormat = MakeResourceFormat(desc.Format);
         view.type = MakeTextureDim(desc.ViewDimension);
@@ -1392,7 +1405,8 @@ void D3D11Replay::SavePipelineState(uint32_t eventId)
       D3D11_BLEND_DESC desc;
       rs->OM.BlendState->GetDesc(&desc);
 
-      ret.outputMerger.blendState.resourceId = rm->GetOriginalID(GetIDForResource(rs->OM.BlendState));
+      ret.outputMerger.blendState.resourceId =
+          rm->GetOriginalID(GetIDForDeviceChild(rs->OM.BlendState));
 
       ret.outputMerger.blendState.alphaToCoverage = desc.AlphaToCoverageEnable == TRUE;
       ret.outputMerger.blendState.independentBlend = desc.IndependentBlendEnable == TRUE;
@@ -1470,7 +1484,7 @@ void D3D11Replay::SavePipelineState(uint32_t eventId)
           desc.DepthWriteMask == D3D11_DEPTH_WRITE_MASK_ALL;
       ret.outputMerger.depthStencilState.stencilEnable = desc.StencilEnable == TRUE;
       ret.outputMerger.depthStencilState.resourceId =
-          rm->GetOriginalID(GetIDForResource(rs->OM.DepthStencilState));
+          rm->GetOriginalID(GetIDForDeviceChild(rs->OM.DepthStencilState));
 
       ret.outputMerger.depthStencilState.frontFace.function =
           MakeCompareFunc(desc.FrontFace.StencilFunc);
@@ -1532,7 +1546,7 @@ void D3D11Replay::SavePipelineState(uint32_t eventId)
   // Predication
   /////////////////////////////////////////////////
 
-  ret.predication.resourceId = rm->GetOriginalID(GetIDForResource(rs->Predicate));
+  ret.predication.resourceId = rm->GetOriginalID(GetIDForDeviceChild(rs->Predicate));
   ret.predication.value = rs->PredicateValue == TRUE ? true : false;
   ret.predication.isPassing = rs->PredicationWouldPass();
 }
@@ -2520,21 +2534,23 @@ void D3D11Replay::BuildShader(ShaderEncoding sourceEncoding, const bytebuf &sour
   if(sourceEncoding == ShaderEncoding::HLSL)
   {
     uint32_t flags = DXBC::DecodeFlags(compileFlags);
+    rdcstr profile = DXBC::GetProfile(compileFlags);
 
-    char *profile = NULL;
-
-    switch(type)
+    if(profile.empty())
     {
-      case ShaderStage::Vertex: profile = "vs_5_0"; break;
-      case ShaderStage::Hull: profile = "hs_5_0"; break;
-      case ShaderStage::Domain: profile = "ds_5_0"; break;
-      case ShaderStage::Geometry: profile = "gs_5_0"; break;
-      case ShaderStage::Pixel: profile = "ps_5_0"; break;
-      case ShaderStage::Compute: profile = "cs_5_0"; break;
-      default:
-        RDCERR("Unexpected type in BuildShader!");
-        id = ResourceId();
-        return;
+      switch(type)
+      {
+        case ShaderStage::Vertex: profile = "vs_5_0"; break;
+        case ShaderStage::Hull: profile = "hs_5_0"; break;
+        case ShaderStage::Domain: profile = "ds_5_0"; break;
+        case ShaderStage::Geometry: profile = "gs_5_0"; break;
+        case ShaderStage::Pixel: profile = "ps_5_0"; break;
+        case ShaderStage::Compute: profile = "cs_5_0"; break;
+        default:
+          RDCERR("Unexpected type in BuildShader!");
+          id = ResourceId();
+          return;
+      }
     }
 
     rdcstr hlsl;
@@ -2542,8 +2558,8 @@ void D3D11Replay::BuildShader(ShaderEncoding sourceEncoding, const bytebuf &sour
 
     ID3DBlob *blob = NULL;
 
-    errors = m_pDevice->GetShaderCache()->GetShaderBlob(hlsl.c_str(), entry.c_str(), flags, profile,
-                                                        &blob);
+    errors = m_pDevice->GetShaderCache()->GetShaderBlob(hlsl.c_str(), entry.c_str(), flags,
+                                                        profile.c_str(), &blob);
 
     if(blob == NULL)
     {
@@ -2668,8 +2684,8 @@ void D3D11Replay::BuildTargetShader(ShaderEncoding sourceEncoding, const bytebuf
                                     const rdcstr &entry, const ShaderCompileFlags &compileFlags,
                                     ShaderStage type, ResourceId &id, rdcstr &errors)
 {
-  ShaderCompileFlags debugCompileFlags =
-      DXBC::EncodeFlags(DXBC::DecodeFlags(compileFlags) | D3DCOMPILE_DEBUG);
+  ShaderCompileFlags debugCompileFlags = DXBC::EncodeFlags(
+      DXBC::DecodeFlags(compileFlags) | D3DCOMPILE_DEBUG, DXBC::GetProfile(compileFlags));
 
   BuildShader(sourceEncoding, source, entry, debugCompileFlags, type, id, errors);
 }
@@ -2686,14 +2702,14 @@ bool D3D11Replay::RenderTexture(TextureDisplay cfg)
   return RenderTextureInternal(cfg, eTexDisplay_BlendAlpha);
 }
 
-void D3D11Replay::RenderCheckerboard()
+void D3D11Replay::RenderCheckerboard(FloatVector dark, FloatVector light)
 {
   D3D11RenderStateTracker tracker(m_pImmediateContext);
 
   CheckerboardCBuffer pixelData = {};
 
-  pixelData.PrimaryColor = ConvertSRGBToLinear(RenderDoc::Inst().DarkCheckerboardColor());
-  pixelData.SecondaryColor = ConvertSRGBToLinear(RenderDoc::Inst().LightCheckerboardColor());
+  pixelData.PrimaryColor = ConvertSRGBToLinear(dark);
+  pixelData.SecondaryColor = ConvertSRGBToLinear(light);
   pixelData.CheckerSquareDimension = 64.0f;
 
   ID3D11Buffer *psBuf = GetDebugManager()->MakeCBuffer(&pixelData, sizeof(pixelData));
@@ -3295,7 +3311,7 @@ void D3D11Replay::CreateCustomShaderTex(uint32_t w, uint32_t h)
   }
   else
   {
-    m_CustomShaderResourceId = GetIDForResource(m_CustomShaderTex);
+    m_CustomShaderResourceId = GetIDForDeviceChild(m_CustomShaderTex);
   }
 }
 
@@ -3367,22 +3383,6 @@ ResourceId D3D11Replay::ApplyCustomShader(ResourceId shader, ResourceId texid,
   RenderTextureInternal(disp, eTexDisplay_BlendAlpha);
 
   return m_CustomShaderResourceId;
-}
-
-bool D3D11Replay::IsRenderOutput(ResourceId id)
-{
-  for(size_t i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; i++)
-  {
-    if(m_CurPipelineState.outputMerger.renderTargets[i].viewResourceId == id ||
-       m_CurPipelineState.outputMerger.renderTargets[i].resourceResourceId == id)
-      return true;
-  }
-
-  if(m_CurPipelineState.outputMerger.depthTarget.viewResourceId == id ||
-     m_CurPipelineState.outputMerger.depthTarget.resourceResourceId == id)
-    return true;
-
-  return false;
 }
 
 ResourceId D3D11Replay::CreateProxyTexture(const TextureDescription &templateTex)

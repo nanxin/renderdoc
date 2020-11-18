@@ -25,8 +25,12 @@
 
 #pragma once
 
+#include <algorithm>
 #include <map>
 #include <set>
+#include <unordered_map>
+#include <unordered_set>
+#include "api/replay/rdcflatmap.h"
 #include "api/replay/resourceid.h"
 #include "common/threading.h"
 #include "core/core.h"
@@ -120,6 +124,8 @@ const FrameRefType eFrameRef_Maximum = eFrameRef_WriteBeforeRead;
 // Threshold value for resource "age", i.e. how long it wasn't
 // referred with the any write reference.
 const double PERSISTENT_RESOURCE_AGE = 3000;
+// how long it wasn't referred with any read reference.
+const double IRRELEVANT_RESOURCE_AGE = 3000;
 
 DECLARE_REFLECTION_ENUM(FrameRefType);
 
@@ -149,6 +155,7 @@ FrameRefType ComposeFrameRefsFirstKnown(FrameRefType first, FrameRefType second)
 FrameRefType KeepOldFrameRef(FrameRefType first, FrameRefType second);
 
 bool IsDirtyFrameRef(FrameRefType refType);
+bool IsCompleteWriteFrameRef(FrameRefType refType);
 
 // Captures the possible initialization/reset requirements for resources.
 // These requirements are entirely determined by the resource's FrameRefType,
@@ -322,16 +329,17 @@ struct ResourceRecord
       m_ChunkLock = new Threading::CriticalSection();
   }
 
+  void DisableChunkLocking() { SAFE_DELETE(m_ChunkLock); }
   ~ResourceRecord() { SAFE_DELETE(m_ChunkLock); }
   void AddParent(ResourceRecord *r)
   {
     if(r == this)
       return;
 
-    if(Parents.find(r) == Parents.end())
+    if(Parents.indexOf(r) < 0)
     {
       r->AddRef();
-      Parents.insert(r);
+      Parents.push_back(r);
     }
   }
 
@@ -382,13 +390,6 @@ struct ResourceRecord
   void Delete(ResourceRecordHandler *mgr);
 
   ResourceId GetResourceID() const { return ResID; }
-  void RemoveChunk(Chunk *chunk)
-  {
-    LockChunks();
-    m_Chunks.removeOneIf([chunk](const rdcpair<int64_t, Chunk *> &c) { return c.second == chunk; });
-    UnlockChunks();
-  }
-
   void AddChunk(Chunk *chunk, int64_t ID = 0)
   {
     if(ID == 0)
@@ -440,7 +441,7 @@ struct ResourceRecord
   {
     LockChunks();
     for(auto it = m_Chunks.begin(); it != m_Chunks.end(); ++it)
-      SAFE_DELETE(it->second);
+      it->second->Delete();
     m_Chunks.clear();
     UnlockChunks();
   }
@@ -492,18 +493,18 @@ struct ResourceRecord
   bool DataWritten;
 
 protected:
-  volatile int32_t RefCount;
+  int32_t RefCount;
 
   byte *DataPtr;
   uint64_t DataOffset;
 
   ResourceId ResID;
 
-  std::set<ResourceRecord *> Parents;
+  rdcarray<ResourceRecord *> Parents;
 
   int64_t GetID()
   {
-    static volatile int64_t globalIDCounter = 10;
+    static int64_t globalIDCounter = 10;
 
     return Atomic::Inc64(&globalIDCounter);
   }
@@ -606,6 +607,8 @@ public:
   void MarkResourceFrameReferenced(ResourceId id, FrameRefType refType, Compose comp);
 
   inline void MarkResourceFrameReferenced(ResourceId id, FrameRefType refType);
+  void MarkBackgroundFrameReferenced(const rdcflatmap<ResourceId, FrameRefType> &refs);
+  void CleanBackgroundFrameReferences();
 
   ///////////////////////////////////////////
   // Replay-side methods
@@ -645,16 +648,16 @@ public:
   WrappedResourceType GetWrapper(RealResourceType real);
   void RemoveWrapper(RealResourceType real);
 
-  void Prepare_ResourceInitialStateIfNeeded(ResourceId id);
-  void Prepare_ResourceIfActivePostponed(ResourceId id);
-
-  void UpdateLastWriteTime(ResourceId id);
   void ResetLastWriteTimes();
   void ResetCaptureStartTime();
+  void ResetLastPartialUseTimes();
 
   bool HasPersistentAge(ResourceId id);
+  bool HasIrrelevantAge(ResourceId id);
   bool IsResourcePostponed(ResourceId id);
-  bool IsResourcePersistent(ResourceId id);
+  bool IsResourceSkipped(ResourceId id);
+  bool ShouldPostpone(ResourceId id);
+  bool ShouldSkip(ResourceId id);
 
   virtual bool IsResourceTrackedForPersistency(const WrappedResourceType &res) { return false; }
 protected:
@@ -676,18 +679,22 @@ protected:
   virtual void Apply_InitialState(WrappedResourceType live, const InitialContentData &initial) = 0;
   virtual rdcarray<ResourceId> InitialContentResources();
 
+  void UpdateLastWriteAndPartialUseTime(ResourceId id, FrameRefType refType);
+
+  void Prepare_InitialStateIfPostponed(ResourceId id, bool midframe);
+  void SkipOrPostponeOrPrepare_InitialState(ResourceId id, FrameRefType refType);
+
   // very coarse lock, protects EVERYTHING. This could certainly be improved and it may be a
-  // bottleneck
-  // for performance. Given that the main use cases are write-rarely read-often the lock should be
-  // optimised
-  // for that as we only want to make sure we're not modifying the objects together, by far the most
-  // common
-  // operation is looking up data.
+  // bottleneck for performance. Given that the main use cases are write-rarely read-often the lock
+  // should be optimised for that as we only want to make sure we're not modifying the objects
+  // together, by far the most common operation is looking up data.
   Threading::CriticalSection m_Lock;
 
+  // we only need to lock during capturing, on replay we have single threaded access.
+  bool m_Capturing;
+
   // easy optimisation win - don't use maps everywhere. It's convenient but not optimal, and
-  // profiling will
-  // likely prove that some or all of these could be a problem
+  // profiling will likely prove that some or all of these could be a problem
 
   // used during capture - map from real resource to its wrapper (other way can be done just with an
   // Unwrap)
@@ -708,7 +715,7 @@ protected:
     {
       if(chunk)
       {
-        delete chunk;
+        chunk->Delete();
         chunk = NULL;
       }
 
@@ -721,34 +728,56 @@ protected:
 
   // used during capture or replay - map of resources currently alive with their real IDs, used in
   // capture and replay.
-  std::map<ResourceId, WrappedResourceType> m_CurrentResourceMap;
+  std::unordered_map<ResourceId, WrappedResourceType> m_CurrentResourceMap;
 
   // used during replay - maps back and forth from original id to live id and vice-versa
-  std::map<ResourceId, ResourceId> m_OriginalIDs, m_LiveIDs;
+  std::unordered_map<ResourceId, ResourceId> m_OriginalIDs, m_LiveIDs;
 
   // used during replay - holds resources allocated and the original id that they represent
-  std::map<ResourceId, WrappedResourceType> m_LiveResourceMap;
+  std::unordered_map<ResourceId, WrappedResourceType> m_LiveResourceMap;
 
   // used during capture - holds resource records by id.
-  std::map<ResourceId, RecordType *> m_ResourceRecords;
+  std::unordered_map<ResourceId, RecordType *> m_ResourceRecords;
+  Threading::RWLock m_ResourceRecordLock;
 
   // used during replay - holds current resource replacements
   // replaced -> replacement
-  std::map<ResourceId, ResourceId> m_Replacements;
+  std::unordered_map<ResourceId, ResourceId> m_Replacements;
   // replacement -> replaced (for looking up original IDs)
-  std::map<ResourceId, ResourceId> m_Replaced;
+  std::unordered_map<ResourceId, ResourceId> m_Replaced;
 
   // During initial resources preparation, persistent resources are
   // postponed until serializing to RDC file.
-  std::set<ResourceId> m_PostponedResourceIDs;
+  std::unordered_set<ResourceId> m_PostponedResourceIDs;
+  // During initial resources preparation, resources that are completely written
+  // over are skipped
+  std::unordered_set<ResourceId> m_SkippedResourceIDs;
 
-  // On marking resource write-referenced in frame, its last write
-  // time is reset. The time is used to determine persistent resources,
-  // and is checked against the `PERSISTENT_RESOURCE_AGE`.
-  std::map<ResourceId, double> m_LastWriteTime;
+  struct ResourceRefTimes
+  {
+    ResourceId id;
+
+    // On marking resource write-referenced in frame, its last write time is reset. The time is used
+    // to determine persistent resources, and is checked against the `PERSISTENT_RESOURCE_AGE`.
+    double writeTime;
+
+    // partialUseTime is referring to: eFrameRef_PartialWrite, eFrameRef_Read,
+    // eFrameRef_ReadBeforeWrite, eFrameRef_WriteBeforeRead. The goal is to predict whether a
+    // resource will only ever have a eFrameRef_CompleteWrite reference. If it does, then we don't
+    // need to serialise the initial contents because we know it will always be fully initialised
+    // within the frame.
+    double partialUseTime;
+
+    bool operator<(const ResourceId &o) const { return id < o; }
+  };
+
+  // all resources that are written in some way end up in this list. We then check the last time
+  // they were written, and the last time they were ever partially used (not completely overwritten
+  // in one atomic chunk).
+  rdcarray<ResourceRefTimes> m_ResourceRefTimes;
 
   // Timestamp at the beginning of the frame capture. Used to determine which
-  // resources to refresh for their last write time (see `m_LastWriteTime`).
+  // resources to refresh for their last write or partial use time (see `ResourceRefTimes`).
   double m_captureStartTime;
 
   PerformanceTimer m_ResourcesUpdateTimer;
@@ -760,6 +789,7 @@ protected:
 template <typename Configuration>
 ResourceManager<Configuration>::ResourceManager(CaptureState &state) : m_State(state)
 {
+  m_Capturing = IsCaptureMode(state);
   if(RenderDoc::Inst().GetCrashHandler())
     RenderDoc::Inst().GetCrashHandler()->RegisterMemoryRegion(this, sizeof(ResourceManager));
 }
@@ -795,20 +825,92 @@ ResourceManager<Configuration>::~ResourceManager()
 }
 
 template <typename Configuration>
+void ResourceManager<Configuration>::MarkBackgroundFrameReferenced(
+    const rdcflatmap<ResourceId, FrameRefType> &refs)
+{
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
+
+  if(IsBackgroundCapturing(m_State))
+  {
+    if(refs.size() <= m_ResourceRefTimes.size())
+    {
+      for(auto it = refs.begin(); it != refs.end(); ++it)
+        UpdateLastWriteAndPartialUseTime(it->first, it->second);
+    }
+    else
+    {
+      for(const ResourceRefTimes &res : m_ResourceRefTimes)
+      {
+        auto it = refs.find(res.id);
+
+        if(it != refs.end())
+          UpdateLastWriteAndPartialUseTime(it->first, it->second);
+      }
+    }
+  }
+}
+
+template <typename Configuration>
+void ResourceManager<Configuration>::CleanBackgroundFrameReferences()
+{
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
+
+  if(IsBackgroundCapturing(m_State))
+  {
+    double now = m_ResourcesUpdateTimer.GetMilliseconds();
+
+    // retire any old entries, if they were written once they shouldn't be tracked forever.
+    //
+    // walk the array. If we find an item we want to remove we increment src otherwise we copy src
+    // to dst (if they are different). Thus next time dst will point at the item we want to skip, at
+    // each stage copying src to dst (if they are different). If we find an item we want to remove
+    // we increment src and continue (thus it will get copied ove
+    size_t dst = 0, src = 0;
+    for(dst = 0, src = 0; src < m_ResourceRefTimes.size();)
+    {
+      ResourceRefTimes &check = m_ResourceRefTimes[src];
+      if(now - check.writeTime > IRRELEVANT_RESOURCE_AGE)
+      {
+        // skip src, check the next one
+        src++;
+        continue;
+      }
+
+      // we want to keep src. If dst == src we can just continue on to the next iteration, if not
+      // then we need to copy src into dst (where dst is the leftovers from previously remove
+      // entries)
+      if(dst != src)
+        m_ResourceRefTimes[dst] = m_ResourceRefTimes[src];
+
+      dst++;
+      src++;
+    }
+
+    m_ResourceRefTimes.resize(dst);
+  }
+}
+
+template <typename Configuration>
 template <typename Compose>
 void ResourceManager<Configuration>::MarkResourceFrameReferenced(ResourceId id,
                                                                  FrameRefType refType, Compose comp)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   if(id == ResourceId())
     return;
 
-  if(IsDirtyFrameRef(refType))
+  if(IsActiveCapturing(m_State))
   {
-    Prepare_ResourceIfActivePostponed(id);
-    UpdateLastWriteTime(id);
+    SkipOrPostponeOrPrepare_InitialState(id, refType);
+
+    if(IsDirtyFrameRef(refType))
+    {
+      Prepare_InitialStateIfPostponed(id, true);
+    }
   }
+
+  UpdateLastWriteAndPartialUseTime(id, refType);
 
   if(IsBackgroundCapturing(m_State))
     return;
@@ -833,7 +935,7 @@ void ResourceManager<Configuration>::MarkResourceFrameReferenced(ResourceId id, 
 template <typename Configuration>
 void ResourceManager<Configuration>::MarkDirtyResource(ResourceId res)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   if(res == ResourceId())
     return;
@@ -844,7 +946,7 @@ void ResourceManager<Configuration>::MarkDirtyResource(ResourceId res)
 template <typename Configuration>
 bool ResourceManager<Configuration>::IsResourceDirty(ResourceId res)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   if(res == ResourceId())
     return false;
@@ -855,7 +957,7 @@ bool ResourceManager<Configuration>::IsResourceDirty(ResourceId res)
 template <typename Configuration>
 void ResourceManager<Configuration>::SetInitialContents(ResourceId id, InitialContentData contents)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   RDCASSERT(id != ResourceId());
 
@@ -870,7 +972,7 @@ void ResourceManager<Configuration>::SetInitialContents(ResourceId id, InitialCo
 template <typename Configuration>
 void ResourceManager<Configuration>::SetInitialChunk(ResourceId id, Chunk *chunk)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   RDCASSERT(id != ResourceId());
   RDCASSERT(chunk->GetChunkType<SystemChunk>() == SystemChunk::InitialContents);
@@ -878,7 +980,7 @@ void ResourceManager<Configuration>::SetInitialChunk(ResourceId id, Chunk *chunk
   InitialContentDataOrChunk &data = m_InitialContents[id];
 
   if(data.chunk)
-    delete data.chunk;
+    data.chunk->Delete();
 
   data.chunk = chunk;
 }
@@ -887,7 +989,7 @@ template <typename Configuration>
 typename Configuration::InitialContentData ResourceManager<Configuration>::GetInitialContents(
     ResourceId id)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   if(id == ResourceId())
     return InitialContentData();
@@ -922,12 +1024,15 @@ void ResourceManager<Configuration>::Serialise_InitialContentsNeeded(WriteSerial
 {
   using namespace ResourceManagerInternal;
 
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
-  rdcarray<WrittenRecord> WrittenRecords;
+  // which resources need initial contents? either those which we didn't have proper initialisation
+  // for (because they were dirty one way or another) or resources that are written mid-frame and so
+  // need to be reset.
+  rdcarray<WrittenRecord> NeededInitials;
 
   // reasonable estimate, and these records are small
-  WrittenRecords.reserve(m_FrameReferencedResources.size());
+  NeededInitials.reserve(m_FrameReferencedResources.size() + m_InitialContents.size());
 
   // all resources that were recorded as being modified should be included in the list of those
   // needing initial contents
@@ -938,27 +1043,34 @@ void ResourceManager<Configuration>::Serialise_InitialContentsNeeded(WriteSerial
     {
       WrittenRecord wr = {it->first, record ? record->DataInSerialiser : true};
 
-      WrittenRecords.push_back(wr);
+      NeededInitials.push_back(wr);
     }
   }
 
-  // any resources that had initial contents generated should also be included
+  // any resources that had initial contents generated should also be included, even if they're only
+  // referenced read-only, as anything not in this list will have its initial contents freed on
+  // replay (see CreateInitialContents). However we only need to keep resources that are referenced
+  // (unless we have ref all resources on)
   for(auto it = m_InitialContents.begin(); it != m_InitialContents.end(); ++it)
   {
+    bool include = RenderDoc::Inst().GetCaptureOptions().refAllResources;
+
     ResourceId id = it->first;
-    auto ref = m_FrameReferencedResources.find(id);
-    if(ref == m_FrameReferencedResources.end() || !IsDirtyFrameRef(ref->second))
+    if(m_FrameReferencedResources.find(id) != m_FrameReferencedResources.end())
+      include = true;
+
+    if(include)
     {
       WrittenRecord wr = {id, true};
 
-      WrittenRecords.push_back(wr);
+      NeededInitials.push_back(wr);
     }
   }
 
-  uint64_t chunkSize = uint64_t(WrittenRecords.size() * sizeof(WrittenRecord) + 16);
+  uint64_t chunkSize = uint64_t(NeededInitials.size() * sizeof(WrittenRecord) + 16);
 
   SCOPED_SERIALISE_CHUNK(SystemChunk::InitialContentsList, chunkSize);
-  SERIALISE_ELEMENT(WrittenRecords);
+  SERIALISE_ELEMENT(NeededInitials);
 }
 
 template <typename Configuration>
@@ -972,15 +1084,19 @@ void ResourceManager<Configuration>::FreeInitialContents()
       m_InitialContents.erase(m_InitialContents.begin());
   }
   m_PostponedResourceIDs.clear();
+  m_SkippedResourceIDs.clear();
 }
 
 template <typename Configuration>
-void ResourceManager<Configuration>::Prepare_ResourceInitialStateIfNeeded(ResourceId id)
+void ResourceManager<Configuration>::Prepare_InitialStateIfPostponed(ResourceId id, bool midframe)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   if(!IsResourcePostponed(id))
     return;
+
+  if(midframe)
+    RDCLOG("Preparing resource %s after it has been postponed.", ToStr(id).c_str());
 
   WrappedResourceType res = GetCurrentResource(id);
   Prepare_InitialState(res);
@@ -989,30 +1105,50 @@ void ResourceManager<Configuration>::Prepare_ResourceInitialStateIfNeeded(Resour
 }
 
 template <typename Configuration>
-void ResourceManager<Configuration>::Prepare_ResourceIfActivePostponed(ResourceId id)
+void ResourceManager<Configuration>::SkipOrPostponeOrPrepare_InitialState(ResourceId id,
+                                                                          FrameRefType refType)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
-  // If the resource was postponed during Active Capture, we need to prepare it
-  // right away, since next Read might be invalid.
-  if(!IsActiveCapturing(m_State) || !IsResourcePostponed(id))
+  if(!IsResourceSkipped(id))
     return;
 
-  RDCDEBUG("Preparing resource %s after it has been postponed.", ToStr(id).c_str());
-  Prepare_ResourceInitialStateIfNeeded(id);
-}
+  // the first time we encounter a skipped resource, we can choose to
+  // skip this resource forever, convert it to be postponed, or prepare
+  // it immediately. We can't retrieve its initial state once it has
+  // been written over.
+  m_SkippedResourceIDs.erase(id);
 
-template <typename Configuration>
-inline void ResourceManager<Configuration>::UpdateLastWriteTime(ResourceId id)
-{
-  SCOPED_LOCK(m_Lock);
-  m_LastWriteTime[id] = m_ResourcesUpdateTimer.GetMilliseconds();
+  // skip this forever if the first encounter is a complete write
+  if(IsCompleteWriteFrameRef(refType))
+  {
+    RDCDEBUG("Resource %s skipped forever on refType of %s)", ToStr(id).c_str(),
+             ToStr(refType).c_str());
+    return;
+  }
+
+  // If this resource is only being read, we might as well try to
+  // postpone it to conserve memory consumption.
+  if(!IsDirtyFrameRef(refType) && IsResourceTrackedForPersistency(GetCurrentResource(id)))
+  {
+    m_PostponedResourceIDs.insert(id);
+    RDCDEBUG("Resource %s converted from skipped to postponed on refType of %s", ToStr(id).c_str(),
+             ToStr(refType).c_str());
+    SetInitialContents(id, InitialContentData());
+  }
+  else
+  {
+    WrappedResourceType res = GetCurrentResource(id);
+    RDCDEBUG("Preparing resource %s after it has been skipped on refType of %s", ToStr(id).c_str(),
+             ToStr(refType).c_str());
+    Prepare_InitialState(res);
+  }
 }
 
 template <typename Configuration>
 inline void ResourceManager<Configuration>::ResetCaptureStartTime()
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
   // This time is used to analyze which resources to refresh
   // for their last write time.
   m_captureStartTime = m_ResourcesUpdateTimer.GetMilliseconds();
@@ -1021,40 +1157,101 @@ inline void ResourceManager<Configuration>::ResetCaptureStartTime()
 template <typename Configuration>
 inline void ResourceManager<Configuration>::ResetLastWriteTimes()
 {
-  SCOPED_LOCK(m_Lock);
-  for(auto it = m_LastWriteTime.begin(); it != m_LastWriteTime.end(); ++it)
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
+  for(auto it = m_ResourceRefTimes.begin(); it != m_ResourceRefTimes.end(); ++it)
   {
     // Reset only those resources which were below the threshold on
     // capture start. Other resource are already above the threshold.
-    if(m_captureStartTime - it->second <= PERSISTENT_RESOURCE_AGE)
-      it->second = m_ResourcesUpdateTimer.GetMilliseconds();
+    if(m_captureStartTime - it->writeTime <= PERSISTENT_RESOURCE_AGE)
+      it->writeTime = m_ResourcesUpdateTimer.GetMilliseconds();
+  }
+}
+
+template <typename Configuration>
+inline void ResourceManager<Configuration>::UpdateLastWriteAndPartialUseTime(ResourceId id,
+                                                                             FrameRefType refType)
+{
+  // parent must hold m_Lock for us
+
+  ResourceRefTimes *it = std::lower_bound(m_ResourceRefTimes.begin(), m_ResourceRefTimes.end(), id);
+
+  if(it == m_ResourceRefTimes.end() || it->id != id)
+  {
+    // don't add resources unless it's a dirty ref. After that, we'll keep updating for read and
+    // write refs to get partialUseTime
+    if(!IsDirtyFrameRef(refType))
+      return;
+
+    // if it's not pointing to the end, figure out where we need to insert it there
+    size_t idx = it - m_ResourceRefTimes.begin();
+    m_ResourceRefTimes.insert(idx, {id, 0.0, 0.0});
+    it = m_ResourceRefTimes.begin() + idx;
+  }
+
+  double now = m_ResourcesUpdateTimer.GetMilliseconds();
+
+  if(IsDirtyFrameRef(refType))
+    it->writeTime = now;
+
+  if(!IsCompleteWriteFrameRef(refType))
+    it->partialUseTime = now;
+}
+
+template <typename Configuration>
+inline void ResourceManager<Configuration>::ResetLastPartialUseTimes()
+{
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
+  for(auto it = m_ResourceRefTimes.begin(); it != m_ResourceRefTimes.end(); ++it)
+  {
+    if(m_captureStartTime - it->partialUseTime <= IRRELEVANT_RESOURCE_AGE)
+      it->partialUseTime = m_ResourcesUpdateTimer.GetMilliseconds();
   }
 }
 
 template <typename Configuration>
 inline bool ResourceManager<Configuration>::HasPersistentAge(ResourceId id)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
-  auto it = m_LastWriteTime.find(id);
+  ResourceRefTimes *it = std::lower_bound(m_ResourceRefTimes.begin(), m_ResourceRefTimes.end(), id);
 
-  if(it == m_LastWriteTime.end())
+  if(it == m_ResourceRefTimes.end() || it->id != id)
     return true;
 
-  return m_ResourcesUpdateTimer.GetMilliseconds() - it->second >= PERSISTENT_RESOURCE_AGE;
+  return m_ResourcesUpdateTimer.GetMilliseconds() - it->writeTime >= PERSISTENT_RESOURCE_AGE;
+}
+
+template <typename Configuration>
+inline bool ResourceManager<Configuration>::HasIrrelevantAge(ResourceId id)
+{
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
+
+  ResourceRefTimes *it = std::lower_bound(m_ResourceRefTimes.begin(), m_ResourceRefTimes.end(), id);
+
+  if(it == m_ResourceRefTimes.end() || it->id != id)
+    return false;
+
+  return m_ResourcesUpdateTimer.GetMilliseconds() - it->partialUseTime >= IRRELEVANT_RESOURCE_AGE;
 }
 
 template <typename Configuration>
 inline bool ResourceManager<Configuration>::IsResourcePostponed(ResourceId id)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
   return m_PostponedResourceIDs.find(id) != m_PostponedResourceIDs.end();
 }
 
 template <typename Configuration>
-inline bool ResourceManager<Configuration>::IsResourcePersistent(ResourceId id)
+inline bool ResourceManager<Configuration>::IsResourceSkipped(ResourceId id)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
+  return m_SkippedResourceIDs.find(id) != m_SkippedResourceIDs.end();
+}
+
+template <typename Configuration>
+inline bool ResourceManager<Configuration>::ShouldPostpone(ResourceId id)
+{
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   WrappedResourceType res = GetCurrentResource(id);
 
@@ -1065,30 +1262,46 @@ inline bool ResourceManager<Configuration>::IsResourcePersistent(ResourceId id)
 }
 
 template <typename Configuration>
+inline bool ResourceManager<Configuration>::ShouldSkip(ResourceId id)
+{
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
+
+  WrappedResourceType res = GetCurrentResource(id);
+
+  if(!IsResourceTrackedForPersistency(res))
+    return false;
+
+  return HasIrrelevantAge(id);
+}
+
+template <typename Configuration>
 void ResourceManager<Configuration>::CreateInitialContents(ReadSerialiser &ser)
 {
   using namespace ResourceManagerInternal;
 
-  std::set<ResourceId> neededInitials;
+  std::set<ResourceId> ids;
 
-  rdcarray<WrittenRecord> WrittenRecords;
-  SERIALISE_ELEMENT(WrittenRecords);
+  rdcarray<WrittenRecord> NeededInitials;
+  SERIALISE_ELEMENT(NeededInitials);
 
-  for(const WrittenRecord &wr : WrittenRecords)
+  for(const WrittenRecord &wr : NeededInitials)
   {
     ResourceId id = wr.id;
 
-    neededInitials.insert(id);
+    ids.insert(id);
 
+    // if this resource exists and we don't have initial contents for it serialised, create some for
+    // reset purposes.
     if(HasLiveResource(id) && m_InitialContents.find(id) == m_InitialContents.end())
       Create_InitialState(id, GetLiveResource(id), wr.written);
   }
 
+  // any initial contents that we ended up with which we don't need can be freed now
   for(auto it = m_InitialContents.begin(); it != m_InitialContents.end();)
   {
     ResourceId id = it->first;
 
-    if(neededInitials.find(id) == neededInitials.end())
+    if(ids.find(id) == ids.end())
     {
       it->second.Free(this);
       ++it;
@@ -1135,12 +1348,10 @@ rdcarray<ResourceId> ResourceManager<Configuration>::InitialContentResources()
 template <typename Configuration>
 void ResourceManager<Configuration>::MarkUnwrittenResources()
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_READLOCK(m_ResourceRecordLock);
 
   for(auto it = m_ResourceRecords.begin(); it != m_ResourceRecords.end(); ++it)
-  {
     it->second->MarkDataUnwritten();
-  }
 }
 
 template <typename Configuration>
@@ -1148,12 +1359,14 @@ void ResourceManager<Configuration>::InsertReferencedChunks(WriteSerialiser &ser
 {
   std::map<int64_t, Chunk *> sortedChunks;
 
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   RDCDEBUG("%u frame resource records", (uint32_t)m_FrameReferencedResources.size());
 
   if(RenderDoc::Inst().GetCaptureOptions().refAllResources)
   {
+    SCOPED_READLOCK(m_ResourceRecordLock);
+
     float num = float(m_ResourceRecords.size());
     float idx = 0.0f;
 
@@ -1196,10 +1409,12 @@ void ResourceManager<Configuration>::InsertReferencedChunks(WriteSerialiser &ser
 template <typename Configuration>
 void ResourceManager<Configuration>::PrepareInitialContents()
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   RDCDEBUG("Preparing up to %u potentially dirty resources", (uint32_t)m_DirtyResources.size());
   uint32_t prepared = 0;
+  uint32_t postponed = 0;
+  uint32_t skipped = 0;
 
   float num = float(m_DirtyResources.size());
   float idx = 0.0f;
@@ -1224,11 +1439,19 @@ void ResourceManager<Configuration>::PrepareInitialContents()
     if(record == NULL || record->InternalResource)
       continue;
 
-    if(IsResourcePersistent(id))
+    if(ShouldSkip(id))
+    {
+      m_SkippedResourceIDs.insert(id);
+      skipped++;
+      continue;
+    }
+
+    if(ShouldPostpone(id))
     {
       m_PostponedResourceIDs.insert(id);
       // Set empty contents here, it'll be prepared on serialization.
       SetInitialContents(id, InitialContentData());
+      postponed++;
       continue;
     }
 
@@ -1241,13 +1464,13 @@ void ResourceManager<Configuration>::PrepareInitialContents()
     Prepare_InitialState(res);
   }
 
-  RDCDEBUG("Prepared %u dirty resources", prepared);
+  RDCDEBUG("Prepared %u dirty resources, postponed %u, skipped %u", prepared, postponed, skipped);
 }
 
 template <typename Configuration>
 void ResourceManager<Configuration>::InsertInitialContentsChunks(WriteSerialiser &ser)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   uint32_t dirty = 0;
   uint32_t skipped = 0;
@@ -1268,7 +1491,7 @@ void ResourceManager<Configuration>::InsertInitialContentsChunks(WriteSerialiser
        !RenderDoc::Inst().GetCaptureOptions().refAllResources)
     {
 #if ENABLED(VERBOSE_DIRTY_RESOURCES)
-      RDCDEBUG("Dirty tesource %s is GPU dirty but not referenced - skipping", ToStr(id).c_str());
+      RDCDEBUG("Dirty resource %s is GPU dirty but not referenced - skipping", ToStr(id).c_str());
 #endif
       skipped++;
       continue;
@@ -1297,7 +1520,7 @@ void ResourceManager<Configuration>::InsertInitialContentsChunks(WriteSerialiser
 #endif
 
     // Load postponed resource if needed.
-    Prepare_ResourceInitialStateIfNeeded(id);
+    Prepare_InitialStateIfPostponed(id, false);
 
     dirty++;
 
@@ -1331,7 +1554,7 @@ void ResourceManager<Configuration>::InsertInitialContentsChunks(WriteSerialiser
 template <typename Configuration>
 void ResourceManager<Configuration>::ApplyInitialContentsNonChunks(WriteSerialiser &ser)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   for(auto it = m_InitialContents.begin(); it != m_InitialContents.end(); ++it)
   {
@@ -1356,7 +1579,7 @@ void ResourceManager<Configuration>::ApplyInitialContentsNonChunks(WriteSerialis
 template <typename Configuration>
 void ResourceManager<Configuration>::ClearReferencedResources()
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   for(auto it = m_FrameReferencedResources.begin(); it != m_FrameReferencedResources.end(); ++it)
   {
@@ -1376,7 +1599,7 @@ void ResourceManager<Configuration>::ClearReferencedResources()
 template <typename Configuration>
 void ResourceManager<Configuration>::ReplaceResource(ResourceId from, ResourceId to)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   if(HasLiveResource(to))
   {
@@ -1388,7 +1611,7 @@ void ResourceManager<Configuration>::ReplaceResource(ResourceId from, ResourceId
 template <typename Configuration>
 bool ResourceManager<Configuration>::HasReplacement(ResourceId from)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   return m_Replacements.find(from) != m_Replacements.end();
 }
@@ -1396,7 +1619,7 @@ bool ResourceManager<Configuration>::HasReplacement(ResourceId from)
 template <typename Configuration>
 void ResourceManager<Configuration>::RemoveReplacement(ResourceId id)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   auto it = m_Replacements.find(id);
 
@@ -1410,7 +1633,7 @@ void ResourceManager<Configuration>::RemoveReplacement(ResourceId id)
 template <typename Configuration>
 typename Configuration::RecordType *ResourceManager<Configuration>::GetResourceRecord(ResourceId id)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_READLOCK(m_ResourceRecordLock);
 
   auto it = m_ResourceRecords.find(id);
 
@@ -1423,7 +1646,7 @@ typename Configuration::RecordType *ResourceManager<Configuration>::GetResourceR
 template <typename Configuration>
 bool ResourceManager<Configuration>::HasResourceRecord(ResourceId id)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_READLOCK(m_ResourceRecordLock);
 
   auto it = m_ResourceRecords.find(id);
 
@@ -1436,7 +1659,7 @@ bool ResourceManager<Configuration>::HasResourceRecord(ResourceId id)
 template <typename Configuration>
 typename Configuration::RecordType *ResourceManager<Configuration>::AddResourceRecord(ResourceId id)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_WRITELOCK(m_ResourceRecordLock);
 
   RDCASSERT(m_ResourceRecords.find(id) == m_ResourceRecords.end(), id);
 
@@ -1446,7 +1669,7 @@ typename Configuration::RecordType *ResourceManager<Configuration>::AddResourceR
 template <typename Configuration>
 void ResourceManager<Configuration>::RemoveResourceRecord(ResourceId id)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_WRITELOCK(m_ResourceRecordLock);
 
   RDCASSERT(m_ResourceRecords.find(id) != m_ResourceRecords.end(), id);
 
@@ -1462,7 +1685,7 @@ void ResourceManager<Configuration>::DestroyResourceRecord(ResourceRecord *recor
 template <typename Configuration>
 bool ResourceManager<Configuration>::AddWrapper(WrappedResourceType wrap, RealResourceType real)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   bool ret = true;
 
@@ -1487,7 +1710,7 @@ bool ResourceManager<Configuration>::AddWrapper(WrappedResourceType wrap, RealRe
 template <typename Configuration>
 void ResourceManager<Configuration>::RemoveWrapper(RealResourceType real)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   if(real == (RealResourceType)RecordType::NullResource || !HasWrapper(real))
   {
@@ -1502,7 +1725,7 @@ void ResourceManager<Configuration>::RemoveWrapper(RealResourceType real)
 template <typename Configuration>
 bool ResourceManager<Configuration>::HasWrapper(RealResourceType real)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   if(real == (RealResourceType)RecordType::NullResource)
     return false;
@@ -1514,7 +1737,7 @@ template <typename Configuration>
 typename Configuration::WrappedResourceType ResourceManager<Configuration>::GetWrapper(
     RealResourceType real)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   if(real == (RealResourceType)RecordType::NullResource)
     return (WrappedResourceType)RecordType::NullResource;
@@ -1532,7 +1755,7 @@ typename Configuration::WrappedResourceType ResourceManager<Configuration>::GetW
 template <typename Configuration>
 void ResourceManager<Configuration>::AddLiveResource(ResourceId origid, WrappedResourceType livePtr)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   if(origid == ResourceId() || livePtr == (WrappedResourceType)RecordType::NullResource)
   {
@@ -1555,7 +1778,7 @@ void ResourceManager<Configuration>::AddLiveResource(ResourceId origid, WrappedR
 template <typename Configuration>
 bool ResourceManager<Configuration>::HasLiveResource(ResourceId origid)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   if(origid == ResourceId())
     return false;
@@ -1568,7 +1791,7 @@ template <typename Configuration>
 typename Configuration::WrappedResourceType ResourceManager<Configuration>::GetLiveResource(
     ResourceId origid)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   if(origid == ResourceId())
     return (WrappedResourceType)RecordType::NullResource;
@@ -1587,7 +1810,7 @@ typename Configuration::WrappedResourceType ResourceManager<Configuration>::GetL
 template <typename Configuration>
 void ResourceManager<Configuration>::EraseLiveResource(ResourceId origid)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   RDCASSERT(HasLiveResource(origid), origid);
 
@@ -1597,16 +1820,15 @@ void ResourceManager<Configuration>::EraseLiveResource(ResourceId origid)
 template <typename Configuration>
 void ResourceManager<Configuration>::AddCurrentResource(ResourceId id, WrappedResourceType res)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
-  RDCASSERT(m_CurrentResourceMap.find(id) == m_CurrentResourceMap.end(), id);
   m_CurrentResourceMap[id] = res;
 }
 
 template <typename Configuration>
 bool ResourceManager<Configuration>::HasCurrentResource(ResourceId id)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   return m_CurrentResourceMap.find(id) != m_CurrentResourceMap.end();
 }
@@ -1615,7 +1837,7 @@ template <typename Configuration>
 typename Configuration::WrappedResourceType ResourceManager<Configuration>::GetCurrentResource(
     ResourceId id)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   if(id == ResourceId())
     return (WrappedResourceType)RecordType::NullResource;
@@ -1623,24 +1845,27 @@ typename Configuration::WrappedResourceType ResourceManager<Configuration>::GetC
   if(m_Replacements.find(id) != m_Replacements.end())
     return GetCurrentResource(m_Replacements[id]);
 
-  RDCASSERT(m_CurrentResourceMap.find(id) != m_CurrentResourceMap.end(), id);
   return m_CurrentResourceMap[id];
 }
 
 template <typename Configuration>
 void ResourceManager<Configuration>::ReleaseCurrentResource(ResourceId id)
 {
-  SCOPED_LOCK(m_Lock);
-
-  RDCASSERT(m_CurrentResourceMap.find(id) != m_CurrentResourceMap.end(), id);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   // We potentially need to prepare this resource on Active Capture,
   // if it was postponed, but is about to go away.
-  Prepare_ResourceIfActivePostponed(id);
+  if(IsActiveCapturing(m_State))
+  {
+    Prepare_InitialStateIfPostponed(id, true);
+  }
 
   m_CurrentResourceMap.erase(id);
   m_DirtyResources.erase(id);
-  m_LastWriteTime.erase(id);
+
+  auto it = std::lower_bound(m_ResourceRefTimes.begin(), m_ResourceRefTimes.end(), id);
+  if(it != m_ResourceRefTimes.end())
+    m_ResourceRefTimes.erase(it - m_ResourceRefTimes.begin());
 }
 
 template <typename Configuration>

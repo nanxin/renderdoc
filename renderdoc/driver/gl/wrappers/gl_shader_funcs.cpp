@@ -247,7 +247,7 @@ void WrappedOpenGL::ShaderData::ProcessCompilation(WrappedOpenGL &drv, ResourceI
         // program.
         GLuint fakeProgram = drv.glCreateProgram();
 
-        ResourceId progid = drv.GetResourceManager()->GetID(ProgramRes(drv.GetCtx(), fakeProgram));
+        ResourceId progid = drv.GetResourceManager()->GetResID(ProgramRes(drv.GetCtx(), fakeProgram));
 
         ProgramData &progDetails = drv.m_Programs[progid];
 
@@ -294,7 +294,7 @@ template <typename SerialiserType>
 bool WrappedOpenGL::Serialise_glCreateShader(SerialiserType &ser, GLenum type, GLuint shader)
 {
   SERIALISE_ELEMENT(type);
-  SERIALISE_ELEMENT_LOCAL(Shader, GetResourceManager()->GetID(ShaderRes(GetCtx(), shader)))
+  SERIALISE_ELEMENT_LOCAL(Shader, GetResourceManager()->GetResID(ShaderRes(GetCtx(), shader)))
       .TypedAs("GLResource"_lit);
 
   SERIALISE_CHECK_READ_ERRORS();
@@ -384,7 +384,7 @@ bool WrappedOpenGL::Serialise_glShaderSource(SerialiserType &ser, GLuint shaderH
     for(size_t i = 0; i < sources.size(); i++)
       strs.push_back(sources[i].c_str());
 
-    ResourceId liveId = GetResourceManager()->GetID(shader);
+    ResourceId liveId = GetResourceManager()->GetResID(shader);
 
     m_Shaders[liveId].sources = sources;
 
@@ -433,7 +433,7 @@ void WrappedOpenGL::glShaderSource(GLuint shader, GLsizei count, const GLchar *c
   // it using glslang for compilation and reflection
   if(IsReplayMode(m_State) || !HasExt[ARB_program_interface_query])
   {
-    ResourceId id = GetResourceManager()->GetID(ShaderRes(GetCtx(), shader));
+    ResourceId id = GetResourceManager()->GetResID(ShaderRes(GetCtx(), shader));
     m_Shaders[id].sources.clear();
     m_Shaders[id].sources.reserve(count);
 
@@ -452,7 +452,7 @@ bool WrappedOpenGL::Serialise_glCompileShader(SerialiserType &ser, GLuint shader
 
   if(IsReplayingAndReading())
   {
-    ResourceId liveId = GetResourceManager()->GetID(shader);
+    ResourceId liveId = GetResourceManager()->GetResID(shader);
 
     GL.glCompileShader(shader.name);
 
@@ -485,7 +485,7 @@ void WrappedOpenGL::glCompileShader(GLuint shader)
   }
 
   {
-    ResourceId id = GetResourceManager()->GetID(ShaderRes(GetCtx(), shader));
+    ResourceId id = GetResourceManager()->GetResID(ShaderRes(GetCtx(), shader));
 
     // if we're capturing and don't have ARB_program_interface_query we're going to have to emulate
     // it using glslang for compilation and reflection
@@ -523,8 +523,8 @@ bool WrappedOpenGL::Serialise_glAttachShader(SerialiserType &ser, GLuint program
 
   if(IsReplayingAndReading())
   {
-    ResourceId liveProgId = GetResourceManager()->GetID(program);
-    ResourceId liveShadId = GetResourceManager()->GetID(shader);
+    ResourceId liveProgId = GetResourceManager()->GetResID(program);
+    ResourceId liveShadId = GetResourceManager()->GetResID(shader);
 
     m_Programs[liveProgId].shaders.push_back(liveShadId);
 
@@ -562,8 +562,8 @@ void WrappedOpenGL::glAttachShader(GLuint program, GLuint shader)
     }
 
     {
-      ResourceId progid = GetResourceManager()->GetID(ProgramRes(GetCtx(), program));
-      ResourceId shadid = GetResourceManager()->GetID(ShaderRes(GetCtx(), shader));
+      ResourceId progid = GetResourceManager()->GetResID(ProgramRes(GetCtx(), program));
+      ResourceId shadid = GetResourceManager()->GetResID(ShaderRes(GetCtx(), shader));
       m_Programs[progid].shaders.push_back(shadid);
     }
   }
@@ -580,8 +580,8 @@ bool WrappedOpenGL::Serialise_glDetachShader(SerialiserType &ser, GLuint program
 
   if(IsReplayingAndReading())
   {
-    ResourceId liveProgId = GetResourceManager()->GetID(program);
-    ResourceId liveShadId = GetResourceManager()->GetID(shader);
+    ResourceId liveProgId = GetResourceManager()->GetResID(program);
+    ResourceId liveShadId = GetResourceManager()->GetResID(shader);
 
     // in order to be able to relink programs, we don't replay detaches. This should be valid as
     // it's legal to have a shader attached to multiple programs, so even if it's attached again
@@ -631,8 +631,8 @@ void WrappedOpenGL::glDetachShader(GLuint program, GLuint shader)
     }
 
     {
-      ResourceId progid = GetResourceManager()->GetID(ProgramRes(GetCtx(), program));
-      ResourceId shadid = GetResourceManager()->GetID(ShaderRes(GetCtx(), shader));
+      ResourceId progid = GetResourceManager()->GetResID(ProgramRes(GetCtx(), program));
+      ResourceId shadid = GetResourceManager()->GetResID(ShaderRes(GetCtx(), shader));
 
       if(!m_Programs[progid].linked)
       {
@@ -653,7 +653,7 @@ bool WrappedOpenGL::Serialise_glCreateShaderProgramv(SerialiserType &ser, GLenum
   SERIALISE_ELEMENT(type);
   SERIALISE_ELEMENT(count);
   SERIALISE_ELEMENT_ARRAY(strings, count);
-  SERIALISE_ELEMENT_LOCAL(Program, GetResourceManager()->GetID(ProgramRes(GetCtx(), program)))
+  SERIALISE_ELEMENT_LOCAL(Program, GetResourceManager()->GetResID(ProgramRes(GetCtx(), program)))
       .TypedAs("GLResource"_lit);
 
   SERIALISE_CHECK_READ_ERRORS();
@@ -744,7 +744,7 @@ GLuint WrappedOpenGL::glCreateShaderProgramv(GLenum type, GLsizei count, const G
 template <typename SerialiserType>
 bool WrappedOpenGL::Serialise_glCreateProgram(SerialiserType &ser, GLuint program)
 {
-  SERIALISE_ELEMENT_LOCAL(Program, GetResourceManager()->GetID(ProgramRes(GetCtx(), program)))
+  SERIALISE_ELEMENT_LOCAL(Program, GetResourceManager()->GetResID(ProgramRes(GetCtx(), program)))
       .TypedAs("GLResource"_lit);
 
   SERIALISE_CHECK_READ_ERRORS();
@@ -815,7 +815,7 @@ bool WrappedOpenGL::Serialise_glLinkProgram(SerialiserType &ser, GLuint programH
 
   if(IsReplayingAndReading())
   {
-    ResourceId progid = GetResourceManager()->GetID(program);
+    ResourceId progid = GetResourceManager()->GetResID(program);
 
     ProgramData &progDetails = m_Programs[progid];
 
@@ -889,7 +889,7 @@ void WrappedOpenGL::glLinkProgram(GLuint program)
   }
 
   {
-    ResourceId progid = GetResourceManager()->GetID(ProgramRes(GetCtx(), program));
+    ResourceId progid = GetResourceManager()->GetResID(ProgramRes(GetCtx(), program));
 
     ProgramData &progDetails = m_Programs[progid];
 
@@ -937,6 +937,34 @@ bool WrappedOpenGL::Serialise_glUniformBlockBinding(SerialiserType &ser, GLuint 
   SERIALISE_ELEMENT(uniformBlockIndex);
   SERIALISE_ELEMENT(uniformBlockBinding);
 
+  if(ser.VersionAtLeast(0x22))
+  {
+    rdcstr blockName;
+
+    if(ser.IsWriting())
+    {
+      GLint length = 1;
+      GL.glGetActiveUniformBlockiv(program.name, uniformBlockIndex, eGL_UNIFORM_BLOCK_NAME_LENGTH,
+                                   &length);
+
+      blockName.resize(length + 1);
+
+      GL.glGetActiveUniformBlockName(program.name, uniformBlockIndex, length, &length,
+                                     blockName.data());
+
+      blockName.resize(strlen(blockName.c_str()));
+    }
+
+    SERIALISE_ELEMENT(blockName).Hidden();
+
+    if(IsReplayingAndReading())
+    {
+      GLuint idx = GL.glGetUniformBlockIndex(program.name, blockName.c_str());
+      if(idx != GL_INVALID_INDEX)
+        uniformBlockIndex = idx;
+    }
+  }
+
   SERIALISE_CHECK_READ_ERRORS();
 
   if(IsReplayingAndReading())
@@ -976,6 +1004,37 @@ bool WrappedOpenGL::Serialise_glShaderStorageBlockBinding(SerialiserType &ser, G
   SERIALISE_ELEMENT(storageBlockIndex);
   SERIALISE_ELEMENT(storageBlockBinding);
 
+  if(ser.VersionAtLeast(0x22))
+  {
+    rdcstr blockName;
+
+    if(ser.IsWriting())
+    {
+      GLenum prop = eGL_NAME_LENGTH;
+
+      GLint length = 1;
+      GL.glGetProgramResourceiv(program.name, eGL_SHADER_STORAGE_BLOCK, storageBlockIndex, 1, &prop,
+                                1, NULL, &length);
+
+      blockName.resize(length + 1);
+
+      GL.glGetProgramResourceName(program.name, eGL_SHADER_STORAGE_BLOCK, storageBlockIndex, length,
+                                  &length, blockName.data());
+
+      blockName.resize(strlen(blockName.c_str()));
+    }
+
+    SERIALISE_ELEMENT(blockName).Hidden();
+
+    if(IsReplayingAndReading())
+    {
+      GLuint idx =
+          GL.glGetProgramResourceIndex(program.name, eGL_SHADER_STORAGE_BLOCK, blockName.c_str());
+      if(idx != GL_INVALID_INDEX)
+        storageBlockIndex = idx;
+    }
+  }
+
   SERIALISE_CHECK_READ_ERRORS();
 
   if(IsReplayingAndReading())
@@ -993,19 +1052,15 @@ void WrappedOpenGL::glShaderStorageBlockBinding(GLuint program, GLuint storageBl
 {
   SERIALISE_TIME_CALL(GL.glShaderStorageBlockBinding(program, storageBlockIndex, storageBlockBinding));
 
-  if(IsCaptureMode(m_State))
+  // we should only capture this while active, since the initial states will grab everything at the
+  // start of the frame and we only want to pick up dynamic changes after that.
+  if(IsActiveCapturing(m_State))
   {
-    GLResourceRecord *record = GetResourceManager()->GetResourceRecord(ProgramRes(GetCtx(), program));
-    RDCASSERTMSG("Couldn't identify object passed to function. Mismatched or bad GLuint?", record,
-                 program);
-    if(record)
-    {
-      USE_SCRATCH_SERIALISER();
-      SCOPED_SERIALISE_CHUNK(gl_CurChunk);
-      Serialise_glShaderStorageBlockBinding(ser, program, storageBlockIndex, storageBlockBinding);
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(gl_CurChunk);
+    Serialise_glShaderStorageBlockBinding(ser, program, storageBlockIndex, storageBlockBinding);
 
-      record->AddChunk(scope.Get());
-    }
+    GetContextRecord()->AddChunk(scope.Get());
   }
 }
 
@@ -1257,7 +1312,7 @@ void WrappedOpenGL::glDeleteProgram(GLuint program)
   GLResource res = ProgramRes(GetCtx(), program);
   if(GetResourceManager()->HasCurrentResource(res))
   {
-    m_Programs.erase(GetResourceManager()->GetID(res));
+    m_Programs.erase(GetResourceManager()->GetResID(res));
 
     if(GetResourceManager()->HasResourceRecord(res))
       GetResourceManager()->GetResourceRecord(res)->Delete(GetResourceManager());
@@ -1322,7 +1377,7 @@ bool WrappedOpenGL::Serialise_glShaderBinary(SerialiserType &ser, GLsizei count,
 
   if(IsReplayingAndReading())
   {
-    ResourceId liveId = GetResourceManager()->GetID(shader);
+    ResourceId liveId = GetResourceManager()->GetResID(shader);
 
     GL.glShaderBinary(1, &shader.name, binaryformat, binary, length);
 
@@ -1347,7 +1402,7 @@ void WrappedOpenGL::glShaderBinary(GLsizei count, const GLuint *shaders, GLenum 
     {
       for(GLsizei i = 0; i < count; i++)
       {
-        ResourceId liveId = GetResourceManager()->GetID(ShaderRes(GetCtx(), shaders[i]));
+        ResourceId liveId = GetResourceManager()->GetResID(ShaderRes(GetCtx(), shaders[i]));
         m_Shaders[liveId].spirvWords.assign((uint32_t *)binary, length / sizeof(uint32_t));
       }
     }
@@ -1406,8 +1461,8 @@ bool WrappedOpenGL::Serialise_glUseProgramStages(SerialiserType &ser, GLuint pip
   {
     if(program.name)
     {
-      ResourceId livePipeId = GetResourceManager()->GetID(pipeline);
-      ResourceId liveProgId = GetResourceManager()->GetID(program);
+      ResourceId livePipeId = GetResourceManager()->GetResID(pipeline);
+      ResourceId liveProgId = GetResourceManager()->GetResID(program);
 
       PipelineData &pipeDetails = m_Pipelines[livePipeId];
       ProgramData &progDetails = m_Programs[liveProgId];
@@ -1432,7 +1487,7 @@ bool WrappedOpenGL::Serialise_glUseProgramStages(SerialiserType &ser, GLuint pip
     }
     else
     {
-      ResourceId livePipeId = GetResourceManager()->GetID(pipeline);
+      ResourceId livePipeId = GetResourceManager()->GetResID(pipeline);
       PipelineData &pipeDetails = m_Pipelines[livePipeId];
 
       for(size_t s = 0; s < 6; s++)
@@ -1505,8 +1560,8 @@ void WrappedOpenGL::glUseProgramStages(GLuint pipeline, GLbitfield stages, GLuin
   {
     if(program)
     {
-      ResourceId pipeID = GetResourceManager()->GetID(ProgramPipeRes(GetCtx(), pipeline));
-      ResourceId progID = GetResourceManager()->GetID(ProgramRes(GetCtx(), program));
+      ResourceId pipeID = GetResourceManager()->GetResID(ProgramPipeRes(GetCtx(), pipeline));
+      ResourceId progID = GetResourceManager()->GetResID(ProgramRes(GetCtx(), program));
 
       PipelineData &pipeDetails = m_Pipelines[pipeID];
       ProgramData &progDetails = m_Programs[progID];
@@ -1529,7 +1584,7 @@ void WrappedOpenGL::glUseProgramStages(GLuint pipeline, GLbitfield stages, GLuin
     }
     else
     {
-      ResourceId pipeID = GetResourceManager()->GetID(ProgramPipeRes(GetCtx(), pipeline));
+      ResourceId pipeID = GetResourceManager()->GetResID(ProgramPipeRes(GetCtx(), pipeline));
       PipelineData &pipeDetails = m_Pipelines[pipeID];
 
       for(size_t s = 0; s < 6; s++)
@@ -1548,7 +1603,8 @@ template <typename SerialiserType>
 bool WrappedOpenGL::Serialise_glGenProgramPipelines(SerialiserType &ser, GLsizei n, GLuint *pipelines)
 {
   SERIALISE_ELEMENT(n);
-  SERIALISE_ELEMENT_LOCAL(pipeline, GetResourceManager()->GetID(ProgramPipeRes(GetCtx(), *pipelines)))
+  SERIALISE_ELEMENT_LOCAL(pipeline,
+                          GetResourceManager()->GetResID(ProgramPipeRes(GetCtx(), *pipelines)))
       .TypedAs("GLResource"_lit);
 
   SERIALISE_CHECK_READ_ERRORS();
@@ -1609,7 +1665,8 @@ bool WrappedOpenGL::Serialise_glCreateProgramPipelines(SerialiserType &ser, GLsi
                                                        GLuint *pipelines)
 {
   SERIALISE_ELEMENT(n);
-  SERIALISE_ELEMENT_LOCAL(pipeline, GetResourceManager()->GetID(ProgramPipeRes(GetCtx(), *pipelines)))
+  SERIALISE_ELEMENT_LOCAL(pipeline,
+                          GetResourceManager()->GetResID(ProgramPipeRes(GetCtx(), *pipelines)))
       .TypedAs("GLResource"_lit);
 
   SERIALISE_CHECK_READ_ERRORS();
@@ -1748,7 +1805,7 @@ void WrappedOpenGL::glDeleteProgramPipelines(GLsizei n, const GLuint *pipelines)
     GLResource res = ProgramPipeRes(GetCtx(), pipelines[i]);
     if(GetResourceManager()->HasCurrentResource(res))
     {
-      m_Pipelines.erase(GetResourceManager()->GetID(res));
+      m_Pipelines.erase(GetResourceManager()->GetResID(res));
 
       if(GetResourceManager()->HasResourceRecord(res))
         GetResourceManager()->GetResourceRecord(res)->Delete(GetResourceManager());
@@ -1780,7 +1837,7 @@ bool WrappedOpenGL::Serialise_glCompileShaderIncludeARB(SerialiserType &ser, GLu
   {
     CheckReplayFunctionPresent(glCompileShaderIncludeARB);
 
-    ResourceId liveId = GetResourceManager()->GetID(shader);
+    ResourceId liveId = GetResourceManager()->GetResID(shader);
 
     auto &shadDetails = m_Shaders[liveId];
 
@@ -1821,7 +1878,7 @@ void WrappedOpenGL::glCompileShaderIncludeARB(GLuint shader, GLsizei count,
   }
   else
   {
-    ResourceId id = GetResourceManager()->GetID(ShaderRes(GetCtx(), shader));
+    ResourceId id = GetResourceManager()->GetResID(ShaderRes(GetCtx(), shader));
 
     auto &shadDetails = m_Shaders[id];
 
@@ -1943,7 +2000,7 @@ bool WrappedOpenGL::Serialise_glSpecializeShader(SerialiserType &ser, GLuint sha
   {
     CheckReplayFunctionPresent(glSpecializeShader);
 
-    ResourceId liveId = GetResourceManager()->GetID(shader);
+    ResourceId liveId = GetResourceManager()->GetResID(shader);
 
     GL.glSpecializeShader(shader.name, pEntryPoint, numSpecializationConstants, pConstantIndex,
                           pConstantValue);
@@ -1991,7 +2048,7 @@ void WrappedOpenGL::glSpecializeShader(GLuint shader, const GLchar *pEntryPoint,
   }
   else
   {
-    ResourceId liveId = GetResourceManager()->GetID(ShaderRes(GetCtx(), shader));
+    ResourceId liveId = GetResourceManager()->GetResID(ShaderRes(GetCtx(), shader));
 
     m_Shaders[liveId].spirv.Parse(m_Shaders[liveId].spirvWords);
 

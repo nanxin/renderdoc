@@ -24,6 +24,7 @@
 
 #pragma once
 
+#include <unordered_map>
 #include "driver/shaders/spirv/spirv_reflect.h"
 #include "vk_common.h"
 #include "vk_manager.h"
@@ -49,6 +50,18 @@ enum VulkanDynamicStateIndex
   VkDynamicViewportCoarseSampleOrderNV,
   VkDynamicExclusiveScissorNV,
   VkDynamicLineStippleEXT,
+  VkDynamicCullModeEXT,
+  VkDynamicFrontFaceEXT,
+  VkDynamicPrimitiveTopologyEXT,
+  VkDynamicViewportCountEXT,
+  VkDynamicScissorCountEXT,
+  VkDynamicVertexInputBindingStrideEXT,
+  VkDynamicDepthTestEnableEXT,
+  VkDynamicDepthWriteEnableEXT,
+  VkDynamicDepthCompareOpEXT,
+  VkDynamicDepthBoundsTestEnableEXT,
+  VkDynamicStencilTestEnableEXT,
+  VkDynamicStencilOpEXT,
   VkDynamicCount,
 };
 
@@ -60,9 +73,8 @@ struct DescSetLayout
   void Init(VulkanResourceManager *resourceMan, VulkanCreationInfo &info,
             const VkDescriptorSetLayoutCreateInfo *pCreateInfo);
 
-  void CreateBindingsArray(rdcarray<DescriptorSetSlot *> &descBindings) const;
-  void UpdateBindingsArray(const DescSetLayout &prevLayout,
-                           rdcarray<DescriptorSetSlot *> &descBindings) const;
+  void CreateBindingsArray(BindingStorage &bindingStorage, uint32_t variableAllocSize) const;
+  void UpdateBindingsArray(const DescSetLayout &prevLayout, BindingStorage &bindingStorage) const;
 
   struct Binding
   {
@@ -70,17 +82,32 @@ struct DescSetLayout
     // some elements could be untouched. We set stageFlags to 0 so the UI ignores these
     // elements
     Binding()
-        : descriptorType(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER),
-          descriptorCount(1),
+        : descriptorType(VK_DESCRIPTOR_TYPE_MAX_ENUM),
+          elemOffset(0),
+          descriptorCount(0),
           stageFlags(0),
+          variableSize(0),
           immutableSampler(NULL)
     {
+    }
+    // move the immutable sampler
+    Binding(Binding &&b)
+        : descriptorType(b.descriptorType),
+          elemOffset(b.elemOffset),
+          descriptorCount(b.descriptorCount),
+          stageFlags(b.stageFlags),
+          variableSize(b.variableSize),
+          immutableSampler(b.immutableSampler)
+    {
+      b.immutableSampler = NULL;
     }
     // Copy the immutable sampler
     Binding(const Binding &b)
         : descriptorType(b.descriptorType),
+          elemOffset(b.elemOffset),
           descriptorCount(b.descriptorCount),
           stageFlags(b.stageFlags),
+          variableSize(b.variableSize),
           immutableSampler(NULL)
     {
       if(b.immutableSampler)
@@ -95,8 +122,10 @@ struct DescSetLayout
         return *this;
 
       descriptorType = b.descriptorType;
+      elemOffset = b.elemOffset;
       descriptorCount = b.descriptorCount;
       stageFlags = b.stageFlags;
+      variableSize = b.variableSize;
       SAFE_DELETE_ARRAY(immutableSampler);
       if(b.immutableSampler)
       {
@@ -107,14 +136,20 @@ struct DescSetLayout
     }
     ~Binding() { SAFE_DELETE_ARRAY(immutableSampler); }
     VkDescriptorType descriptorType;
+    uint32_t elemOffset;
     uint32_t descriptorCount;
-    VkShaderStageFlags stageFlags;
+    VkShaderStageFlags stageFlags : 31;
+    uint32_t variableSize : 1;
     ResourceId *immutableSampler;
   };
   rdcarray<Binding> bindings;
 
+  uint32_t totalElems;
   uint32_t dynamicCount;
   VkDescriptorSetLayoutCreateFlags flags;
+
+  uint32_t inlineCount;
+  uint32_t inlineByteSize;
 
   bool operator==(const DescSetLayout &other) const;
   bool operator!=(const DescSetLayout &other) const { return !(*this == other); }
@@ -125,6 +160,8 @@ struct DescUpdateTemplateApplication
   rdcarray<VkDescriptorBufferInfo> bufInfo;
   rdcarray<VkDescriptorImageInfo> imgInfo;
   rdcarray<VkBufferView> bufView;
+  rdcarray<VkWriteDescriptorSetInlineUniformBlockEXT> inlineUniform;
+  bytebuf inlineData;
 
   rdcarray<VkWriteDescriptorSet> writes;
 };
@@ -140,11 +177,13 @@ struct DescUpdateTemplate
 
   VkPipelineBindPoint bindPoint;
 
-  size_t dataByteSize;
+  size_t unwrapByteSize;
 
   uint32_t texelBufferViewCount;
   uint32_t bufferInfoCount;
   uint32_t imageInfoCount;
+  uint32_t inlineInfoCount;
+  uint32_t inlineByteSize;
 
   rdcarray<VkDescriptorUpdateTemplateEntry> updates;
 };
@@ -335,7 +374,7 @@ struct VulkanCreationInfo
     rdcarray<VkRect2D> discardRectangles;
     VkDiscardRectangleModeEXT discardMode;
   };
-  std::map<ResourceId, Pipeline> m_Pipeline;
+  std::unordered_map<ResourceId, Pipeline> m_Pipeline;
 
   struct PipelineLayout
   {
@@ -345,7 +384,7 @@ struct VulkanCreationInfo
     rdcarray<VkPushConstantRange> pushRanges;
     rdcarray<ResourceId> descSetLayouts;
   };
-  std::map<ResourceId, PipelineLayout> m_PipelineLayout;
+  std::unordered_map<ResourceId, PipelineLayout> m_PipelineLayout;
 
   struct RenderPass
   {
@@ -356,6 +395,7 @@ struct VulkanCreationInfo
 
     struct Attachment
     {
+      bool used;
       VkAttachmentDescriptionFlags flags;
       VkFormat format;
       VkSampleCountFlagBits samples;
@@ -396,7 +436,7 @@ struct VulkanCreationInfo
     // in the layout that the subpass uses
     rdcarray<VkRenderPass> loadRPs;
   };
-  std::map<ResourceId, RenderPass> m_RenderPass;
+  std::unordered_map<ResourceId, RenderPass> m_RenderPass;
 
   struct Framebuffer
   {
@@ -416,7 +456,7 @@ struct VulkanCreationInfo
     // See above in loadRPs - we need to duplicate and make framebuffer equivalents for each
     rdcarray<VkFramebuffer> loadFBs;
   };
-  std::map<ResourceId, Framebuffer> m_Framebuffer;
+  std::unordered_map<ResourceId, Framebuffer> m_Framebuffer;
 
   struct Memory
   {
@@ -427,8 +467,26 @@ struct VulkanCreationInfo
     uint64_t size;
 
     VkBuffer wholeMemBuf;
+
+    enum MemoryBinding
+    {
+      None = 0x0,
+      Linear = 0x1,
+      Tiled = 0x2,
+      LinearAndTiled = 0x3,
+    };
+
+    Intervals<MemoryBinding> bindings;
+
+    void BindMemory(uint64_t offs, uint64_t sz, MemoryBinding b)
+    {
+      bindings.update(offs, offs + sz, b,
+                      [](MemoryBinding a, MemoryBinding b) { return MemoryBinding(a | b); });
+    }
+
+    void SimplifyBindings();
   };
-  std::map<ResourceId, Memory> m_Memory;
+  std::unordered_map<ResourceId, Memory> m_Memory;
 
   struct Buffer
   {
@@ -438,8 +496,9 @@ struct VulkanCreationInfo
     VkBufferUsageFlags usage;
     uint64_t size;
     uint64_t gpuAddress;
+    bool external;
   };
-  std::map<ResourceId, Buffer> m_Buffer;
+  std::unordered_map<ResourceId, Buffer> m_Buffer;
 
   struct BufferView
   {
@@ -451,7 +510,7 @@ struct VulkanCreationInfo
     uint64_t offset;
     uint64_t size;
   };
-  std::map<ResourceId, BufferView> m_BufferView;
+  std::unordered_map<ResourceId, BufferView> m_BufferView;
 
   struct Image
   {
@@ -461,13 +520,15 @@ struct VulkanCreationInfo
     VkImageType type;
     VkFormat format;
     VkExtent3D extent;
-    int arrayLayers, mipLevels;
+    uint32_t arrayLayers, mipLevels;
     VkSampleCountFlagBits samples;
 
+    bool linear;
+    bool external;
     bool cube;
     TextureCategory creationFlags;
   };
-  std::map<ResourceId, Image> m_Image;
+  std::unordered_map<ResourceId, Image> m_Image;
 
   struct Sampler
   {
@@ -486,11 +547,19 @@ struct VulkanCreationInfo
     float maxLod;
     VkBorderColor borderColor;
     bool unnormalizedCoordinates;
+
+    // VkSamplerReductionModeCreateInfo
     VkSamplerReductionMode reductionMode;
 
+    // VkSamplerYcbcrConversionInfo
     ResourceId ycbcr;
+
+    // VkSamplerCustomBorderColorCreateInfoEXT
+    bool customBorder;
+    VkClearColorValue customBorderColor;
+    VkFormat customBorderFormat;
   };
-  std::map<ResourceId, Sampler> m_Sampler;
+  std::unordered_map<ResourceId, Sampler> m_Sampler;
 
   struct YCbCrSampler
   {
@@ -505,7 +574,7 @@ struct VulkanCreationInfo
     FilterMode chromaFilter;
     bool forceExplicitReconstruction;
   };
-  std::map<ResourceId, YCbCrSampler> m_YCbCrSampler;
+  std::unordered_map<ResourceId, YCbCrSampler> m_YCbCrSampler;
 
   struct ImageView
   {
@@ -518,7 +587,7 @@ struct VulkanCreationInfo
     VkImageSubresourceRange range;
     VkComponentMapping componentMapping;
   };
-  std::map<ResourceId, ImageView> m_ImageView;
+  std::unordered_map<ResourceId, ImageView> m_ImageView;
 
   struct ShaderModule
   {
@@ -542,7 +611,7 @@ struct VulkanCreationInfo
 
     std::map<ShaderModuleReflectionKey, ShaderModuleReflection> m_Reflections;
   };
-  std::map<ResourceId, ShaderModule> m_ShaderModule;
+  std::unordered_map<ResourceId, ShaderModule> m_ShaderModule;
 
   struct DescSetPool
   {
@@ -556,18 +625,30 @@ struct VulkanCreationInfo
 
     rdcarray<VkDescriptorPool> overflow;
   };
-  std::map<ResourceId, DescSetPool> m_DescSetPool;
+  std::unordered_map<ResourceId, DescSetPool> m_DescSetPool;
 
-  std::map<ResourceId, rdcstr> m_Names;
-  std::map<ResourceId, SwapchainInfo> m_SwapChain;
-  std::map<ResourceId, DescSetLayout> m_DescSetLayout;
-  std::map<ResourceId, DescUpdateTemplate> m_DescUpdateTemplate;
+  struct QueryPool
+  {
+    void Init(VulkanResourceManager *resourceMan, VulkanCreationInfo &info,
+              const VkQueryPoolCreateInfo *pCreateInfo);
+
+    VkQueryType queryType;
+    uint32_t queryCount;
+    VkQueryPipelineStatisticFlags pipelineStatistics;
+  };
+  std::unordered_map<ResourceId, QueryPool> m_QueryPool;
+
+  std::unordered_map<ResourceId, rdcstr> m_Names;
+  std::unordered_map<ResourceId, SwapchainInfo> m_SwapChain;
+  std::unordered_map<ResourceId, DescSetLayout> m_DescSetLayout;
+  std::unordered_map<ResourceId, DescUpdateTemplate> m_DescUpdateTemplate;
 
   // just contains the queueFamilyIndex (after remapping)
-  std::map<ResourceId, uint32_t> m_Queue;
+  std::unordered_map<ResourceId, uint32_t> m_Queue;
 
   void erase(ResourceId id)
   {
+    m_QueryPool.erase(id);
     m_Pipeline.erase(id);
     m_PipelineLayout.erase(id);
     m_RenderPass.erase(id);

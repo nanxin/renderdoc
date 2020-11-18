@@ -995,9 +995,9 @@ struct ShaderConstant
   DOCUMENT("The name of this constant");
   rdcstr name;
   DOCUMENT("The byte offset of this constant relative to the parent structure");
-  uint32_t byteOffset;
+  uint32_t byteOffset = 0;
   DOCUMENT("If this constant is no larger than a 64-bit constant, gives a default value for it.");
-  uint64_t defaultValue;
+  uint64_t defaultValue = 0;
   DOCUMENT(
       "A :class:`ShaderVariableType` giving details of the type information for this constant.");
   ShaderVariableType type;
@@ -1269,6 +1269,17 @@ The first entry in the list is always the file where the entry point is.
 
   DOCUMENT("The :class:`ShaderEncoding` of the source. See :data:`files`.");
   ShaderEncoding encoding = ShaderEncoding::Unknown;
+
+  DOCUMENT(R"(Indicates whether this particular shader can be debugged. In some cases even if the
+API can debug shaders in general, specific shaders cannot be debugged because they use unsupported
+functionality
+)");
+  bool debuggable = true;
+
+  DOCUMENT(R"(If :data:`debuggable` is false then this contains a simple explanation of why the
+shader is not supported for debugging
+)");
+  rdcstr debugStatus;
 };
 
 DECLARE_REFLECTION_STRUCT(ShaderDebugInfo);

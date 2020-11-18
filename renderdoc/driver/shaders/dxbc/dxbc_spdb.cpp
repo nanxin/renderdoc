@@ -42,6 +42,20 @@ namespace DXBC
 {
 static const uint32_t FOURCC_SPDB = MAKE_FOURCC('S', 'P', 'D', 'B');
 
+bool IsPDBFile(void *data, size_t length)
+{
+  FileHeaderPage *header = (FileHeaderPage *)data;
+
+  if(length < sizeof(FileHeaderPage))
+    return false;
+
+  if(memcmp(header->identifier, "Microsoft C/C++ MSF 7.00\r\n\032DS\0\0",
+            sizeof(header->identifier)) != 0)
+    return false;
+
+  return true;
+}
+
 SPDBChunk::SPDBChunk(void *chunk)
 {
   m_HasDebugInfo = false;
@@ -64,8 +78,7 @@ SPDBChunk::SPDBChunk(void *chunk)
 
   FileHeaderPage *header = (FileHeaderPage *)data;
 
-  if(memcmp(header->identifier, "Microsoft C/C++ MSF 7.00\r\n\032DS\0\0",
-            sizeof(header->identifier)) != 0)
+  if(!IsPDBFile(data, spdblength))
   {
     RDCWARN("Unexpected SPDB type");
     return;
@@ -172,7 +185,7 @@ SPDBChunk::SPDBChunk(void *chunk)
       if(filename[0] == 0)
         filename = "shader";
 
-      Files.push_back({filename, (char *)fileContents.Data()});
+      Files.push_back({filename, rdcstr((const char *)fileContents.Data(), s.byteLength)});
     }
   }
 
@@ -1174,7 +1187,9 @@ SPDBChunk::SPDBChunk(void *chunk)
 
         const TypeDesc *vartype = &typeInfo[localType];
 
-        RDCASSERT(varOffset + varLen <= vartype->byteSize);
+        RDCASSERT((varOffset + varLen <= vartype->byteSize) ||
+                      (vartype->byteSize == 0 && vartype->leafType == LF_STRIDED_ARRAY),
+                  varOffset, varLen, vartype->byteSize, (uint32_t)vartype->leafType);
 
         uint32_t varTypeByteSize = vartype->byteSize;
 
@@ -1253,7 +1268,8 @@ SPDBChunk::SPDBChunk(void *chunk)
         {
           // number of rows is the number of vectors in the matrix's total byte size (each vector is
           // a row)
-          mapping.var.rows = uint8_t(varTypeByteSize / vartype->matArrayStride);
+          mapping.var.rows =
+              uint8_t((varTypeByteSize + vartype->matArrayStride - 1) / vartype->matArrayStride);
 
           // unless this is a column major matrix, in which case each vector is a column so swap the
           // rows/columns (the number of ROWS is the vector size, when each vector is a column)
@@ -1293,7 +1309,7 @@ SPDBChunk::SPDBChunk(void *chunk)
 
             // if this is an array, the index is just the array index. However if we're mapping the
             // whole array, don't add the index as the mapping will do that for us
-            if(varLen < mapping.var.elements * vartype->matArrayStride)
+            if(varLen < varTypeByteSize)
             {
               mapping.var.name += StringFormat::Fmt("[%u]", idx);
 
@@ -1698,7 +1714,7 @@ bool SPDBChunk::HasSourceMapping() const
   return true;
 }
 
-void SPDBChunk::GetLocals(DXBCBytecode::Program *program, size_t instruction, uintptr_t offset,
+void SPDBChunk::GetLocals(const DXBC::DXBCContainer *dxbc, size_t instruction, uintptr_t offset,
                           rdcarray<SourceVariableMapping> &locals) const
 {
   locals.clear();
@@ -1733,10 +1749,11 @@ void SPDBChunk::GetLocals(DXBCBytecode::Program *program, size_t instruction, ui
     // it's possible to declare coverage input but then not use it. We then get a local that
     // doesn't map to any register because the register declaration is stripped.
     // this doesn't happen on output because outputs don't get stripped in the same way.
-    if(it->regType == DXBCBytecode::TYPE_INPUT_COVERAGE_MASK && !program->HasCoverageInput())
+    if(it->regType == DXBCBytecode::TYPE_INPUT_COVERAGE_MASK &&
+       !dxbc->GetDXBCByteCode()->HasCoverageInput())
       continue;
 
-    range.name = program->GetRegisterName(it->regType, it->regIndex);
+    range.name = dxbc->GetDXBCByteCode()->GetRegisterName(it->regType, it->regIndex);
     range.component = it->regFirstComp;
 
     if(IsInput(it->regType))
@@ -1816,6 +1833,79 @@ void SPDBChunk::GetLocals(DXBCBytecode::Program *program, size_t instruction, ui
 IDebugInfo *MakeSPDBChunk(void *data)
 {
   return new SPDBChunk(data);
+}
+
+void UnwrapEmbeddedPDBData(bytebuf &bytes)
+{
+  if(!IsPDBFile(bytes.data(), bytes.size()))
+    return;
+
+  FileHeaderPage *header = (FileHeaderPage *)bytes.data();
+
+  uint32_t pageCount = header->PageCount;
+
+  if(pageCount * header->PageSize != bytes.size())
+  {
+    RDCWARN("Corrupt header/pdb. %u pages of %u size doesn't match %zu file size", pageCount,
+            header->PageSize, bytes.size());
+
+    // some DXC versions write the wrong page count, just count ourselves from the file size.
+    if((bytes.size() % header->PageSize) == 0)
+    {
+      header->PageCount = (uint32_t)bytes.size() / header->PageSize;
+      RDCWARN("Correcting page count to %u by dividing file size %zu by page size %u.",
+              header->PageCount, bytes.size(), header->PageSize);
+    }
+  }
+
+  const byte **pages = new const byte *[header->PageCount];
+  for(uint32_t i = 0; i < header->PageCount; i++)
+    pages[i] = &bytes[i * header->PageSize];
+
+  uint32_t rootdirCount = header->PagesForByteSize(header->RootDirSize);
+  uint32_t rootDirIndicesCount = header->PagesForByteSize(rootdirCount * sizeof(uint32_t));
+
+  PageMapping rootdirIndicesMapping(pages, header->PageSize, header->RootDirectory,
+                                    rootDirIndicesCount);
+  const byte *rootdirIndices = rootdirIndicesMapping.Data();
+
+  PageMapping directoryMapping(pages, header->PageSize, (uint32_t *)rootdirIndices, rootdirCount);
+  const uint32_t *dirContents = (const uint32_t *)directoryMapping.Data();
+
+  rdcarray<PDBStream> streams;
+
+  streams.resize(*dirContents);
+  dirContents++;
+
+  SPDBLOG("SPDB contains %zu streams", streams.size());
+
+  for(size_t i = 0; i < streams.size(); i++)
+  {
+    streams[i].byteLength = *dirContents;
+    SPDBLOG("Stream[%zu] is %u bytes", i, streams[i].byteLength);
+    dirContents++;
+  }
+
+  for(size_t i = 0; i < streams.size(); i++)
+  {
+    if(streams[i].byteLength == 0)
+      continue;
+
+    for(uint32_t p = 0; p < header->PagesForByteSize(streams[i].byteLength); p++)
+    {
+      streams[i].pageIndices.push_back(*dirContents);
+      dirContents++;
+    }
+  }
+
+  if(streams.size() < 5)
+    return;
+
+  // stream 5 is expected to contain the embedded data
+  PageMapping embeddedData(pages, header->PageSize, &streams[5].pageIndices[0],
+                           (uint32_t)streams[5].pageIndices.size());
+
+  bytes.assign(embeddedData.Data(), streams[5].byteLength);
 }
 
 };    // namespace DXBC

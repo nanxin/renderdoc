@@ -29,6 +29,7 @@
 #include "api/replay/version.h"
 #include "common/common.h"
 #include "common/threading.h"
+#include "core/settings.h"
 #include "hooks/hooks.h"
 #include "maths/formatpacking.h"
 #include "replay/replay_driver.h"
@@ -43,6 +44,9 @@
 #include "api/replay/pipestate.inl"
 
 #include "replay/renderdoc_serialise.inl"
+
+RDOC_DEBUG_CONFIG(bool, Capture_Debug_SnapshotDiagnosticLog, false,
+                  "Snapshot the diagnostic log at capture time and embed in the capture.");
 
 void LogReplayOptions(const ReplayOptions &opts)
 {
@@ -348,8 +352,14 @@ void RenderDoc::Initialise()
   m_RemoteIdent = 0;
   m_RemoteThread = 0;
 
+  m_TimeBase = 0;
+  m_TimeFrequency = 1.0;
+
   if(!IsReplayApp())
   {
+    m_TimeBase = Timing::GetTick();
+    m_TimeFrequency = Timing::GetTickFrequency() / 1000.0;
+
     Process::ApplyEnvironmentModification();
 
     uint32_t port = RenderDoc_FirstTargetControlPort;
@@ -482,7 +492,7 @@ RenderDoc::~RenderDoc()
     }
   }
 
-  RDCSTOPLOGGING(m_LoggingFilename.c_str());
+  RDCSTOPLOGGING();
 
   if(m_RemoteThread)
   {
@@ -825,6 +835,27 @@ void RenderDoc::Tick()
 
   prev_focus = cur_focus;
   prev_cap = cur_cap;
+
+  // check for any child threads that need to be waited on, remove them from the list
+  rdcarray<Threading::ThreadHandle> waitThreads;
+  {
+    SCOPED_LOCK(m_ChildLock);
+    for(rdcpair<uint32_t, Threading::ThreadHandle> &c : m_ChildThreads)
+    {
+      if(c.first == 0)
+        waitThreads.push_back(c.second);
+    }
+
+    m_ChildThreads.removeIf(
+        [](const rdcpair<uint32_t, Threading::ThreadHandle> &c) { return c.first == 0; });
+  }
+
+  // clean up the threads now
+  for(Threading::ThreadHandle t : waitThreads)
+  {
+    Threading::JoinThread(t);
+    Threading::CloseThread(t);
+  }
 }
 
 void RenderDoc::CycleActiveWindow()
@@ -944,18 +975,21 @@ rdcstr RenderDoc::GetOverlayText(RDCDriver driver, uint32_t frameNumber, int fla
                                        m_WindowFrameCapturers.size());
     }
 
-    for(size_t i = 0; i < keys.size(); i++)
+    if(Keyboard::PlatformHasKeyInput())
     {
-      if(i == 0)
-        overlayText += " ";
-      else
-        overlayText += ", ";
+      for(size_t i = 0; i < keys.size(); i++)
+      {
+        if(i == 0)
+          overlayText += " ";
+        else
+          overlayText += ", ";
 
-      overlayText += ToStr(keys[i]);
+        overlayText += ToStr(keys[i]);
+      }
+
+      if(!keys.empty())
+        overlayText += " to cycle between windows";
     }
-
-    if(!keys.empty())
-      overlayText += " to cycle between windows";
 
     overlayText += "\n";
   }
@@ -1014,11 +1048,10 @@ void RenderDoc::ResamplePixels(const FramePixels &in, RDCThumb &out)
   out.width = (uint16_t)RDCMIN(in.max_width, in.width);
   out.width &= ~(in.pitch_requirement - 1);    // align down to multiple of in.
   out.height = uint16_t(out.width * in.height / in.width);
-  out.len = 3 * out.width * out.height;
-  out.pixels = new byte[out.len];
+  out.pixels.resize(3 * out.width * out.height);
   out.format = FileType::Raw;
 
-  byte *dst = (byte *)out.pixels;
+  byte *dst = (byte *)out.pixels.data();
   byte *source = (byte *)in.data;
 
   for(uint32_t y = 0; y < out.height; y++)
@@ -1088,7 +1121,7 @@ void RenderDoc::ResamplePixels(const FramePixels &in, RDCThumb &out)
       uint16_t flipY = (out.height - 1 - y);
       for(uint16_t x = 0; x < out.width; x++)
       {
-        byte *src = (byte *)out.pixels;
+        byte *src = (byte *)out.pixels.data();
         byte save[3];
         save[0] = src[(y * out.width + x) * 3 + 0];
         save[1] = src[(y * out.width + x) * 3 + 1];
@@ -1127,12 +1160,10 @@ void RenderDoc::EncodePixelsPNG(const RDCThumb &in, RDCThumb &out)
 
   WriteCallbackData callbackData;
   stbi_write_png_to_func(&WriteCallbackData::writeData, &callbackData, in.width, in.height, 3,
-                         in.pixels, 0);
+                         in.pixels.data(), 0);
   out.width = in.width;
   out.height = in.height;
-  out.pixels = new byte[callbackData.buffer.size()];
-  memcpy((void *)out.pixels, callbackData.buffer.data(), callbackData.buffer.size());
-  out.len = (uint32_t)callbackData.buffer.size();
+  out.pixels.swap(callbackData.buffer);
   out.format = FileType::PNG;
 }
 
@@ -1169,7 +1200,8 @@ RDCFile *RenderDoc::CreateRDC(RDCDriver driver, uint32_t frameNum, const FramePi
     EncodePixelsPNG(outRaw, outPng);
   }
 
-  ret->SetData(driver, ToStr(driver).c_str(), OSUtility::GetMachineIdent(), &outPng);
+  ret->SetData(driver, ToStr(driver).c_str(), OSUtility::GetMachineIdent(), &outPng, m_TimeBase,
+               m_TimeFrequency);
 
   FileIO::CreateParentDirectory(m_CurrentLogFile);
 
@@ -1180,9 +1212,6 @@ RDCFile *RenderDoc::CreateRDC(RDCDriver driver, uint32_t frameNum, const FramePi
     RDCERR("Error creating RDC at '%s'", m_CurrentLogFile.c_str());
     SAFE_DELETE(ret);
   }
-
-  SAFE_DELETE_ARRAY(outRaw.pixels);
-  SAFE_DELETE_ARRAY(outPng.pixels);
 
   return ret;
 }
@@ -1650,10 +1679,27 @@ void RenderDoc::FinishCaptureWriting(RDCFile *rdc, uint32_t frameNumber)
       ExtThumbnailHeader header;
       header.width = thumb.width;
       header.height = thumb.height;
-      header.len = thumb.len;
       header.format = thumb.format;
+      header.len = (uint32_t)thumb.pixels.size();
       w->Write(header);
-      w->Write(thumb.pixels, thumb.len);
+      w->Write(thumb.pixels.data(), thumb.pixels.size());
+
+      w->Finish();
+
+      delete w;
+    }
+
+    if(Capture_Debug_SnapshotDiagnosticLog())
+    {
+      rdcstr logcontents = FileIO::logfile_readall(0, RDCGETLOGFILE());
+
+      SectionProperties props = {};
+      props.type = SectionType::EmbeddedLogfile;
+      props.version = 1;
+      props.flags = SectionFlags::LZ4Compressed;
+      StreamWriter *w = rdc->WriteSection(props);
+
+      w->Write(logcontents.data(), logcontents.size());
 
       w->Finish();
 
@@ -1684,10 +1730,27 @@ void RenderDoc::AddChildProcess(uint32_t pid, uint32_t ident)
   m_Children.push_back(make_rdcpair(pid, ident));
 }
 
-rdcarray<rdcpair<uint32_t, uint32_t> > RenderDoc::GetChildProcesses()
+rdcarray<rdcpair<uint32_t, uint32_t>> RenderDoc::GetChildProcesses()
 {
   SCOPED_LOCK(m_ChildLock);
   return m_Children;
+}
+
+void RenderDoc::CompleteChildThread(uint32_t pid)
+{
+  SCOPED_LOCK(m_ChildLock);
+  // the thread for this PID is done, mark it as ready to wait on by zero-ing out the PID
+  for(rdcpair<uint32_t, Threading::ThreadHandle> &c : m_ChildThreads)
+  {
+    if(c.first == pid)
+      c.first = 0;
+  }
+}
+
+void RenderDoc::AddChildThread(uint32_t pid, Threading::ThreadHandle thread)
+{
+  SCOPED_LOCK(m_ChildLock);
+  m_ChildThreads.push_back(make_rdcpair(pid, thread));
 }
 
 rdcarray<CaptureData> RenderDoc::GetCaptures()
@@ -1787,8 +1850,12 @@ void RenderDoc::RemoveFrameCapturer(void *dev, void *wnd)
 
     if(it->second.RefCount <= 0)
     {
+      RDCLOG("Removed last refcount");
+
       if(m_ActiveWindow == dw)
       {
+        RDCLOG("Removed active window");
+
         if(m_WindowFrameCapturers.size() == 1)
         {
           m_ActiveWindow = DeviceWnd();

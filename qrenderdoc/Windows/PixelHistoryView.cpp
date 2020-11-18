@@ -281,7 +281,7 @@ public:
               if(mod.primitiveID == ~0U)
                 ret = tr("Unknown primitive\n");
 
-              if(mod.shaderDiscarded)
+              if(!mod.Passed())
                 ret += failureString(mod);
 
               return ret;
@@ -365,7 +365,7 @@ public:
         }
         else
         {
-          if(getMod(index).shaderDiscarded)
+          if(!getMod(index).Passed())
             return QBrush(QColor::fromRgb(255, 235, 235));
         }
       }
@@ -382,7 +382,7 @@ public:
         }
         else
         {
-          if(getMod(index).shaderDiscarded)
+          if(!getMod(index).Passed())
             return QBrush(textColor);
         }
       }
@@ -476,6 +476,9 @@ private:
 
   QBrush backgroundBrush(const ModificationValue &val) const
   {
+    if(!val.IsValid())
+      return QBrush();
+
     float rangesize = (m_Display.rangeMax - m_Display.rangeMin);
 
     float r = val.col.floatValue[0];
@@ -520,6 +523,9 @@ private:
   QString modString(const ModificationValue &val, int forceComps = 0) const
   {
     QString s;
+
+    if(!val.IsValid())
+      return tr("Unavailable");
 
     int numComps = (int)(m_Tex->format.compCount);
 
@@ -574,6 +580,8 @@ private:
       s += tr("\nBackface culled");
     if(mod.depthClipped)
       s += tr("\nDepth Clipped");
+    if(mod.depthBoundsFailed)
+      s += tr("\nDepth bounds test failed");
     if(mod.scissorClipped)
       s += tr("\nScissor Clipped");
     if(mod.shaderDiscarded)
@@ -716,6 +724,29 @@ void PixelHistoryView::startDebug(EventTag tag)
 {
   m_Ctx.SetEventID({this}, tag.eventId, tag.eventId);
 
+  const ShaderReflection *shaderDetails =
+      m_Ctx.CurPipelineState().GetShaderReflection(ShaderStage::Pixel);
+
+  if(!m_Ctx.APIProps().shaderDebugging)
+  {
+    RDDialog::critical(this, tr("Can't debug pixel"),
+                       tr("This API does not support shader debugging"));
+    return;
+  }
+  else if(!shaderDetails)
+  {
+    RDDialog::critical(this, tr("Can't debug pixel"),
+                       tr("No pixel shader bound at event %1").arg(tag.eventId));
+    return;
+  }
+  else if(!shaderDetails->debugInfo.debuggable)
+  {
+    RDDialog::critical(
+        this, tr("Can't debug pixel"),
+        tr("This shader doesn't support debugging: %1").arg(shaderDetails->debugInfo.debugStatus));
+    return;
+  }
+
   bool done = false;
   ShaderDebugTrace *trace = NULL;
 
@@ -748,8 +779,6 @@ void PixelHistoryView::startDebug(EventTag tag)
     return;
   }
 
-  const ShaderReflection *shaderDetails =
-      m_Ctx.CurPipelineState().GetShaderReflection(ShaderStage::Pixel);
   const ShaderBindpointMapping &bindMapping =
       m_Ctx.CurPipelineState().GetBindpointMapping(ShaderStage::Pixel);
   ResourceId pipeline = m_Ctx.CurPipelineState().GetGraphicsPipelineObject();
@@ -831,6 +860,14 @@ void PixelHistoryView::on_events_customContextMenuRequested(const QPoint &pos)
   QAction debugAction(debugText, this);
 
   contextMenu.addAction(&debugAction);
+
+  if(!m_Ctx.APIProps().shaderDebugging)
+  {
+    debugAction.setToolTip(tr("This API does not support shader debugging"));
+    debugAction.setEnabled(false);
+  }
+
+  // can't check if the shader supports debugging here because we don't have its details.
 
   QObject::connect(&jumpAction, &QAction::triggered, [this, tag]() { jumpToPrimitive(tag); });
   QObject::connect(&debugAction, &QAction::triggered, [this, tag]() { startDebug(tag); });

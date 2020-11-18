@@ -40,7 +40,6 @@
 // warning C4522: 'Shiboken::AutoDecRef': multiple assignment operators specified
 #pragma warning(disable : 4522)
 #include <pyside.h>
-#include <pyside2_qtwidgets_python.h>
 #include <shiboken.h>
 
 PyTypeObject **SbkPySide2_QtCoreTypes = NULL;
@@ -56,6 +55,11 @@ PyTypeObject **SbkPySide2_QtWidgetsTypes = NULL;
 
 #endif
 
+#ifdef _MSC_VER
+// for the LoadLibrary call on 32-bit windows
+#include <windows.h>
+#endif
+
 #include <QApplication>
 #include <QDebug>
 #include <QDir>
@@ -69,8 +73,8 @@ PyTypeObject **SbkPySide2_QtWidgetsTypes = NULL;
 #include "version.h"
 
 // exported by generated files, used to check interface compliance
-bool CheckCoreInterface();
-bool CheckQtInterface();
+bool CheckCoreInterface(rdcstr &log);
+bool CheckQtInterface(rdcstr &log);
 
 // defined in SWIG-generated renderdoc_python.cpp
 extern "C" PyObject *PyInit_renderdoc(void);
@@ -342,6 +346,14 @@ void PythonContext::GlobalInit()
 // set up PySide
 #if PYSIDE2_ENABLED
   {
+// hack for win32 builds, where our pyside2 accidentally depends on Qt5Qml.dll for no good
+// reason and we ship a stub to allow the dll to load instead of rebuilding the whole of pyside2
+// :S
+#if defined(_MSC_VER) && !defined(_M_X64)
+    QString Qt5QmlStub = QApplication::applicationDirPath() + lit("/PySide2/Qt5Qml.dll");
+    LoadLibraryA(Qt5QmlStub.toUtf8().data());
+#endif
+
     Shiboken::AutoDecRef core(Shiboken::Module::import("PySide2.QtCore"));
     if(!core.isNull())
       SbkPySide2_QtCoreTypes = Shiboken::Module::getTypes(core);
@@ -457,13 +469,13 @@ PythonContext::~PythonContext()
   outputTick();
 }
 
-bool PythonContext::CheckInterfaces()
+bool PythonContext::CheckInterfaces(rdcstr &log)
 {
   bool errors = false;
 
   PyGILState_STATE gil = PyGILState_Ensure();
-  errors |= CheckCoreInterface();
-  errors |= CheckQtInterface();
+  errors |= CheckCoreInterface(log);
+  errors |= CheckQtInterface(log);
   PyGILState_Release(gil);
 
   return errors;

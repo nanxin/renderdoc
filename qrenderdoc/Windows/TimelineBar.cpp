@@ -25,6 +25,7 @@
 #include "TimelineBar.h"
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QScrollBar>
 #include <QWheelEvent>
 #include "Code/QRDUtils.h"
@@ -816,7 +817,7 @@ void TimelineBar::paintEvent(QPaintEvent *e)
         {
           pipranges[WriteUsage].push(pos, triRadius);
         }
-        else if(use.usage == ResourceUsage::Clear)
+        else if(use.usage == ResourceUsage::Clear || use.usage == ResourceUsage::Discard)
         {
           pipranges[ClearUsage].push(pos, triRadius);
         }
@@ -944,7 +945,7 @@ void TimelineBar::paintMarkers(QPainter &p, const QVector<Marker> &markers,
 
     // if everything was elided, just omit the title entirely
     if(elided == tooshort)
-      elided = QString();
+      elided.clear();
 
     r.setLeft(qRound(r.left() + margin));
 

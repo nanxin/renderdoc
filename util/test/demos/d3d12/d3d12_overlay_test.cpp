@@ -105,6 +105,12 @@ float4 main() : SV_Target0
         {Vec3f(0.0f, 0.7f, 0.5f), Vec4f(1.0f, 0.5f, 1.0f, 1.0f), Vec2f(0.0f, 0.0f)},
         {Vec3f(0.0f, 0.725f, 0.5f), Vec4f(1.0f, 0.5f, 1.0f, 1.0f), Vec2f(0.0f, 1.0f)},
         {Vec3f(0.025f, 0.7f, 0.5f), Vec4f(1.0f, 0.5f, 1.0f, 1.0f), Vec2f(1.0f, 0.0f)},
+
+        // this triangle deliberately goes out of the viewport, it will test viewport & scissor
+        // clipping
+        {Vec3f(-1.3f, -1.3f, 0.95f), Vec4f(0.1f, 0.1f, 0.5f, 1.0f), Vec2f(0.0f, 0.0f)},
+        {Vec3f(0.0f, 1.3f, 0.95f), Vec4f(0.1f, 0.1f, 0.5f, 1.0f), Vec2f(0.0f, 1.0f)},
+        {Vec3f(1.3f, -1.3f, 0.95f), Vec4f(0.1f, 0.1f, 0.5f, 1.0f), Vec2f(1.0f, 0.0f)},
     };
 
     ID3D12ResourcePtr vb = MakeBuffer().Data(VBData);
@@ -146,6 +152,7 @@ float4 main() : SV_Target0
     creator.GraphicsDesc.DepthStencilState.StencilEnable = FALSE;
     creator.GraphicsDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
     creator.PS(whitepsblob);
+    creator.DSV(DXGI_FORMAT_UNKNOWN);
     ID3D12PipelineStatePtr whitepipe = creator;
 
     ResourceBarrier(vb, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
@@ -202,6 +209,13 @@ float4 main() : SV_Target0
 
       cmd->SetPipelineState(pipe);
       cmd->DrawInstanced(24, 1, 9, 0);
+
+      setMarker(cmd, "Viewport Test");
+
+      RSSetViewport(cmd, {10.0f, 10.0f, 80.0f, 80.0f, 0.0f, 1.0f});
+      RSSetScissorRect(cmd, {24, 24, 76, 76});
+      cmd->SetPipelineState(backgroundPipe);
+      cmd->DrawInstanced(3, 1, 33, 0);
 
       D3D12_CPU_DESCRIPTOR_HANDLE subrtv = MakeRTV(subtex)
                                                .Format(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB)

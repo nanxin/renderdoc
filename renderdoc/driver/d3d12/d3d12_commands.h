@@ -241,6 +241,11 @@ struct D3D12CommandData
 
   D3D12RenderState m_RenderState;
 
+  D3D12RenderState &GetCurRenderState()
+  {
+    return m_LastCmdListID == ResourceId() ? m_RenderState
+                                           : m_BakedCmdListInfo[m_LastCmdListID].state;
+  }
   enum PartialReplayIndex
   {
     Primary,
@@ -341,6 +346,8 @@ struct D3D12CommandData
 
   ResourceId m_LastPresentedImage;
 
+  uint64_t m_TimeBase = 0;
+  double m_TimeFrequency = 1.0f;
   SDFile *m_StructuredFile;
 
   std::map<ResourceId, rdcarray<EventUsage> > m_ResourceUses;

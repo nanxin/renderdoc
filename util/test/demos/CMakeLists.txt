@@ -8,12 +8,18 @@ set(VULKAN_SRC
         vk/vk_helpers.cpp
         vk/vk_test.cpp
         vk/vk_adv_cbuffer_zoo.cpp
+        vk/vk_buffer_truncation.cpp
         vk/vk_cbuffer_zoo.cpp
+        vk/vk_custom_border_color.cpp
         vk/vk_descriptor_index.cpp
+        vk/vk_descriptor_reuse.cpp
+        vk/vk_descriptor_variable_count.cpp
         vk/vk_discard_rects.cpp
+        vk/vk_discard_zoo.cpp
         vk/vk_draw_zoo.cpp
         vk/vk_empty_capture.cpp
         vk/vk_ext_buffer_address.cpp
+        vk/vk_extended_dyn_state.cpp
         vk/vk_image_layouts.cpp
         vk/vk_imageless_framebuffer.cpp
         vk/vk_indirect.cpp
@@ -26,19 +32,23 @@ set(VULKAN_SRC
         vk/vk_multi_thread_windows.cpp
         vk/vk_overlay_test.cpp
         vk/vk_parameter_zoo.cpp
+        vk/vk_pixel_history.cpp
         vk/vk_query_pool.cpp
         vk/vk_resource_lifetimes.cpp
+        vk/vk_robustness2.cpp
         vk/vk_sample_locations.cpp
         vk/vk_secondary_cmdbuf.cpp
         vk/vk_separate_depth_stencil_layouts.cpp
         vk/vk_shader_debug_zoo.cpp
         vk/vk_shader_editing.cpp
+        vk/vk_shader_isa.cpp
         vk/vk_simple_triangle.cpp
         vk/vk_spec_constants.cpp
         vk/vk_spirv_13_shaders.cpp
         vk/vk_structured_buffer_nested.cpp
         vk/vk_texture_zoo.cpp
         vk/vk_triangle_fan.cpp
+        vk/vk_validation_use.cpp
         vk/vk_vertex_attr_zoo.cpp
         vk/vk_video_textures.cpp
         vk/vk_vs_max_desc_set.cpp)
@@ -49,10 +59,12 @@ set(OPENGL_SRC
         gl/gl_test.cpp
         gl/gl_test_linux.cpp
         gl/gl_buffer_spam.cpp
+        gl/gl_buffer_truncation.cpp
         gl/gl_buffer_updates.cpp
         gl/gl_callstacks.cpp
         gl/gl_cbuffer_zoo.cpp
         gl/gl_depthstencil_fbo.cpp
+        gl/gl_discard_zoo.cpp
         gl/gl_empty_capture.cpp
         gl/gl_entry_points.cpp
         gl/gl_large_bcn_arrays.cpp
@@ -73,6 +85,7 @@ set(OPENGL_SRC
         gl/gl_shader_editing.cpp
         gl/gl_simple_triangle.cpp
         gl/gl_spirv_shader.cpp
+        gl/gl_state_trashing.cpp
         gl/gl_texture_zoo.cpp
         gl/gl_unshared_context.cpp
         gl/gl_unsized_ms_fbo_attachment.cpp

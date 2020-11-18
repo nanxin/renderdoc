@@ -294,9 +294,7 @@ struct WrappedVkCommandBuffer : WrappedVkDispRes
 {
   WrappedVkCommandBuffer(VkCommandBuffer obj, ResourceId objId) : WrappedVkDispRes(obj, objId) {}
   typedef VkCommandBuffer InnerType;
-  static const int AllocPoolCount = 32 * 1024;
-  static const int AllocPoolMaxByteSize = 2 * 1024 * 1024;
-  ALLOCATE_WITH_WRAPPED_POOL(WrappedVkCommandBuffer, AllocPoolCount, AllocPoolMaxByteSize);
+  ALLOCATE_WITH_WRAPPED_POOL(WrappedVkCommandBuffer);
   typedef VkDevDispatchTable DispatchTableType;
   enum
   {
@@ -321,9 +319,7 @@ struct WrappedVkDeviceMemory : WrappedVkNonDispRes
 {
   WrappedVkDeviceMemory(VkDeviceMemory obj, ResourceId objId) : WrappedVkNonDispRes(obj, objId) {}
   typedef VkDeviceMemory InnerType;
-  static const int AllocPoolCount = 128 * 1024;
-  static const int AllocPoolMaxByteSize = 3 * 1024 * 1024;
-  ALLOCATE_WITH_WRAPPED_POOL(WrappedVkDeviceMemory, AllocPoolCount, AllocPoolMaxByteSize);
+  ALLOCATE_WITH_WRAPPED_POOL(WrappedVkDeviceMemory);
   enum
   {
     TypeEnum = eResDeviceMemory,
@@ -333,9 +329,7 @@ struct WrappedVkBuffer : WrappedVkNonDispRes
 {
   WrappedVkBuffer(VkBuffer obj, ResourceId objId) : WrappedVkNonDispRes(obj, objId) {}
   typedef VkBuffer InnerType;
-  static const int AllocPoolCount = 128 * 1024;
-  static const int AllocPoolMaxByteSize = 3 * 1024 * 1024;
-  ALLOCATE_WITH_WRAPPED_POOL(WrappedVkBuffer, AllocPoolCount, AllocPoolMaxByteSize, false);
+  ALLOCATE_WITH_WRAPPED_POOL(WrappedVkBuffer, false);
   enum
   {
     TypeEnum = eResBuffer,
@@ -345,9 +339,7 @@ struct WrappedVkImage : WrappedVkNonDispRes
 {
   WrappedVkImage(VkImage obj, ResourceId objId) : WrappedVkNonDispRes(obj, objId) {}
   typedef VkImage InnerType;
-  static const int AllocPoolCount = 128 * 1024;
-  static const int AllocPoolMaxByteSize = 3 * 1024 * 1024;
-  ALLOCATE_WITH_WRAPPED_POOL(WrappedVkImage, AllocPoolCount, AllocPoolMaxByteSize);
+  ALLOCATE_WITH_WRAPPED_POOL(WrappedVkImage);
   enum
   {
     TypeEnum = eResImage,
@@ -387,9 +379,7 @@ struct WrappedVkBufferView : WrappedVkNonDispRes
 {
   WrappedVkBufferView(VkBufferView obj, ResourceId objId) : WrappedVkNonDispRes(obj, objId) {}
   typedef VkBufferView InnerType;
-  static const int AllocPoolCount = 128 * 1024;
-  static const int AllocPoolMaxByteSize = 3 * 1024 * 1024;
-  ALLOCATE_WITH_WRAPPED_POOL(WrappedVkBufferView, AllocPoolCount, AllocPoolMaxByteSize, false);
+  ALLOCATE_WITH_WRAPPED_POOL(WrappedVkBufferView, false);
   enum
   {
     TypeEnum = eResBufferView,
@@ -399,9 +389,7 @@ struct WrappedVkImageView : WrappedVkNonDispRes
 {
   WrappedVkImageView(VkImageView obj, ResourceId objId) : WrappedVkNonDispRes(obj, objId) {}
   typedef VkImageView InnerType;
-  static const int AllocPoolCount = 128 * 1024;
-  static const int AllocPoolMaxByteSize = 3 * 1024 * 1024;
-  ALLOCATE_WITH_WRAPPED_POOL(WrappedVkImageView, AllocPoolCount, AllocPoolMaxByteSize, false);
+  ALLOCATE_WITH_WRAPPED_POOL(WrappedVkImageView, false);
   enum
   {
     TypeEnum = eResImageView,
@@ -411,8 +399,7 @@ struct WrappedVkShaderModule : WrappedVkNonDispRes
 {
   WrappedVkShaderModule(VkShaderModule obj, ResourceId objId) : WrappedVkNonDispRes(obj, objId) {}
   typedef VkShaderModule InnerType;
-  static const int AllocPoolCount = 32 * 1024;
-  ALLOCATE_WITH_WRAPPED_POOL(WrappedVkShaderModule, AllocPoolCount);
+  ALLOCATE_WITH_WRAPPED_POOL(WrappedVkShaderModule);
   enum
   {
     TypeEnum = eResShaderModule,
@@ -434,8 +421,7 @@ struct WrappedVkPipelineLayout : WrappedVkNonDispRes
   {
   }
   typedef VkPipelineLayout InnerType;
-  static const int AllocPoolCount = 32 * 1024;
-  ALLOCATE_WITH_WRAPPED_POOL(WrappedVkPipelineLayout, AllocPoolCount);
+  ALLOCATE_WITH_WRAPPED_POOL(WrappedVkPipelineLayout);
   enum
   {
     TypeEnum = eResPipelineLayout,
@@ -455,8 +441,7 @@ struct WrappedVkPipeline : WrappedVkNonDispRes
 {
   WrappedVkPipeline(VkPipeline obj, ResourceId objId) : WrappedVkNonDispRes(obj, objId) {}
   typedef VkPipeline InnerType;
-  static const int AllocPoolCount = 32 * 1024;
-  ALLOCATE_WITH_WRAPPED_POOL(WrappedVkPipeline, AllocPoolCount);
+  ALLOCATE_WITH_WRAPPED_POOL(WrappedVkPipeline);
   enum
   {
     TypeEnum = eResPipeline,
@@ -469,8 +454,7 @@ struct WrappedVkDescriptorSetLayout : WrappedVkNonDispRes
   {
   }
   typedef VkDescriptorSetLayout InnerType;
-  static const int AllocPoolCount = 32 * 1024;
-  ALLOCATE_WITH_WRAPPED_POOL(WrappedVkDescriptorSetLayout, AllocPoolCount);
+  ALLOCATE_WITH_WRAPPED_POOL(WrappedVkDescriptorSetLayout);
   enum
   {
     TypeEnum = eResDescriptorSetLayout,
@@ -479,10 +463,8 @@ struct WrappedVkDescriptorSetLayout : WrappedVkNonDispRes
 struct WrappedVkSampler : WrappedVkNonDispRes
 {
   WrappedVkSampler(VkSampler obj, ResourceId objId) : WrappedVkNonDispRes(obj, objId) {}
-  static const int AllocPoolCount = 8192;
-  static const int AllocPoolMaxByteSize = 1024 * 1024;
   typedef VkSampler InnerType;
-  ALLOCATE_WITH_WRAPPED_POOL(WrappedVkSampler, AllocPoolCount, AllocPoolMaxByteSize, false);
+  ALLOCATE_WITH_WRAPPED_POOL(WrappedVkSampler, false);
   enum
   {
     TypeEnum = eResSampler,
@@ -504,9 +486,7 @@ struct WrappedVkDescriptorSet : WrappedVkNonDispRes
 {
   WrappedVkDescriptorSet(VkDescriptorSet obj, ResourceId objId) : WrappedVkNonDispRes(obj, objId) {}
   typedef VkDescriptorSet InnerType;
-  static const int AllocPoolCount = 256 * 1024;
-  static const int AllocPoolMaxByteSize = 6 * 1024 * 1024;
-  ALLOCATE_WITH_WRAPPED_POOL(WrappedVkDescriptorSet, AllocPoolCount, AllocPoolMaxByteSize);
+  ALLOCATE_WITH_WRAPPED_POOL(WrappedVkDescriptorSet);
   enum
   {
     TypeEnum = eResDescriptorSet,
@@ -833,6 +813,7 @@ inline void SetTableIfDispatchable(bool writing, VkDevice parent, WrappedVulkan 
 }
 
 bool IsDispatchableRes(WrappedVkRes *ptr);
+bool IsPostponableRes(const WrappedVkRes *ptr);
 VkResourceType IdentifyTypeByPtr(WrappedVkRes *ptr);
 
 #define UNKNOWN_PREV_IMG_LAYOUT ((VkImageLayout)0xffffffff)
@@ -877,6 +858,7 @@ struct ImageInfo
   VkFormat format = VK_FORMAT_UNDEFINED;
   VkImageLayout initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   VkSharingMode sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  VkImageAspectFlags aspects = 0;
   ImageInfo() {}
   ImageInfo(VkFormat format, VkExtent3D extent, int levelCount, int layerCount, int sampleCount,
             VkImageLayout initialLayout, VkSharingMode sharingMode)
@@ -888,6 +870,7 @@ struct ImageInfo
         initialLayout(initialLayout),
         sharingMode(sharingMode)
   {
+    aspects = FormatImageAspects(format);
   }
   ImageInfo(const VkImageCreateInfo &ci)
       : layerCount(ci.arrayLayers),
@@ -911,6 +894,7 @@ struct ImageInfo
     {
       extent.depth = 1;
     }
+    aspects = FormatImageAspects(format);
   }
   ImageInfo(const VkSwapchainCreateInfoKHR &ci)
       : layerCount(ci.imageArrayLayers),
@@ -922,8 +906,9 @@ struct ImageInfo
     extent.width = ci.imageExtent.width;
     extent.height = ci.imageExtent.height;
     extent.depth = 1;
+    aspects = FormatImageAspects(format);
   }
-  VkImageAspectFlags Aspects() const { return FormatImageAspects(format); }
+  VkImageAspectFlags Aspects() const { return aspects; }
   ImageSubresourceRange FullRange() const;
   inline bool operator==(const ImageInfo &other) const
   {
@@ -948,7 +933,7 @@ struct SwapchainInfo
 {
   ImageInfo imageInfo;
 
-  bool shared;
+  bool shared, concurrent;
 
   VkRenderPass rp;
 
@@ -960,6 +945,10 @@ struct SwapchainInfo
 
     VkImageView view;
     VkFramebuffer fb;
+
+    VkFence fence;
+    VkCommandBuffer cmd;
+    VkSemaphore overlaydone;
   };
   rdcarray<SwapImage> images;
   PresentInfo lastPresent;
@@ -1002,8 +991,17 @@ struct ImageState;
 
 struct CmdBufferRecordingInfo
 {
+  ~CmdBufferRecordingInfo()
+  {
+    if(alloc)
+      alloc->ResetPageSet(pageSet);
+  }
+
   VkDevice device;
   VkCommandBufferAllocateInfo allocInfo;
+
+  ChunkAllocator *alloc = NULL;
+  rdcarray<uint32_t> pageSet;
 
   VkResourceRecord *framebuffer = NULL;
   VkResourceRecord *allocRecord = NULL;
@@ -1011,9 +1009,6 @@ struct CmdBufferRecordingInfo
   // sparse resources referenced by this command buffer (at submit time
   // need to go through the sparse mapping and reference all memory)
   std::set<ResourceInfo *> sparse;
-
-  // a list of all resources dirtied by this command buffer
-  std::set<ResourceId> dirtied;
 
   // a list of descriptor sets that are bound at any point in this command buffer
   // used to look up all the frame refs per-desc set and apply them on queue
@@ -1027,12 +1022,16 @@ struct CmdBufferRecordingInfo
 
   rdcarray<VkResourceRecord *> subcmds;
 
-  std::map<ResourceId, ImageState> imageStates;
+  rdcflatmap<ResourceId, ImageState> imageStates;
 
-  std::map<ResourceId, MemRefs> memFrameRefs;
+  rdcflatmap<ResourceId, MemRefs> memFrameRefs;
 
   // AdvanceFrame/Present should be called after this buffer is submitted
   bool present;
+  // BeginFrameCapture should be called *before* this buffer is submitted.
+  bool beginCapture;
+  // EndFrameCapture should be called *after* this buffer is submitted.
+  bool endCapture;
 };
 
 struct DescSetLayout;
@@ -1040,18 +1039,14 @@ struct DescSetLayout;
 struct DescriptorSetData
 {
   DescriptorSetData() : layout(NULL) {}
-  ~DescriptorSetData()
-  {
-    for(size_t i = 0; i < descBindings.size(); i++)
-      delete[] descBindings[i];
-    descBindings.clear();
-  }
-
+  DescriptorSetData(const DescriptorSetData &) = delete;
+  DescriptorSetData &operator=(const DescriptorSetData &) = delete;
+  ~DescriptorSetData() { data.clear(); }
   DescSetLayout *layout;
 
   // descriptor set bindings for this descriptor set. Filled out on
   // create from the layout.
-  rdcarray<DescriptorSetSlot *> descBindings;
+  BindingStorage data;
 
   // lock protecting bindFrameRefs and bindMemRefs
   Threading::CriticalSection refLock;
@@ -1062,9 +1057,13 @@ struct DescriptorSetData
   // the refcount has the high-bit set if this resource has sparse
   // mapping information
   static const uint32_t SPARSE_REF_BIT = 0x80000000;
-  std::map<ResourceId, rdcpair<uint32_t, FrameRefType> > bindFrameRefs;
-  std::map<ResourceId, MemRefs> bindMemRefs;
-  std::map<ResourceId, ImageState> bindImageStates;
+  rdcflatmap<ResourceId, rdcpair<uint32_t, FrameRefType>> bindFrameRefs;
+  rdcflatmap<ResourceId, MemRefs> bindMemRefs;
+  rdcflatmap<ResourceId, ImageState> bindImageStates;
+
+  void UpdateBackgroundRefCache(const rdcarray<ResourceId> &ids);
+
+  rdcflatmap<ResourceId, FrameRefType> backgroundFrameRefs;
 };
 
 struct PipelineLayoutData
@@ -1072,24 +1071,38 @@ struct PipelineLayoutData
   rdcarray<DescSetLayout> layouts;
 };
 
-struct MemMapState
+struct DescPoolInfo
 {
-  MemMapState()
-      : mapOffset(0),
-        mapSize(0),
-        needRefData(false),
-        mapFlushed(false),
-        mapCoherent(false),
-        mappedPtr(NULL),
-        refData(NULL)
+  rdcarray<VkResourceRecord *> freelist;
+};
+
+struct CmdPoolInfo
+{
+  CmdPoolInfo(uint32_t allocPageSize, bool allowReset)
+      : alloc(allocPageSize), allowCmdBufReset(allowReset)
   {
   }
-  VkDeviceSize mapOffset, mapSize;
-  bool needRefData;
-  bool mapFlushed;
-  bool mapCoherent;
-  byte *mappedPtr;
-  byte *refData;
+  uint32_t queueFamilyIndex;
+  bool allowCmdBufReset;
+  ChunkAllocator alloc;
+};
+
+struct MemMapState
+{
+  VkBuffer wholeMemBuf = VK_NULL_HANDLE;
+  VkDeviceSize mapOffset = 0, mapSize = 0;
+  bool needRefData = false;
+  bool mapFlushed = false;
+  bool mapCoherent = false;
+  bool readbackOnGPU = false;
+  // pointer to base of memory, may not be valid until after mapOffset bytes
+  byte *mappedPtr = NULL;
+  // this is map sized, not memory sized, rebased at the map offset.
+  byte *refData = NULL;
+  // this is normally set to mappedPtr, but when readbackOnGPU is true then during a coherent map
+  // flush this may point to the readback memory so that we read from that fast copy instead of the
+  // slow actual pointer.
+  byte *cpuReadPtr = NULL;
   Threading::CriticalSection mrLock;
 };
 
@@ -1102,6 +1115,36 @@ struct AttachmentInfo
   // and subresource range are filled in when creating the framebuffer, which is what is
   // used to apply the barrier in EndRenderPass
   VkImageMemoryBarrier barrier;
+};
+
+struct RenderPassInfo
+{
+  RenderPassInfo(const VkRenderPassCreateInfo &ci);
+  RenderPassInfo(const VkRenderPassCreateInfo2 &ci);
+
+  ~RenderPassInfo();
+
+  AttachmentInfo *imageAttachments;
+
+  // table of loadOps for each attachment
+  VkAttachmentLoadOp *loadOpTable;
+
+  // table of multiview viewMasks for each attachment
+  uint32_t *multiviewViewMaskTable;
+};
+
+struct FramebufferInfo
+{
+  FramebufferInfo(const VkFramebufferCreateInfo &ci);
+  ~FramebufferInfo();
+
+  bool AttachmentFullyReferenced(size_t attachmentIndex, const RenderPassInfo *rpi);
+
+  AttachmentInfo *imageAttachments;
+
+  uint32_t width;
+  uint32_t height;
+  uint32_t layers;
 };
 
 struct ImageRange
@@ -1265,7 +1308,9 @@ struct ImageSubresourceRange
         RDCERR("Invalid aspect mask (%s) in image with aspects (%s)", ToStr(aspectMask).c_str(),
                ToStr(info.Aspects()).c_str());
       }
-      aspectMask &= ~info.Aspects();
+      aspectMask &= info.Aspects();
+      if(aspectMask == 0)
+        aspectMask = info.Aspects();
     }
     SanitiseLevelRange(baseMipLevel, levelCount, info.levelCount);
     SanitiseLayerRange(baseArrayLayer, layerCount, info.layerCount);
@@ -1359,6 +1404,10 @@ class ImageSubresourceMap
   // `m_values` and the `*Split` flags in `m_flags`.
   rdcarray<ImageSubresourceState> m_values;
 
+  // commonly there will only be one value, in that case we inline it here. This is only valid if
+  // m_values is empty.
+  ImageSubresourceState m_value;
+
   // The bit count of `m_aspectMask`
   uint16_t m_aspectCount = 0;
 
@@ -1405,8 +1454,8 @@ public:
     for(auto it = ImageAspectFlagIter::begin(GetImageInfo().Aspects());
         it != ImageAspectFlagIter::end(); ++it)
       ++m_aspectCount;
-    m_values.push_back(
-        ImageSubresourceState(VK_QUEUE_FAMILY_IGNORED, UNKNOWN_PREV_IMG_LAYOUT, refType));
+
+    m_value = ImageSubresourceState(VK_QUEUE_FAMILY_IGNORED, UNKNOWN_PREV_IMG_LAYOUT, refType);
   }
 
   void ToArray(rdcarray<ImageSubresourceStateForRange> &arr);
@@ -1415,27 +1464,42 @@ public:
 
   void FromImgRefs(const ImgRefs &imgRefs);
 
-  inline ImageSubresourceState &SubresourceValue(uint32_t aspectIndex, uint32_t level,
-                                                 uint32_t layer, uint32_t slice)
+  inline ImageSubresourceState &SubresourceIndexValue(uint32_t aspectIndex, uint32_t level,
+                                                      uint32_t layer, uint32_t slice)
   {
+    if(m_values.empty())
+      return m_value;
     return m_values[SubresourceIndex(aspectIndex, level, layer, slice)];
   }
-  inline ImageSubresourceState &SubresourceValue(VkImageAspectFlagBits aspect, uint32_t level,
-                                                 uint32_t layer, uint32_t slice)
+  inline const ImageSubresourceState &SubresourceIndexValue(uint32_t aspectIndex, uint32_t level,
+                                                            uint32_t layer, uint32_t slice) const
+  {
+    if(m_values.empty())
+      return m_value;
+    return m_values[SubresourceIndex(aspectIndex, level, layer, slice)];
+  }
+  inline ImageSubresourceState &SubresourceAspectValue(VkImageAspectFlagBits aspect, uint32_t level,
+                                                       uint32_t layer, uint32_t slice)
   {
     uint32_t aspectIndex = 0;
     for(auto it = ImageAspectFlagIter::begin(GetImageInfo().Aspects());
         it != ImageAspectFlagIter::end() && *it != aspect; ++it, ++aspectIndex)
     {
     }
-    return SubresourceValue(aspectIndex, level, layer, slice);
+    return SubresourceIndexValue(aspectIndex, level, layer, slice);
+  }
+  inline const ImageSubresourceState &SubresourceAspectValue(VkImageAspectFlagBits aspect,
+                                                             uint32_t level, uint32_t layer,
+                                                             uint32_t slice) const
+  {
+    uint32_t aspectIndex = 0;
+    for(auto it = ImageAspectFlagIter::begin(GetImageInfo().Aspects());
+        it != ImageAspectFlagIter::end() && *it != aspect; ++it, ++aspectIndex)
+    {
+    }
+    return SubresourceIndexValue(aspectIndex, level, layer, slice);
   }
 
-  inline const ImageSubresourceState &SubresourceValue(uint32_t aspectIndex, uint32_t level,
-                                                       uint32_t layer, uint32_t slice) const
-  {
-    return m_values[SubresourceIndex(aspectIndex, level, layer, slice)];
-  }
   inline void Split(const ImageSubresourceRange &range)
   {
     Split(range.aspectMask != GetImageInfo().Aspects(),
@@ -1444,12 +1508,6 @@ public:
           range.baseDepthSlice != 0u || range.sliceCount < GetImageInfo().extent.depth);
   }
   void Unsplit();
-  inline void Clear()
-  {
-    m_values.clear();
-    m_values.resize(1);
-    m_flags = 0;
-  }
   FrameRefType Merge(const ImageSubresourceMap &other, FrameRefCompFunc compose);
 
   template <typename Map, typename Pair>
@@ -1539,7 +1597,7 @@ public:
   inline SubresourceRangeConstIter begin() const { return RangeBegin(GetImageInfo().FullRange()); }
   inline SubresourceRangeIter end() { return SubresourceRangeIter(); }
   inline SubresourceRangeConstIter end() const { return SubresourceRangeConstIter(); }
-  inline size_t size() const { return m_values.size(); }
+  inline size_t size() const { return RDCMAX(m_values.size(), (size_t)1); }
 };
 
 template <typename Barrier>
@@ -1624,8 +1682,8 @@ struct ImageState
               FrameRefCompFunc compose);
   void Merge(const ImageState &other, ImageTransitionInfo info);
   void MergeCaptureBeginState(const ImageState &initialState);
-  static void Merge(std::map<ResourceId, ImageState> &states,
-                    const std::map<ResourceId, ImageState> &dstStates, ImageTransitionInfo info);
+  static void Merge(rdcflatmap<ResourceId, ImageState> &states,
+                    const rdcflatmap<ResourceId, ImageState> &dstStates, ImageTransitionInfo info);
   void DiscardContents(const ImageSubresourceRange &range);
   inline void DiscardContents() { DiscardContents(GetImageInfo().FullRange()); }
   inline void RecordUse(const ImageSubresourceRange &range, FrameRefType refType,
@@ -1776,7 +1834,7 @@ struct ImgRefs
   }
   InitReqType SubresourceRangeMaxInitReq(VkImageSubresourceRange range, InitPolicy policy,
                                          bool initialized) const;
-  rdcarray<rdcpair<VkImageSubresourceRange, InitReqType> > SubresourceRangeInitReqs(
+  rdcarray<rdcpair<VkImageSubresourceRange, InitReqType>> SubresourceRangeInitReqs(
       VkImageSubresourceRange range, InitPolicy policy, bool initialized) const;
   void Split(bool splitAspects, bool splitLevels, bool splitLayers);
   template <typename Compose>
@@ -2002,23 +2060,23 @@ FrameRefType MemRefs::Merge(MemRefs &other, Compose comp)
 struct ImageLayouts;
 
 template <typename Compose>
-FrameRefType MarkImageReferenced(std::map<ResourceId, ImgRefs> &imgRefs, ResourceId img,
+FrameRefType MarkImageReferenced(rdcflatmap<ResourceId, ImgRefs> &imgRefs, ResourceId img,
                                  const ImageInfo &imageInfo, const ImageRange &range,
                                  FrameRefType refType, Compose comp);
 
-inline FrameRefType MarkImageReferenced(std::map<ResourceId, ImgRefs> &imgRefs, ResourceId img,
+inline FrameRefType MarkImageReferenced(rdcflatmap<ResourceId, ImgRefs> &imgRefs, ResourceId img,
                                         const ImageInfo &imageInfo, const ImageRange &range,
                                         FrameRefType refType)
 {
   return MarkImageReferenced(imgRefs, img, imageInfo, range, refType, ComposeFrameRefs);
 }
 
-FrameRefType MarkImageReferenced(std::map<ResourceId, ImageState> &imageStates, ResourceId img,
+FrameRefType MarkImageReferenced(rdcflatmap<ResourceId, ImageState> &imageStates, ResourceId img,
                                  const ImageInfo &imageInfo, const ImageSubresourceRange &range,
                                  uint32_t queueFamilyIndex, FrameRefType refType);
 
 template <typename Compose>
-FrameRefType MarkMemoryReferenced(std::map<ResourceId, MemRefs> &memRefs, ResourceId mem,
+FrameRefType MarkMemoryReferenced(rdcflatmap<ResourceId, MemRefs> &memRefs, ResourceId mem,
                                   VkDeviceSize offset, VkDeviceSize size, FrameRefType refType,
                                   Compose comp)
 {
@@ -2027,7 +2085,7 @@ FrameRefType MarkMemoryReferenced(std::map<ResourceId, MemRefs> &memRefs, Resour
   auto refs = memRefs.find(mem);
   if(refs == memRefs.end())
   {
-    memRefs.insert(std::pair<ResourceId, MemRefs>(mem, MemRefs(offset, size, refType)));
+    memRefs[mem] = MemRefs(offset, size, refType);
     return refType;
   }
   else
@@ -2036,7 +2094,7 @@ FrameRefType MarkMemoryReferenced(std::map<ResourceId, MemRefs> &memRefs, Resour
   }
 }
 
-inline FrameRefType MarkMemoryReferenced(std::map<ResourceId, MemRefs> &memRefs, ResourceId mem,
+inline FrameRefType MarkMemoryReferenced(rdcflatmap<ResourceId, MemRefs> &memRefs, ResourceId mem,
                                          VkDeviceSize offset, VkDeviceSize size, FrameRefType refType)
 {
   return MarkMemoryReferenced(memRefs, mem, offset, size, refType, ComposeFrameRefs);
@@ -2056,7 +2114,12 @@ public:
   static byte markerValue[32];
 
   VkResourceRecord(ResourceId id)
-      : ResourceRecord(id, true), Resource(NULL), bakedCommands(NULL), pool(NULL), ptrunion(NULL)
+      : ResourceRecord(id, true),
+        Resource(NULL),
+        resType(eResUnknown),
+        bakedCommands(NULL),
+        pool(NULL),
+        ptrunion(NULL)
   {
   }
 
@@ -2066,7 +2129,6 @@ public:
   {
     RDCASSERT(cmdInfo);
     SwapChunks(bakedCommands);
-    cmdInfo->dirtied.swap(bakedCommands->cmdInfo->dirtied);
     cmdInfo->boundDescSets.swap(bakedCommands->cmdInfo->boundDescSets);
     cmdInfo->subcmds.swap(bakedCommands->cmdInfo->subcmds);
     cmdInfo->sparse.swap(bakedCommands->cmdInfo->sparse);
@@ -2075,13 +2137,16 @@ public:
     cmdInfo->memFrameRefs.swap(bakedCommands->cmdInfo->memFrameRefs);
   }
 
-  void AddBindFrameRef(ResourceId id, FrameRefType ref, bool hasSparse = false)
+  void AddBindFrameRef(rdcarray<ResourceId> &ids, ResourceId id, FrameRefType ref,
+                       bool hasSparse = false)
   {
     if(id == ResourceId())
     {
       RDCERR("Unexpected NULL resource ID being added as a bind frame ref");
       return;
     }
+    if(!ids.contains(id))
+      ids.push_back(id);
     rdcpair<uint32_t, FrameRefType> &p = descInfo->bindFrameRefs[id];
     if((p.first & ~DescriptorSetData::SPARSE_REF_BIT) == 0)
     {
@@ -2097,12 +2162,14 @@ public:
     }
   }
 
-  void AddImgFrameRef(VkResourceRecord *view, FrameRefType refType)
+  void AddImgFrameRef(rdcarray<ResourceId> &ids, VkResourceRecord *view, FrameRefType refType)
   {
-    AddBindFrameRef(view->GetResourceID(), eFrameRef_Read,
+    if(!ids.contains(view->baseResource))
+      ids.push_back(view->baseResource);
+    AddBindFrameRef(ids, view->GetResourceID(), eFrameRef_Read,
                     view->resInfo && view->resInfo->IsSparse());
     if(view->baseResourceMem != ResourceId())
-      AddBindFrameRef(view->baseResourceMem, eFrameRef_Read, false);
+      AddBindFrameRef(ids, view->baseResourceMem, eFrameRef_Read, false);
 
     rdcpair<uint32_t, FrameRefType> &p = descInfo->bindFrameRefs[view->baseResource];
     if((p.first & ~DescriptorSetData::SPARSE_REF_BIT) == 0)
@@ -2121,18 +2188,21 @@ public:
 
     FrameRefType maxRef =
         MarkImageReferenced(descInfo->bindImageStates, view->baseResource, view->resInfo->imageInfo,
-                            ImageSubresourceRange(imgRange), pool->queueFamilyIndex, refType);
+                            ImageSubresourceRange(imgRange), VK_QUEUE_FAMILY_IGNORED, refType);
 
     p.second = ComposeFrameRefsDisjoint(p.second, maxRef);
   }
 
-  void AddMemFrameRef(ResourceId mem, VkDeviceSize offset, VkDeviceSize size, FrameRefType refType)
+  void AddMemFrameRef(rdcarray<ResourceId> &ids, ResourceId mem, VkDeviceSize offset,
+                      VkDeviceSize size, FrameRefType refType)
   {
     if(mem == ResourceId())
     {
       RDCERR("Unexpected NULL resource ID being added as a bind frame ref");
       return;
     }
+    if(!ids.contains(mem))
+      ids.push_back(mem);
     rdcpair<uint32_t, FrameRefType> &p = descInfo->bindFrameRefs[mem];
     if((p.first & ~DescriptorSetData::SPARSE_REF_BIT) == 0)
     {
@@ -2149,7 +2219,7 @@ public:
     p.second = ComposeFrameRefsDisjoint(p.second, maxRef);
   }
 
-  void RemoveBindFrameRef(ResourceId id)
+  void RemoveBindFrameRef(rdcarray<ResourceId> &ids, ResourceId id)
   {
     // ignore any NULL IDs - probably an object that was
     // deleted since it was bound.
@@ -2168,7 +2238,11 @@ public:
     it->second.first--;
 
     if((it->second.first & ~DescriptorSetData::SPARSE_REF_BIT) == 0)
+    {
+      if(!ids.contains(id))
+        ids.push_back(id);
       descInfo->bindFrameRefs.erase(it);
+    }
   }
 
   // we have a lot of 'cold' data in the resource record, as it can be accessed
@@ -2190,6 +2264,7 @@ public:
 
   VkDeviceSize memOffset;
   VkDeviceSize memSize;
+  VkResourceType resType;
 
   void MarkMemoryFrameReferenced(ResourceId mem, VkDeviceSize offset, VkDeviceSize size,
                                  FrameRefType refType);
@@ -2213,11 +2288,14 @@ public:
     SwapchainInfo *swapInfo;                 // only for swapchains
     MemMapState *memMapState;                // only for device memory
     CmdBufferRecordingInfo *cmdInfo;         // only for command buffers
-    AttachmentInfo *imageAttachments;        // only for framebuffers and render passes
+    FramebufferInfo *framebufferInfo;        // only for framebuffers
+    RenderPassInfo *renderPassInfo;          // only for render passes
     PipelineLayoutData *pipeLayoutInfo;      // only for pipeline layouts
     DescriptorSetData *descInfo;             // only for descriptor sets and descriptor set layouts
     DescUpdateTemplate *descTemplateInfo;    // only for descriptor update templates
-    uint32_t queueFamilyIndex;               // only for queues and command pools
+    DescPoolInfo *descPoolInfo;              // only for descriptor pools
+    CmdPoolInfo *cmdPoolInfo;                // only for command pools
+    uint32_t queueFamilyIndex;               // only for queues
   };
 
   VkResourceRecord *bakedCommands;
@@ -2274,7 +2352,7 @@ public:
 
     inline VkImageViewType viewType() const
     {
-      if(packedViewType <= VK_IMAGE_VIEW_TYPE_END_RANGE)
+      if(packedViewType <= InvalidViewType)
         return (VkImageViewType)packedViewType;
       else
         return VK_IMAGE_VIEW_TYPE_MAX_ENUM;
@@ -2282,10 +2360,10 @@ public:
 
     inline void setViewType(VkImageViewType t)
     {
-      if(t <= VK_IMAGE_VIEW_TYPE_END_RANGE)
+      if(t <= (VkImageViewType)InvalidViewType)
         packedViewType = t;
       else
-        packedViewType = 7;
+        packedViewType = InvalidViewType;
     }
 
     inline uint32_t levelCount() const
@@ -2322,6 +2400,8 @@ public:
     // Values <= 6, fits in 3 bits; 7 encodes an unknown/uninitialized view type.
     // Stored as uint32_t instead of VkImageViewType to prevent signed extension.
     uint32_t packedViewType : 3;
+
+    static const uint32_t InvalidViewType = 7;
 
     // need 7 bits for the aspects including planes
     uint32_t aspectMask : 7;
@@ -2386,7 +2466,7 @@ uint32_t GetPlaneByteSize(uint32_t Width, uint32_t Height, uint32_t Depth, VkFor
                           uint32_t mip, uint32_t plane);
 
 template <typename Compose>
-FrameRefType MarkImageReferenced(std::map<ResourceId, ImgRefs> &imgRefs, ResourceId img,
+FrameRefType MarkImageReferenced(rdcflatmap<ResourceId, ImgRefs> &imgRefs, ResourceId img,
                                  const ImageInfo &imageInfo, const ImageRange &range,
                                  FrameRefType refType, Compose comp)
 {
@@ -2395,7 +2475,7 @@ FrameRefType MarkImageReferenced(std::map<ResourceId, ImgRefs> &imgRefs, Resourc
   auto refs = imgRefs.find(img);
   if(refs == imgRefs.end())
   {
-    refs = imgRefs.insert(std::make_pair(img, ImgRefs(imageInfo))).first;
+    refs = imgRefs.insert(make_rdcpair(img, ImgRefs(imageInfo))).first;
   }
   return refs->second.Update(range, refType, comp);
 }

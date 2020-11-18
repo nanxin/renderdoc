@@ -105,7 +105,6 @@ For normalised formats - :py:attr:`~renderdoc.CompType.UNorm` and :py:attr:`~ren
         formatChars[rd.CompType.UScaled] = formatChars[rd.CompType.UInt]
         formatChars[rd.CompType.SNorm] = formatChars[rd.CompType.SInt]
         formatChars[rd.CompType.SScaled] = formatChars[rd.CompType.SInt]
-        formatChars[rd.CompType.Double] = formatChars[rd.CompType.Float]
 
         # We need to fetch compCount components
         vertexFormat = str(fmt.compCount) + formatChars[fmt.compType][fmt.compByteWidth]
@@ -115,10 +114,10 @@ For normalised formats - :py:attr:`~renderdoc.CompType.UNorm` and :py:attr:`~ren
 
         # If the format needs post-processing such as normalisation, do that now
         if fmt.compType == rd.CompType.UNorm:
-            divisor = float((1 << fmt.compByteWidth) - 1)
+            divisor = float((2 ** (fmt.compByteWidth * 8)) - 1)
             value = tuple(float(i) / divisor for i in value)
         elif fmt.compType == rd.CompType.SNorm:
-            maxNeg = -(1 << (fmt.compByteWidth - 1))
+            maxNeg = -float(2 ** (fmt.compByteWidth * 8)) / 2
             divisor = float(-(maxNeg-1))
             value = tuple((float(i) if (i == maxNeg) else (float(i) / divisor)) for i in value)
 
@@ -220,7 +219,7 @@ The position output is also treated specially - it always appears first, regardl
 		# while others will tightly pack
 		fmt = meshOutputs[i].format
 
-		accumOffset += (8 if fmt.compType == rd.CompType.Double else 4) * fmt.compCount
+		accumOffset += (8 if fmt.compByteWidth > 4 else 4) * fmt.compCount
 
 Example Source
 --------------

@@ -152,10 +152,20 @@ uint32_t Serialiser<SerialiserMode::Reading>::BeginChunk(uint32_t, uint64_t)
       m_Read->Read(m_ChunkMetadata.threadID);
 
     if(c & ChunkDuration)
+    {
       m_Read->Read(m_ChunkMetadata.durationMicro);
+      if(m_TimerFrequency != 1.0)
+        m_ChunkMetadata.durationMicro =
+            int64_t(double(m_ChunkMetadata.durationMicro) / m_TimerFrequency);
+    }
 
     if(c & ChunkTimestamp)
+    {
       m_Read->Read(m_ChunkMetadata.timestampMicro);
+      if(m_TimerFrequency != 1.0 || m_TimerBase != 0)
+        m_ChunkMetadata.timestampMicro =
+            int64_t(double(m_ChunkMetadata.timestampMicro - m_TimerBase) / m_TimerFrequency);
+    }
 
     if(c & Chunk64BitSize)
     {
@@ -184,7 +194,7 @@ uint32_t Serialiser<SerialiserMode::Reading>::BeginChunk(uint32_t, uint64_t)
     m_StructuredFile->chunks.push_back(chunk);
     m_StructureStack.push_back(chunk);
 
-    m_InternalElement = false;
+    m_InternalElement = 0;
   }
 
   return chunkID;
@@ -398,7 +408,7 @@ uint32_t Serialiser<SerialiserMode::Writing>::BeginChunk(uint32_t chunkID, uint6
       if(c & ChunkTimestamp)
       {
         if(m_ChunkMetadata.timestampMicro == 0)
-          m_ChunkMetadata.timestampMicro = RenderDoc::Inst().GetMicrosecondTimestamp();
+          m_ChunkMetadata.timestampMicro = Timing::GetTick();
 
         m_Write->Write(m_ChunkMetadata.timestampMicro);
       }
@@ -444,7 +454,7 @@ uint32_t Serialiser<SerialiserMode::Writing>::BeginChunk(uint32_t chunkID, uint6
     m_StructuredFile->chunks.push_back(chunk);
     m_StructureStack.push_back(chunk);
 
-    m_InternalElement = false;
+    m_InternalElement = 0;
   }
 
   return chunkID;
@@ -946,4 +956,199 @@ rdcstr DoStringise(const bool &el)
     return "True";
 
   return "False";
+}
+
+Chunk *Chunk::Create(Serialiser<SerialiserMode::Writing> &ser, uint16_t chunkType,
+                     ChunkAllocator *allocator)
+{
+  RDCCOMPILE_ASSERT(sizeof(Chunk) <= 16, "Chunk should be no more than 16 bytes");
+
+  RDCASSERT(ser.GetWriter()->GetOffset() < 0xffffffff);
+  uint32_t length = (uint32_t)ser.GetWriter()->GetOffset();
+
+  byte *data = NULL;
+  if(allocator)
+  {
+    // try to allocate from the allocator
+    data = allocator->AllocAlignedBuffer(length);
+
+    // if we couldn't satisfy the allocation then pretend we never had an allocator in the first
+    // place. We'll externally allocate the chunk and the data.
+    if(!data)
+      allocator = NULL;
+  }
+
+  // if we don't have an allocator or we gave up on it above, allocate the data externally
+  if(!allocator)
+    data = AllocAlignedBuffer(length);
+
+  memcpy(data, ser.GetWriter()->GetData(), (size_t)length);
+
+  ser.GetWriter()->Rewind();
+
+  Chunk *ret = NULL;
+
+  // if allocator wasn't NULL'd above, use it to allocate the chunk as well. We always either
+  // allocate both chunk and data from the allocator (so we don't have anything to do on
+  // destruction) or neither. Otherwise if we allocated the chunk from the allocator and the data
+  // externally, our data pointer might be corrupted or the bool indicating that it's external.
+  // Consider the case where we allocate some chunks from an allocator - one of which allocated
+  // external data - then the allocator is reset. Now the chunk could be overwritten by subsequent
+  // recording before it is deleted. We don't want the allocator to have to explicitly delete all
+  // chunks that were allocated from it and external data allocations should be rare (only really
+  // massive chunks bigger than a page) so we can afford to externally allocate the chunk too.
+  if(allocator)
+    ret = new(allocator->AllocChunk()) Chunk(true);
+  else
+    ret = new Chunk(false);
+
+  ret->m_Length = length;
+  ret->m_ChunkType = chunkType;
+  ret->m_Data = data;
+
+#if ENABLED(RDOC_DEVEL)
+  Atomic::Inc64(&m_LiveChunks);
+  Atomic::ExchAdd64(&m_TotalMem, int64_t(length));
+#endif
+
+  return ret;
+}
+
+ChunkAllocator::~ChunkAllocator()
+{
+  for(Page &p : freePages)
+  {
+    FreeAlignedBuffer(p.chunkBase);
+    FreeAlignedBuffer(p.bufferBase);
+  }
+
+  for(Page &p : fullPages)
+  {
+    FreeAlignedBuffer(p.chunkBase);
+    FreeAlignedBuffer(p.bufferBase);
+  }
+}
+
+byte *ChunkAllocator::AllocAlignedBuffer(uint64_t size)
+{
+  // always allocate 64-bytes at a time even if the size is smaller
+  return AllocateFromPages(false, AlignUp((size_t)size, (size_t)64));
+}
+
+byte *ChunkAllocator::AllocChunk()
+{
+  RDCCOMPILE_ASSERT(sizeof(ChunkAllocator) <= 128, "foo");
+  return AllocateFromPages(true, sizeof(Chunk));
+}
+
+void ChunkAllocator::Trim()
+{
+  for(Page &p : freePages)
+  {
+    FreeAlignedBuffer(p.chunkBase);
+    FreeAlignedBuffer(p.bufferBase);
+  }
+
+  freePages.clear();
+}
+
+void ChunkAllocator::Reset()
+{
+  freePages.append(fullPages);
+  fullPages.clear();
+
+  for(Page &p : freePages)
+  {
+    p.bufferHead = p.bufferBase;
+    p.chunkHead = p.chunkBase;
+  }
+}
+
+void ChunkAllocator::ResetPageSet(const rdcarray<uint32_t> &pages)
+{
+  // any full pages in this set go back into the free pages list
+  for(size_t i = 0; i < fullPages.size();)
+  {
+    Page &p = fullPages[i];
+    if(pages.contains(p.ID))
+    {
+      p.bufferHead = p.bufferBase;
+      p.chunkHead = p.chunkBase;
+      freePages.push_back(p);
+      fullPages.erase(i);
+      continue;
+    }
+    i++;
+  }
+}
+
+rdcarray<uint32_t> ChunkAllocator::GetPageSet()
+{
+  // see if the last free page has been partially used
+  if(!freePages.empty())
+  {
+    Page &p = freePages.back();
+
+    if(p.bufferBase != p.bufferHead || p.chunkBase != p.chunkHead)
+    {
+      usedPages.push_back(freePages.back().ID);
+
+      fullPages.push_back(freePages.back());
+      freePages.pop_back();
+    }
+  }
+
+  rdcarray<uint32_t> ret;
+  ret.swap(usedPages);
+  return ret;
+}
+
+byte *ChunkAllocator::AllocateFromPages(bool chunkAlloc, size_t size)
+{
+  // if the size can't be satisfied in a page, return NULL and we'll force a full allocation which
+  // will be freed on its own
+  if(size > BufferPageSize)
+    return NULL;
+
+  if(!freePages.empty())
+  {
+    // if the last free page can't satisfy this allocation, retire it to the full list
+    if((chunkAlloc && GetRemainingChunkBytes(freePages.back()) < size) ||
+       (!chunkAlloc && GetRemainingBufferBytes(freePages.back()) < size))
+    {
+      // mark this page as used in the current set
+      usedPages.push_back(freePages.back().ID);
+
+      fullPages.push_back(freePages.back());
+      freePages.pop_back();
+    }
+  }
+
+  // if there are no free pages, allocate a new one
+  if(freePages.empty())
+  {
+    // the first free ID is the sum of the free and full lists, because all pages are in one or the
+    // other
+    uint32_t ID = uint32_t(freePages.size() + fullPages.size());
+    byte *buffers = ::AllocAlignedBuffer(BufferPageSize);
+    byte *chunks = ::AllocAlignedBuffer(ChunkPageSize);
+    freePages.push_back({ID, buffers, buffers, chunks, chunks});
+  }
+
+  Page &p = freePages.back();
+
+  byte *ret = NULL;
+
+  if(chunkAlloc)
+  {
+    ret = p.chunkHead;
+    p.chunkHead += size;
+  }
+  else
+  {
+    ret = p.bufferHead;
+    p.bufferHead += size;
+  }
+
+  return ret;
 }

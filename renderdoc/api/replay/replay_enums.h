@@ -86,6 +86,12 @@ version of RenderDoc that addes a new section type. They should be considered eq
   lossless.
 
   The name for this section will be "renderdoc/internal/exthumb".
+
+.. data:: EmbeddedLogfile
+
+  This section contains the log file at the time of capture, for debugging.
+
+  The name for this section will be "renderdoc/internal/logfile".
 )");
 enum class SectionType : uint32_t
 {
@@ -98,6 +104,7 @@ enum class SectionType : uint32_t
   ResourceRenames,
   AMDRGPProfile,
   ExtendedThumbnail,
+  EmbeddedLogfile,
   Count,
 };
 
@@ -279,8 +286,7 @@ DOCUMENT(R"(Represents the component type of a channel in a texture or element i
 
 .. data:: Float
 
-  A single-precision (32-bit) floating point value. This is an IEEE float with 1 sign bit,
-  8 bits of exponent and 23 bits of mantissa.
+  An IEEE floating point value of 64-bit, 32-bit or 16-bit size.
 
 .. data:: UNorm
 
@@ -321,12 +327,8 @@ DOCUMENT(R"(Represents the component type of a channel in a texture or element i
 
 .. data:: Depth
 
-  An opaque value storing depth information, either :data:`unsigned normalised <UNorm>` or
-  :data:`floating point <float>`.
-
-.. data:: Double
-
-  A double-precision (64-bit) floating point value.
+  An opaque value storing depth information, either :data:`floating point <float>` for 32-bit depth
+  values or else :data:`unsigned normalised <UNorm>` for other bit sizes.
 
 .. data:: UNormSRGB
 
@@ -344,7 +346,6 @@ enum class CompType : uint8_t
   UScaled,
   SScaled,
   Depth,
-  Double,
   UNormSRGB,
 };
 
@@ -361,9 +362,7 @@ constexpr CompType VarTypeCompType(VarType type)
   // temporarily disable clang-format to make this more readable.
   // Ideally we'd use a simple switch() but VS2015 doesn't support that :(.
   // clang-format off
-  return (type == VarType::Double) ? CompType::Double
-
-       : (type == VarType::Float  || type == VarType::Half) ? CompType::Float
+  return (type == VarType::Double || type == VarType::Float  || type == VarType::Half) ? CompType::Float
 
        : (type == VarType::ULong  || type == VarType::UInt   ||
           type == VarType::UShort || type == VarType::UByte  || type == VarType::Bool) ? CompType::UInt
@@ -2401,7 +2400,11 @@ Note that a resource may be used for more than one thing in one event, see :clas
 
 .. data:: Clear
 
-  The resource is being cleared
+  The resource is being cleared.
+
+.. data:: Discard
+
+  The resource contents are discarded explicitly or implicitly.
 
 .. data:: GenMips
 
@@ -2478,6 +2481,7 @@ enum class ResourceUsage : uint32_t
   Indirect,
 
   Clear,
+  Discard,
 
   GenMips,
   Resolve,
@@ -3229,7 +3233,10 @@ enum class GPUCounter : uint32_t
   FirstVulkanExtended = 4000000,
   LastNvidia = FirstVulkanExtended - 1,
 
-  LastVulkanExtended = 5000000,
+  FirstARM = 5000000,
+  LastVulkanExtended = FirstARM - 1,
+
+  LastARM = 6000000,
 };
 
 ITERABLE_OPERATORS(GPUCounter);
@@ -3290,6 +3297,17 @@ inline constexpr bool IsVulkanExtendedCounter(GPUCounter c)
   return c >= GPUCounter::FirstVulkanExtended && c <= GPUCounter::LastVulkanExtended;
 }
 
+DOCUMENT(R"(Check whether or not this is an ARM private counter.
+
+:param GPUCounter c: The counter.
+:return: ``True`` if it is an ARM private counter, ``False`` if it's not.
+:rtype: ``bool``
+)");
+inline constexpr bool IsARMCounter(GPUCounter c)
+{
+  return c >= GPUCounter::FirstARM && c <= GPUCounter::LastARM;
+}
+
 DOCUMENT(R"(The unit that GPU counter data is returned in.
 
 .. data:: Absolute
@@ -3324,6 +3342,9 @@ enum class CounterUnit : uint32_t
   Ratio,
   Bytes,
   Cycles,
+  Hertz,
+  Volt,
+  Celsius
 };
 
 DECLARE_REFLECTION_ENUM(CounterUnit);

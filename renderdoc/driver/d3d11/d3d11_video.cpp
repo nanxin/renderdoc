@@ -31,32 +31,6 @@ WRAPPED_POOL_INST(WrappedID3D11VideoDecoderOutputView);
 WRAPPED_POOL_INST(WrappedID3D11VideoProcessorInputView);
 WRAPPED_POOL_INST(WrappedID3D11VideoProcessorOutputView);
 
-ID3D11Resource *UnwrapD3D11Resource(ID3D11Resource *dxObject)
-{
-  if(WrappedID3D11Buffer::IsAlloc(dxObject))
-  {
-    WrappedID3D11Buffer *w = (WrappedID3D11Buffer *)dxObject;
-    return w->GetReal();
-  }
-  else if(WrappedID3D11Texture1D::IsAlloc(dxObject))
-  {
-    WrappedID3D11Texture1D *w = (WrappedID3D11Texture1D *)dxObject;
-    return w->GetReal();
-  }
-  else if(WrappedID3D11Texture2D1::IsAlloc(dxObject))
-  {
-    WrappedID3D11Texture2D1 *w = (WrappedID3D11Texture2D1 *)dxObject;
-    return w->GetReal();
-  }
-  else if(WrappedID3D11Texture3D1::IsAlloc(dxObject))
-  {
-    WrappedID3D11Texture3D1 *w = (WrappedID3D11Texture3D1 *)dxObject;
-    return w->GetReal();
-  }
-
-  return NULL;
-}
-
 ULONG STDMETHODCALLTYPE WrappedID3D11VideoDevice2::AddRef()
 {
   return m_pDevice->AddRef();
@@ -217,17 +191,17 @@ HRESULT STDMETHODCALLTYPE WrappedID3D11VideoDevice2::CreateVideoDecoderOutputVie
     /* [annotation] */ _COM_Outptr_opt_ ID3D11VideoDecoderOutputView **ppVDOVView)
 {
   if(ppVDOVView == NULL)
-    return m_pReal->CreateVideoDecoderOutputView(UnwrapD3D11Resource(pResource), pDesc, NULL);
+    return m_pReal->CreateVideoDecoderOutputView(UnwrapResource(pResource), pDesc, NULL);
 
   ID3D11VideoDecoderOutputView *real = NULL;
 
-  HRESULT hr = m_pReal->CreateVideoDecoderOutputView(UnwrapD3D11Resource(pResource), pDesc, &real);
+  HRESULT hr = m_pReal->CreateVideoDecoderOutputView(UnwrapResource(pResource), pDesc, &real);
 
   if(SUCCEEDED(hr))
   {
     *ppVDOVView = new WrappedID3D11VideoDecoderOutputView(real, m_pDevice);
 
-    m_pDevice->GetResourceManager()->MarkDirtyResource(GetIDForResource(pResource));
+    m_pDevice->GetResourceManager()->MarkDirtyResource(GetIDForDeviceChild(pResource));
   }
   else
   {
@@ -245,20 +219,20 @@ HRESULT STDMETHODCALLTYPE WrappedID3D11VideoDevice2::CreateVideoProcessorInputVi
 {
   if(ppVPIView == NULL)
     return m_pReal->CreateVideoProcessorInputView(
-        UnwrapD3D11Resource(pResource), VIDEO_UNWRAP(WrappedID3D11VideoProcessorEnumerator1, pEnum),
+        UnwrapResource(pResource), VIDEO_UNWRAP(WrappedID3D11VideoProcessorEnumerator1, pEnum),
         pDesc, NULL);
 
   ID3D11VideoProcessorInputView *real = NULL;
 
   HRESULT hr = m_pReal->CreateVideoProcessorInputView(
-      UnwrapD3D11Resource(pResource), VIDEO_UNWRAP(WrappedID3D11VideoProcessorEnumerator1, pEnum),
-      pDesc, &real);
+      UnwrapResource(pResource), VIDEO_UNWRAP(WrappedID3D11VideoProcessorEnumerator1, pEnum), pDesc,
+      &real);
 
   if(SUCCEEDED(hr))
   {
     *ppVPIView = new WrappedID3D11VideoProcessorInputView(real, m_pDevice);
 
-    m_pDevice->GetResourceManager()->MarkDirtyResource(GetIDForResource(pResource));
+    m_pDevice->GetResourceManager()->MarkDirtyResource(GetIDForDeviceChild(pResource));
   }
   else
   {
@@ -276,20 +250,20 @@ HRESULT STDMETHODCALLTYPE WrappedID3D11VideoDevice2::CreateVideoProcessorOutputV
 {
   if(ppVPOView == NULL)
     return m_pReal->CreateVideoProcessorOutputView(
-        UnwrapD3D11Resource(pResource), VIDEO_UNWRAP(WrappedID3D11VideoProcessorEnumerator1, pEnum),
+        UnwrapResource(pResource), VIDEO_UNWRAP(WrappedID3D11VideoProcessorEnumerator1, pEnum),
         pDesc, NULL);
 
   ID3D11VideoProcessorOutputView *real = NULL;
 
   HRESULT hr = m_pReal->CreateVideoProcessorOutputView(
-      UnwrapD3D11Resource(pResource), VIDEO_UNWRAP(WrappedID3D11VideoProcessorEnumerator1, pEnum),
-      pDesc, &real);
+      UnwrapResource(pResource), VIDEO_UNWRAP(WrappedID3D11VideoProcessorEnumerator1, pEnum), pDesc,
+      &real);
 
   if(SUCCEEDED(hr))
   {
     *ppVPOView = new WrappedID3D11VideoProcessorOutputView(real, m_pDevice);
 
-    m_pDevice->GetResourceManager()->MarkDirtyResource(GetIDForResource(pResource));
+    m_pDevice->GetResourceManager()->MarkDirtyResource(GetIDForDeviceChild(pResource));
   }
   else
   {
@@ -559,7 +533,7 @@ APP_DEPRECATED_HRESULT STDMETHODCALLTYPE WrappedID3D11VideoContext2::DecoderExte
 
   unwrappedRes.resize(unwrappedExt.ResourceCount);
   for(UINT i = 0; i < unwrappedExt.ResourceCount; i++)
-    unwrappedRes[i] = UnwrapD3D11Resource(unwrappedExt.ppResourceList[i]);
+    unwrappedRes[i] = UnwrapResource(unwrappedExt.ppResourceList[i]);
 
   unwrappedExt.ppResourceList = unwrappedRes.data();
 
@@ -1357,28 +1331,41 @@ void STDMETHODCALLTYPE WrappedID3D11VideoProcessorOutputView::GetResource(
 template <typename NestedType, typename NestedType1>
 Wrapped11VideoDeviceChild<NestedType, NestedType1>::Wrapped11VideoDeviceChild(
     NestedType *real, WrappedID3D11Device *device)
-    : RefCounter(real), m_pDevice(device), m_pReal(real)
+    : m_pDevice(device), m_pReal(real), m_ExtRef(1)
 {
-  m_pDevice->SoftRef();
+  m_pDevice->AddRef();
 }
 
 template <typename NestedType, typename NestedType1>
 Wrapped11VideoDeviceChild<NestedType, NestedType1>::~Wrapped11VideoDeviceChild()
 {
   SAFE_RELEASE(m_pReal);
-  m_pDevice = NULL;
+  // remove our device ref here as we don't have IntRef counter to keep the device alive when it
+  // hits ExtRef 0, which is when we'd normally release the device ref.
+  SAFE_RELEASE(m_pDevice);
 }
 
 template <typename NestedType, typename NestedType1>
 ULONG STDMETHODCALLTYPE Wrapped11VideoDeviceChild<NestedType, NestedType1>::AddRef()
 {
-  return RefCounter::SoftRef(m_pDevice);
+  if(m_ExtRef == 0)
+    m_pDevice->AddRef();
+  Atomic::Inc32(&m_ExtRef);
+  return m_ExtRef;
 }
 
 template <typename NestedType, typename NestedType1>
 ULONG STDMETHODCALLTYPE Wrapped11VideoDeviceChild<NestedType, NestedType1>::Release()
 {
-  return RefCounter::SoftRelease(m_pDevice);
+  Atomic::Dec32(&m_ExtRef);
+  ASSERT_REFCOUNT(m_ExtRef);
+  // don't defer destruction of video objects, delete them immediately.
+  if(m_ExtRef == 0)
+  {
+    delete this;
+    return 0;
+  }
+  return (ULONG)m_ExtRef;
 }
 
 template <typename NestedType, typename NestedType1>
@@ -1424,7 +1411,7 @@ Wrapped11VideoDeviceChild<NestedType, NestedType1>::QueryInterface(REFIID riid, 
     return m_pDevice->QueryInterface(riid, ppvObject);
   }
 
-  return RefCounter::QueryInterface(riid, ppvObject);
+  return RefCountDXGIObject::WrapQueryInterface(m_pReal, riid, ppvObject);
 }
 
 template <typename NestedType, typename NestedType1>

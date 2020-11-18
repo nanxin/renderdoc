@@ -189,7 +189,7 @@ TEST_CASE("Read/write via structured of basic types", "[serialiser]")
 
     ChunkLookup testChunkLoop = [](uint32_t) -> rdcstr { return "TestChunk"; };
 
-    ser.ConfigureStructuredExport(testChunkLoop, true);
+    ser.ConfigureStructuredExport(testChunkLoop, true, 0, 1.0);
 
     int64_t a;
     uint64_t b;
@@ -497,25 +497,35 @@ TEST_CASE("Read/writing large buffers", "[serialiser]")
     ser.Serialise("dummy"_lit, dummy1);
     ser.EndChunk();
 
-    Chunk(ser, 1).Write(fileser);
+    Chunk *c;
+
+    c = Chunk::Create(ser, 1);
+    c->Write(fileser);
+    c->Delete();
 
     ser.WriteChunk(2);
     ser.Serialise("buffer"_lit, buffer);
     ser.EndChunk();
 
-    Chunk(ser, 1).Write(fileser);
+    c = Chunk::Create(ser, 1);
+    c->Write(fileser);
+    c->Delete();
 
     ser.WriteChunk(3);
     ser.Serialise("buffer"_lit, buffer);
     ser.EndChunk();
 
-    Chunk(ser, 1).Write(fileser);
+    c = Chunk::Create(ser, 1);
+    c->Write(fileser);
+    c->Delete();
 
     ser.WriteChunk(4);
     ser.Serialise("dummy"_lit, dummy2);
     ser.EndChunk();
 
-    Chunk(ser, 1).Write(fileser);
+    c = Chunk::Create(ser, 1);
+    c->Write(fileser);
+    c->Delete();
   }
 
   for(size_t pass = 0; pass < 2; pass++)
@@ -644,7 +654,7 @@ TEST_CASE("Read/write chunk metadata", "[serialiser]")
 
     ChunkLookup testChunkLoop = [](uint32_t) -> rdcstr { return "TestChunk"; };
 
-    ser.ConfigureStructuredExport(testChunkLoop, true);
+    ser.ConfigureStructuredExport(testChunkLoop, true, 0, 1.0);
 
     ser.ReadChunk<uint32_t>();
 
@@ -751,7 +761,7 @@ TEST_CASE("Verify multiple chunks can be merged", "[serialiser][chunks]")
   }
 
   for(Chunk *c : chunks)
-    delete c;
+    c->Delete();
 
   // now read the data "dynamically" and ensure it's all correct
   {
@@ -898,7 +908,7 @@ TEST_CASE("Read/write container types", "[serialiser][structured]")
   {
     ReadSerialiser ser(new StreamReader(buf->GetData(), buf->GetOffset()), Ownership::Stream);
 
-    ser.ConfigureStructuredExport([](uint32_t) -> rdcstr { return "TestChunk"; }, true);
+    ser.ConfigureStructuredExport([](uint32_t) -> rdcstr { return "TestChunk"; }, true, 0, 1.0);
 
     ser.ReadChunk<uint32_t>();
     {
@@ -1178,7 +1188,7 @@ TEST_CASE("Read/write complex types", "[serialiser][structured]")
   {
     ReadSerialiser ser(new StreamReader(buf->GetData(), buf->GetOffset()), Ownership::Stream);
 
-    ser.ConfigureStructuredExport([](uint32_t) -> rdcstr { return "TestChunk"; }, true);
+    ser.ConfigureStructuredExport([](uint32_t) -> rdcstr { return "TestChunk"; }, true, 0, 1.0);
 
     ser.ReadChunk<uint32_t>();
     {

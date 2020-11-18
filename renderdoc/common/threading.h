@@ -79,7 +79,7 @@ public:
   bool Trylock() { return Atomic::CmpExch32(&val, 0, 1) == 0; }
   void Unlock() { Atomic::CmpExch32(&val, 1, 0); }
 private:
-  volatile int32_t val = 0;
+  int32_t val = 0;
 };
 
 class ScopedSpinLock
@@ -119,4 +119,4 @@ private:
 #define SCOPED_READLOCK(rw) Threading::ScopedReadLock CONCAT(scopedlock, __LINE__)(rw);
 #define SCOPED_WRITELOCK(rw) Threading::ScopedWriteLock CONCAT(scopedlock, __LINE__)(rw);
 
-#define SCOPED_SPINLOCK(cs) Threading::SpinLock CONCAT(scopedlock, __LINE__)(cs);
+#define SCOPED_SPINLOCK(cs) Threading::ScopedSpinLock CONCAT(scopedlock, __LINE__)(cs);

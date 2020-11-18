@@ -333,6 +333,26 @@ elseif(UNIX)
         os/posix/posix_specific.h)
 endif()
 
+if(NOT ANDROID)
+    list(APPEND sources
+        3rdparty/compressonator/BC1_Encode_kernel.cpp
+        3rdparty/compressonator/BC2_Encode_kernel.cpp
+        3rdparty/compressonator/BC3_Encode_kernel.cpp
+        3rdparty/compressonator/BC4_Encode_kernel.cpp
+        3rdparty/compressonator/BC5_Encode_kernel.cpp
+        3rdparty/compressonator/BC6_Encode_kernel.cpp
+        3rdparty/compressonator/BC7_Encode_Kernel.cpp)
+
+    set_source_files_properties(3rdparty/compressonator/BC1_Encode_kernel.cpp
+        3rdparty/compressonator/BC2_Encode_kernel.cpp
+        3rdparty/compressonator/BC3_Encode_kernel.cpp
+        3rdparty/compressonator/BC4_Encode_kernel.cpp
+        3rdparty/compressonator/BC5_Encode_kernel.cpp
+        3rdparty/compressonator/BC6_Encode_kernel.cpp
+        3rdparty/compressonator/BC7_Encode_Kernel.cpp
+        PROPERTIES COMPILE_FLAGS "-D_LINUX -Wno-newline-eof -Wno-missing-braces -Wno-char-subscripts -Wno-sign-compare -Wno-unused-value -Wno-strict-aliasing -Wno-shift-negative-value")
+endif()
+
 if(CMAKE_COMPILER_IS_GNUCXX)
     set_source_files_properties(3rdparty/tinyfiledialogs/tinyfiledialogs.c
         PROPERTIES COMPILE_FLAGS "-Wno-format-overflow")
@@ -386,6 +406,7 @@ set(data
     data/glsl/quadresolve.frag
     data/glsl/quadwrite.frag
     data/glsl/pixelhistory_mscopy.comp
+    data/glsl/pixelhistory_mscopy_depth.comp
     data/glsl/pixelhistory_primid.frag
     data/glsl/shaderdebug_sample.vert
     data/glsl/texdisplay.frag
@@ -403,6 +424,7 @@ set(data
     data/glsl/trisize.geom
     data/glsl/deptharr2ms.frag
     data/glsl/depthms2arr.frag
+    data/glsl/discard.frag
     data/sourcecodepro.ttf
     driver/vulkan/renderdoc.json)
 
@@ -502,6 +524,12 @@ if(ENABLE_GL OR ENABLE_GLES)
     list(APPEND renderdoc_objects $<TARGET_OBJECTS:rdoc_intel>)
 endif()
 
+# pull in the ARM folder for perf query
+if(ENABLE_GL OR ENABLE_GLES)
+    add_subdirectory(driver/ihv/arm)
+    list(APPEND renderdoc_objects $<TARGET_OBJECTS:rdoc_arm>)
+endif()
+
 add_library(rdoc OBJECT ${sources})
 target_compile_definitions(rdoc ${RDOC_DEFINITIONS})
 target_include_directories(rdoc ${RDOC_INCLUDES})
@@ -549,6 +577,10 @@ if(UNIX AND NOT ANDROID AND NOT APPLE)
 
     if(ENABLE_GGP)
         set(RDOC_LINK_FLAGS "${RDOC_LINK_FLAGS} -Wl,--hash-style=gnu -Wl,--build-id=sha1")
+    endif()
+
+    if(NOT RELEASE_MODE)
+        configure_file(${CMAKE_CURRENT_SOURCE_DIR}/librenderdoc.so-gdb.py ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/librenderdoc.so-gdb.py)
     endif()
 
     set_target_properties(renderdoc PROPERTIES LINK_FLAGS "${RDOC_LINK_FLAGS}")

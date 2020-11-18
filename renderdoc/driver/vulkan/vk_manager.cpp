@@ -271,8 +271,6 @@ void VulkanResourceManager::SerialiseImageStates(SerialiserType &ser,
 
   auto srcit = states.begin();
 
-  std::set<ResourceId> updatedState;
-
   for(uint32_t i = 0; i < NumImages; i++)
   {
     SERIALISE_ELEMENT_LOCAL(Image, (ResourceId)(srcit->first)).TypedAs("VkImage"_lit);
@@ -381,7 +379,7 @@ void VulkanResourceManager::SerialiseImageStates(SerialiserType &ser,
                 ++it, ++aspectIndex)
             {
             }
-            auto currentSub = current->subresourceStates.SubresourceValue(
+            auto currentSub = current->subresourceStates.SubresourceIndexValue(
                 aspectIndex, subit->range().baseMipLevel, subit->range().baseArrayLayer,
                 subit->range().baseDepthSlice);
             RDCASSERT(currentSub.refType == subit->state().refType ||
@@ -425,7 +423,7 @@ bool VulkanResourceManager::Serialise_DeviceMemoryRefs(SerialiserType &ser,
     {
       ResourceId mem = it_data->memory;
 
-      auto res = m_MemFrameRefs.insert(std::pair<ResourceId, MemRefs>(mem, MemRefs()));
+      auto res = m_MemFrameRefs.insert(rdcpair<ResourceId, MemRefs>(mem, MemRefs()));
       RDCASSERTMSG("MemRefIntervals for each memory resource must be contiguous", res.second);
       Intervals<FrameRefType> &rangeRefs = res.first->second.rangeRefs;
 
@@ -784,7 +782,7 @@ void VulkanResourceManager::ApplyBarriers(uint32_t queueFamilyIndex,
   }
 }
 
-void VulkanResourceManager::RecordBarriers(std::map<ResourceId, ImageState> &states,
+void VulkanResourceManager::RecordBarriers(rdcflatmap<ResourceId, ImageState> &states,
                                            uint32_t queueFamilyIndex, uint32_t numBarriers,
                                            const VkImageMemoryBarrier *barriers)
 {
@@ -850,40 +848,48 @@ ResourceId VulkanResourceManager::GetFirstIDForHandle(uint64_t handle)
 void VulkanResourceManager::MarkMemoryFrameReferenced(ResourceId mem, VkDeviceSize offset,
                                                       VkDeviceSize size, FrameRefType refType)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   FrameRefType maxRef = MarkMemoryReferenced(m_MemFrameRefs, mem, offset, size, refType);
+  if(maxRef == eFrameRef_CompleteWrite)
+  {
+    // check and make sure this is really a CompleteWrite
+    VkResourceRecord *record = GetResourceRecord(mem);
+    // if we are not writing the entire memory, degrade it to a partial write
+    if(offset != 0 || size != record->Length)
+      maxRef = eFrameRef_PartialWrite;
+  }
   MarkResourceFrameReferenced(mem, maxRef, ComposeFrameRefsDisjoint);
 }
 
 void VulkanResourceManager::AddMemoryFrameRefs(ResourceId mem)
 {
-  m_MemFrameRefs.insert({mem, MemRefs()});
+  m_MemFrameRefs[mem] = MemRefs();
 }
 
 void VulkanResourceManager::AddDeviceMemory(ResourceId mem)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   m_DeviceMemories.insert(mem);
 }
 
 void VulkanResourceManager::RemoveDeviceMemory(ResourceId mem)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   m_DeviceMemories.erase(mem);
 }
 
-void VulkanResourceManager::MergeReferencedMemory(std::map<ResourceId, MemRefs> &memRefs)
+void VulkanResourceManager::MergeReferencedMemory(rdcflatmap<ResourceId, MemRefs> &memRefs)
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   for(auto j = memRefs.begin(); j != memRefs.end(); j++)
   {
     auto i = m_MemFrameRefs.find(j->first);
     if(i == m_MemFrameRefs.end())
-      m_MemFrameRefs.insert(*j);
+      m_MemFrameRefs[j->first] = j->second;
     else
       i->second.Merge(j->second);
   }
@@ -891,7 +897,7 @@ void VulkanResourceManager::MergeReferencedMemory(std::map<ResourceId, MemRefs> 
 
 void VulkanResourceManager::ClearReferencedMemory()
 {
-  SCOPED_LOCK(m_Lock);
+  SCOPED_LOCK_OPTIONAL(m_Lock, m_Capturing);
 
   m_MemFrameRefs.clear();
 }
@@ -945,4 +951,9 @@ rdcarray<ResourceId> VulkanResourceManager::InitialContentResources()
 bool VulkanResourceManager::ResourceTypeRelease(WrappedVkRes *res)
 {
   return m_Core->ReleaseResource(res);
+}
+
+bool VulkanResourceManager::IsResourceTrackedForPersistency(WrappedVkRes *const &res)
+{
+  return IsPostponableRes(res);
 }

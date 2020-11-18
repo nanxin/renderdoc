@@ -27,19 +27,24 @@
 #if ENABLED(ENABLE_UNIT_TESTS)
 
 #include "api/replay/rdcarray.h"
+#include "api/replay/rdcflatmap.h"
 #include "api/replay/rdcpair.h"
 #include "api/replay/rdcstr.h"
+#include "common/formatting.h"
 #include "common/globalconfig.h"
 #include "common/timing.h"
 #include "os/os_specific.h"
 
 #include "catch/catch.hpp"
 
-static volatile int32_t constructor = 0;
-static volatile int32_t moveConstructor = 0;
-static volatile int32_t valueConstructor = 0;
-static volatile int32_t copyConstructor = 0;
-static volatile int32_t destructor = 0;
+static int32_t constructor = 0;
+static int32_t moveConstructor = 0;
+static int32_t valueConstructor = 0;
+static int32_t copyConstructor = 0;
+static int32_t destructor = 0;
+static int32_t movedDestructor = 0;
+static int32_t copyAssignment = 0;
+static int32_t moveAssignment = 0;
 
 struct ConstructorCounter
 {
@@ -66,9 +71,26 @@ struct ConstructorCounter
     other.value = -9999;
     Atomic::Inc32(&moveConstructor);
   }
-  ConstructorCounter &operator=(const ConstructorCounter &other) = delete;
-  ConstructorCounter &operator=(ConstructorCounter &&other) = delete;
-  ~ConstructorCounter() { Atomic::Inc32(&destructor); }
+  ConstructorCounter &operator=(const ConstructorCounter &other)
+  {
+    value = other.value;
+    Atomic::Inc32(&copyAssignment);
+    return *this;
+  }
+  ConstructorCounter &operator=(ConstructorCounter &&other)
+  {
+    value = other.value;
+    other.value = -9999;
+    Atomic::Inc32(&moveAssignment);
+    return *this;
+  }
+  ~ConstructorCounter()
+  {
+    Atomic::Inc32(&destructor);
+    if(value == -9999)
+      Atomic::Inc32(&movedDestructor);
+    value = -1234;
+  }
   bool operator==(const ConstructorCounter &other) { return value == other.value; }
 };
 
@@ -80,6 +102,7 @@ TEST_CASE("Test array type", "[basictypes]")
   valueConstructor = 0;
   copyConstructor = 0;
   destructor = 0;
+  movedDestructor = 0;
 
   SECTION("Basic test")
   {
@@ -463,6 +486,43 @@ TEST_CASE("Test array type", "[basictypes]")
     CHECK(vec[1] == 5);
   };
 
+  SECTION("resize_for_index")
+  {
+    rdcarray<int> test;
+
+    CHECK(test.empty());
+
+    test.resize_for_index(0);
+
+    CHECK(test.size() == 1);
+    CHECK(test.capacity() >= 1);
+
+    test.resize_for_index(5);
+
+    CHECK(test.size() == 6);
+    CHECK(test.capacity() >= 6);
+
+    test.resize_for_index(5);
+
+    CHECK(test.size() == 6);
+    CHECK(test.capacity() >= 6);
+
+    test.resize_for_index(3);
+
+    CHECK(test.size() == 6);
+    CHECK(test.capacity() >= 6);
+
+    test.resize_for_index(0);
+
+    CHECK(test.size() == 6);
+    CHECK(test.capacity() >= 6);
+
+    test.resize_for_index(9);
+
+    CHECK(test.size() == 10);
+    CHECK(test.capacity() >= 10);
+  };
+
   SECTION("Check construction")
   {
     rdcarray<ConstructorCounter> test;
@@ -499,6 +559,7 @@ TEST_CASE("Test array type", "[basictypes]")
     CHECK(constructor == 1);
     CHECK(copyConstructor == 1);
     CHECK(valueConstructor == 0);
+    CHECK(moveConstructor == 0);
 
     test.push_back(ConstructorCounter(10));
 
@@ -508,8 +569,9 @@ TEST_CASE("Test array type", "[basictypes]")
     CHECK(valueConstructor == 1);
     // for the temporary going out of scope
     CHECK(destructor == 2);
-    // for the temporary being copied into the new element
-    CHECK(copyConstructor == 2);
+    // for the temporary being moved into the new element
+    CHECK(copyConstructor == 1);
+    CHECK(moveConstructor == 1);
 
     // previous value
     CHECK(constructor == 1);
@@ -518,7 +580,8 @@ TEST_CASE("Test array type", "[basictypes]")
 
     // single element in test was moved to new backing storage
     CHECK(destructor == 3);
-    CHECK(copyConstructor == 3);
+    CHECK(copyConstructor == 1);
+    CHECK(moveConstructor == 2);
 
     // previous values
     CHECK(valueConstructor == 1);
@@ -532,7 +595,8 @@ TEST_CASE("Test array type", "[basictypes]")
     // previous values
     CHECK(valueConstructor == 1);
     CHECK(destructor == 3);
-    CHECK(copyConstructor == 3);
+    CHECK(copyConstructor == 1);
+    CHECK(moveConstructor == 2);
 
     test.clear();
 
@@ -542,16 +606,15 @@ TEST_CASE("Test array type", "[basictypes]")
     // previous values
     CHECK(constructor == 50);
     CHECK(valueConstructor == 1);
-    CHECK(copyConstructor == 3);
-
-    // still should have had no moves
-    CHECK(moveConstructor == 0);
+    CHECK(copyConstructor == 1);
+    CHECK(moveConstructor == 2);
 
     // reset counters
     constructor = 0;
     valueConstructor = 0;
     copyConstructor = 0;
     destructor = 0;
+    moveConstructor = 0;
 
     CHECK(constructor == 0);
     CHECK(moveConstructor == 0);
@@ -583,6 +646,10 @@ TEST_CASE("Test array type", "[basictypes]")
 
     // check that the new value arrived
     CHECK(test.back().value == 9);
+
+    // no assignments
+    CHECK(copyAssignment == 0);
+    CHECK(moveAssignment == 0);
   };
 
   SECTION("operations with empty array")
@@ -670,14 +737,17 @@ TEST_CASE("Test array type", "[basictypes]")
     CHECK(test.capacity() == 100);
     CHECK(test.size() == 6);
 
-    // 5 copies and 5 destructs to shift the array contents up, then another copy for inserting tmp
+    // 5 moves and 5 destructs to shift the array contents up, then a copy for inserting tmp
     CHECK(constructor == 6);
     CHECK(valueConstructor == 0);
-    CHECK(copyConstructor == 5 + 1);
+    CHECK(moveConstructor == 5);
     CHECK(destructor == 5);
+    CHECK(copyConstructor == 1);
 
     CHECK(test[0].value == 999);
     CHECK(test[1].value == 10);
+
+    constructor = valueConstructor = copyConstructor = moveConstructor = destructor = 0;
 
     // this should copy the value, then do an insert
     test.insert(0, test[0]);
@@ -685,16 +755,19 @@ TEST_CASE("Test array type", "[basictypes]")
     CHECK(test.capacity() == 100);
     CHECK(test.size() == 7);
 
-    // on top of the above, another 6 copies & destructs to shift the array contents, 1 copy for
-    // inserting test[0], and a copy&destruct of the temporary copy
-    CHECK(constructor == 6);
+    // another 6 moves & destructs to shift the array contents, 2 copies for
+    // inserting test[0] (once to a temporary with a destructor of that once into the new storage)
+    CHECK(constructor == 0);
     CHECK(valueConstructor == 0);
-    CHECK(copyConstructor == (5 + 1) + 6 + 1 + 1);
-    CHECK(destructor == (5) + 6 + 1);
+    CHECK(copyConstructor == 2);
+    CHECK(moveConstructor == 6);
+    CHECK(destructor == 6 + 1);
 
     CHECK(test[0].value == 999);
     CHECK(test[1].value == 999);
     CHECK(test[2].value == 10);
+
+    constructor = valueConstructor = copyConstructor = moveConstructor = destructor = 0;
 
     // this should detect the overlapped range, and duplicate the whole object
     test.insert(0, test.data(), 3);
@@ -710,15 +783,15 @@ TEST_CASE("Test array type", "[basictypes]")
     CHECK(test[4].value == 999);
     CHECK(test[5].value == 10);
 
-    // on top of the above:
     // - 7 copies and destructs for the duplication (copies into the new storage, destructs from the
     // old storage)
-    // - 7 copies and destructs for shifting the array contents
+    // - 7 moves and destructs for shifting the array contents
     // - 3 copies for the inserted items
-    CHECK(constructor == 6);
+    CHECK(constructor == 0);
     CHECK(valueConstructor == 0);
-    CHECK(copyConstructor == (5 + 1 + 6 + 1 + 1) + 7 + 7 + 3);
-    CHECK(destructor == (5 + 6 + 1) + 7 + 7);
+    CHECK(copyConstructor == 7 + 3);
+    CHECK(destructor == 7 + 7);
+    CHECK(moveConstructor == 7);
   };
 
   SECTION("Inserting from array's unused memory into itself")
@@ -747,6 +820,8 @@ TEST_CASE("Test array type", "[basictypes]")
     CHECK(copyConstructor == 0);
     CHECK(destructor == 4);
 
+    constructor = destructor = 0;
+
     // this should detect the overlapped range, and duplicate the whole object
     test.insert(0, test.data() + 2, 3);
 
@@ -754,20 +829,118 @@ TEST_CASE("Test array type", "[basictypes]")
     CHECK(test.capacity() == 100);
     CHECK(test.size() == 4);
 
-    CHECK(test[0].value == 30);
-    CHECK(test[1].value == 40);
-    CHECK(test[2].value == 50);
+    CHECK(test[0].value == -1234);
+    CHECK(test[1].value == -1234);
+    CHECK(test[2].value == -1234);
     CHECK(test[3].value == 10);
 
     // on top of the above:
     // - 1 copy and destruct for the duplication (copy into the new storage, destruct from
     // the old storage)
-    // - 1 copy and destruct for shifting the array contents
+    // - 1 move and destruct for shifting the array contents
     // - 3 copies for the inserted items
-    CHECK(constructor == 5);
+    CHECK(constructor == 0);
     CHECK(valueConstructor == 0);
-    CHECK(copyConstructor == 1 + 1 + 3);
-    CHECK(destructor == 4 + 1 + 1);
+    CHECK(copyConstructor == 1 + 3);
+    CHECK(destructor == 1 + 1);
+    CHECK(moveConstructor == 1);
+  };
+
+  SECTION("Check move constructor is used when possible")
+  {
+    rdcarray<ConstructorCounter> test;
+
+    // don't test moves due to resizes in this test
+    test.reserve(100);
+
+    CHECK(constructor == 0);
+    CHECK(moveConstructor == 0);
+    CHECK(valueConstructor == 0);
+    CHECK(copyConstructor == 0);
+    CHECK(destructor == 0);
+
+    ConstructorCounter tmp;
+    tmp.value = 9;
+
+    // 1 for the temporary
+    CHECK(constructor == 1);
+
+    test.push_back(tmp);
+
+    // element should have been copied, not moved
+    CHECK(copyConstructor == 1);
+    CHECK(moveConstructor == 0);
+    CHECK(destructor == 0);
+
+    test.push_back(ConstructorCounter(5));
+
+    // one more temporary as a value
+    CHECK(valueConstructor == 1);
+    // temporary should have been moved, not copied
+    CHECK(copyConstructor == 1);
+    CHECK(moveConstructor == 1);
+    // the temporary should have been destroyed, but after it was moved
+    CHECK(destructor == 1);
+    CHECK(movedDestructor == 1);
+
+    test.emplace_back(15);
+
+    // should be constructed in place
+    CHECK(valueConstructor == 2);
+    // no other move/copy/destruct
+    CHECK(copyConstructor == 1);
+    CHECK(moveConstructor == 1);
+    CHECK(destructor == 1);
+    CHECK(movedDestructor == 1);
+
+    test.emplace_back(25);
+    test.emplace_back(35);
+
+    CHECK(valueConstructor == 4);
+    CHECK(copyConstructor == 1);
+    CHECK(moveConstructor == 1);
+    CHECK(destructor == 1);
+    CHECK(movedDestructor == 1);
+
+    CHECK(test.size() == 5);
+
+    // insert a new element at 0, without allowing move of the new element
+    test.insert(0, &tmp, 1);
+
+    CHECK(test.size() == 6);
+    CHECK(valueConstructor == 4);
+    // the element will be copied into place
+    CHECK(copyConstructor == 2);
+    // all the internal shifts for the resize should have happened via move constructor
+    CHECK(moveConstructor == 6);
+    CHECK(destructor == 6);
+    CHECK(movedDestructor == 6);
+    CHECK(copyAssignment == 0);
+    CHECK(moveAssignment == 0);
+
+    // insert an element at 0, allowing it to move
+    test.insert(4, ConstructorCounter(55));
+
+    CHECK(test.size() == 7);
+    CHECK(valueConstructor == 5);
+    CHECK(copyConstructor == 2);
+    CHECK(moveConstructor == 9);
+    CHECK(destructor == 9);
+    CHECK(movedDestructor == 9);
+    CHECK(copyAssignment == 0);
+    CHECK(moveAssignment == 0);
+
+    // erase the element at 3
+    test.erase(3);
+
+    CHECK(test.size() == 6);
+    CHECK(valueConstructor == 5);
+    CHECK(copyConstructor == 2);
+    CHECK(moveConstructor == 12);
+    CHECK(destructor == 13);
+    CHECK(movedDestructor == 12);
+    CHECK(copyAssignment == 0);
+    CHECK(moveAssignment == 0);
   };
 };
 
@@ -1161,6 +1334,13 @@ TEST_CASE("Test string type", "[basictypes][string]")
     CHECK(rdcstr("  Foo\nbar").trimmed() == "Foo\nbar");
     CHECK(rdcstr("FOO BAR  ").trimmed() == "FOO BAR");
     CHECK(rdcstr("FOO BAR  \t\n").trimmed() == "FOO BAR");
+    CHECK(rdcstr("1").trimmed() == "1");
+    CHECK(rdcstr("  1  ").trimmed() == "1");
+    CHECK(rdcstr("  1").trimmed() == "1");
+    CHECK(rdcstr("1  ").trimmed() == "1");
+    CHECK(rdcstr("1\n ").trimmed() == "1");
+    CHECK(rdcstr("\n1\n ").trimmed() == "1");
+    CHECK(rdcstr(" \n\t1\n ").trimmed() == "1");
     CHECK(rdcstr("").trimmed() == "");
     CHECK(rdcstr("  ").trimmed() == "");
     CHECK(rdcstr("  \t  \n ").trimmed() == "");
@@ -1510,6 +1690,203 @@ TEST_CASE("Test string type", "[basictypes][string]")
 
     CHECK(test == "Short literal");
     CHECK(test.size() == test2.size());
+  };
+};
+
+TEST_CASE("Test flatmap type", "[basictypes][flatmap]")
+{
+  SECTION("basic lookup of values before and after sorting")
+  {
+    rdcflatmap<uint32_t, rdcstr, 16> test;
+
+    test[5] = "foo";
+    test[7] = "bar";
+    test[3] = "asdf";
+
+    CHECK(test[5] == "foo");
+    CHECK(test[7] == "bar");
+    CHECK(test[3] == "asdf");
+    CHECK(!test.empty());
+    CHECK(test.size() == 3);
+
+    // order is not guaranteed, but multiplying the keys in any order will give us a unique value
+    // because they're prime
+    uint32_t product = 1;
+    uint32_t count = 0;
+    for(auto it = test.begin(); it != test.end(); ++it)
+    {
+      product *= it->first;
+      count++;
+    }
+
+    CHECK(product == 3 * 5 * 7);
+    CHECK(count == 3);
+
+    // force the map to sort itself
+    for(uint32_t i = 0; i < 24; i++)
+      test[999 + i] = StringFormat::Fmt("test%u", 999 + i);
+
+    // we should still be able to look up the same values
+    CHECK(test[5] == "foo");
+    CHECK(test[7] == "bar");
+    CHECK(test[3] == "asdf");
+    CHECK(!test.empty());
+    CHECK(test.size() == 27);
+
+    CHECK(test.find(5)->second == "foo");
+    CHECK(test.find(6) == test.end());
+    CHECK(test.find(7)->second == "bar");
+    CHECK(test.find(8) == test.end());
+
+    // check clearing
+    test.clear();
+
+    CHECK(test.empty());
+    CHECK(test.size() == 0);
+
+    // this inserts the values as default-initialised, as std::map does
+    CHECK(test[5] == "");
+    CHECK(test[7] == "");
+    CHECK(test[3] == "");
+    CHECK(test.size() == 3);
+  };
+
+  SECTION("swap")
+  {
+    rdcflatmap<uint32_t, rdcstr> test;
+
+    test[5] = "foo";
+    test[7] = "bar";
+    test[3] = "asdf";
+
+    rdcflatmap<uint32_t, rdcstr> swapped;
+
+    test.swap(swapped);
+
+    CHECK(swapped[5] == "foo");
+    CHECK(swapped[7] == "bar");
+    CHECK(swapped[3] == "asdf");
+    CHECK(swapped.size() == 3);
+    CHECK(test.empty());
+  };
+
+  SECTION("insert with no hint")
+  {
+    rdcflatmap<uint32_t, rdcstr> test;
+
+    test[5] = "foo";
+    test[7] = "bar";
+    test[3] = "asdf";
+
+    CHECK(test[5] == "foo");
+    CHECK(test[7] == "bar");
+    CHECK(test[3] == "asdf");
+    CHECK(test.find(15) == test.end());
+
+    test.insert({15, "inserted"});
+    CHECK(test.find(15)->second == "inserted");
+  };
+
+  SECTION("insert with hint")
+  {
+    rdcflatmap<uint32_t, rdcstr> test;
+
+    test[5] = "foo";
+    test[7] = "bar";
+    test[3] = "asdf";
+
+    // insert value with proper hint
+    test.insert(test.begin() + 1, {6, "middle"});
+
+    CHECK(test.find(3)->second == "asdf");
+    CHECK(test.find(5)->second == "foo");
+    CHECK(test.find(6)->second == "middle");
+    CHECK(test.find(7)->second == "bar");
+
+    // insert value with wrong hint
+    test.insert(test.begin(), {100, "highvalue"});
+    CHECK(test.find(100)->second == "highvalue");
+
+    // force the map to sort itself
+    for(uint32_t i = 0; i < 24; i++)
+      test[999 + i] = StringFormat::Fmt("test%u", 999 + i);
+
+    test.insert(test.begin(), {101, "highvalue2"});
+
+    CHECK(test.find(101)->second == "highvalue2");
+  };
+
+  SECTION("erase")
+  {
+    rdcflatmap<uint32_t, rdcstr> test;
+
+    test[5] = "foo";
+    test[7] = "bar";
+    test[3] = "asdf";
+
+    CHECK(test.find(5)->second == "foo");
+
+    test.erase(5);
+
+    CHECK(test.find(5) == test.end());
+
+    test[5] = "foo";
+
+    CHECK(test.find(5)->second == "foo");
+
+    test.erase(3);
+    test.erase(4);
+    test.erase(6);
+    test.erase(7);
+
+    CHECK(test.find(5)->second == "foo");
+  };
+
+  SECTION("upper_bound")
+  {
+    // set SortThreshold to 0 to force sorted semantics always
+    rdcflatmap<uint32_t, rdcstr, 0> test;
+
+    test[5] = "foo";
+    test[7] = "bar";
+    test[3] = "asdf";
+
+    // check that they got sorted
+    auto it = test.begin();
+    CHECK(it->first == 3);
+    CHECK(it->second == "asdf");
+    ++it;
+    CHECK(it->first == 5);
+    CHECK(it->second == "foo");
+    ++it;
+    CHECK(it->first == 7);
+    CHECK(it->second == "bar");
+
+    it = test.upper_bound(2);
+    CHECK(it->first == 3);
+    CHECK(it->second == "asdf");
+
+    it = test.upper_bound(3);
+    CHECK(it->first == 5);
+    CHECK(it->second == "foo");
+
+    it = test.upper_bound(4);
+    CHECK(it->first == 5);
+    CHECK(it->second == "foo");
+
+    it = test.upper_bound(5);
+    CHECK(it->first == 7);
+    CHECK(it->second == "bar");
+
+    it = test.upper_bound(6);
+    CHECK(it->first == 7);
+    CHECK(it->second == "bar");
+
+    it = test.upper_bound(7);
+    CHECK(it == test.end());
+
+    it = test.upper_bound(8);
+    CHECK(it == test.end());
   };
 };
 

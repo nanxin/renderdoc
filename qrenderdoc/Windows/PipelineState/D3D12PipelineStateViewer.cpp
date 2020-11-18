@@ -38,15 +38,17 @@
 struct D3D12VBIBTag
 {
   D3D12VBIBTag() { offset = 0; }
-  D3D12VBIBTag(ResourceId i, uint64_t offs, QString f = QString())
+  D3D12VBIBTag(ResourceId i, uint64_t offs, uint64_t sz, QString f = QString())
   {
     id = i;
     offset = offs;
+    size = sz;
     format = f;
   }
 
   ResourceId id;
   uint64_t offset;
+  uint64_t size;
   QString format;
 };
 
@@ -1384,12 +1386,9 @@ void D3D12PipelineStateViewer::setState()
   {
     if(ibufferUsed || ui->showUnused->isChecked())
     {
-      uint64_t length = 0;
+      uint64_t length = state.inputAssembly.indexBuffer.byteSize;
 
       BufferDescription *buf = m_Ctx.GetBuffer(state.inputAssembly.indexBuffer.resourceId);
-
-      if(buf)
-        length = buf->length;
 
       RDTreeWidgetItem *node = new RDTreeWidgetItem(
           {tr("Index"), state.inputAssembly.indexBuffer.resourceId, draw ? draw->indexByteWidth : 0,
@@ -1408,11 +1407,15 @@ void D3D12PipelineStateViewer::setState()
         iformat += lit(" indices[%1]").arg(RENDERDOC_NumVerticesPerPrimitive(draw->topology));
       }
 
-      node->setTag(
-          QVariant::fromValue(D3D12VBIBTag(state.inputAssembly.indexBuffer.resourceId,
-                                           state.inputAssembly.indexBuffer.byteOffset +
-                                               (draw ? draw->indexOffset * draw->indexByteWidth : 0),
-                                           iformat)));
+      uint32_t drawOffset = (draw ? draw->indexOffset * draw->indexByteWidth : 0);
+
+      node->setTag(QVariant::fromValue(
+          D3D12VBIBTag(state.inputAssembly.indexBuffer.resourceId,
+                       state.inputAssembly.indexBuffer.byteOffset + drawOffset,
+                       drawOffset > state.inputAssembly.indexBuffer.byteSize
+                           ? 0
+                           : state.inputAssembly.indexBuffer.byteSize - drawOffset,
+                       iformat)));
 
       for(const D3D12Pipe::ResourceData &res : m_Ctx.CurD3D12PipelineState()->resourceStates)
       {
@@ -1455,11 +1458,15 @@ void D3D12PipelineStateViewer::setState()
         iformat += lit(" indices[%1]").arg(RENDERDOC_NumVerticesPerPrimitive(draw->topology));
       }
 
-      node->setTag(
-          QVariant::fromValue(D3D12VBIBTag(state.inputAssembly.indexBuffer.resourceId,
-                                           state.inputAssembly.indexBuffer.byteOffset +
-                                               (draw ? draw->indexOffset * draw->indexByteWidth : 0),
-                                           iformat)));
+      uint32_t drawOffset = (draw ? draw->indexOffset * draw->indexByteWidth : 0);
+
+      node->setTag(QVariant::fromValue(
+          D3D12VBIBTag(state.inputAssembly.indexBuffer.resourceId,
+                       state.inputAssembly.indexBuffer.byteOffset + drawOffset,
+                       drawOffset > state.inputAssembly.indexBuffer.byteSize
+                           ? 0
+                           : state.inputAssembly.indexBuffer.byteSize - drawOffset,
+                       iformat)));
 
       for(const D3D12Pipe::ResourceData &res : m_Ctx.CurD3D12PipelineState()->resourceStates)
       {
@@ -1489,7 +1496,7 @@ void D3D12PipelineStateViewer::setState()
       {
         RDTreeWidgetItem *node =
             new RDTreeWidgetItem({i, tr("No Buffer Set"), lit("-"), lit("-"), lit("-"), QString()});
-        node->setTag(QVariant::fromValue(D3D12VBIBTag(ResourceId(), 0)));
+        node->setTag(QVariant::fromValue(D3D12VBIBTag(ResourceId(), 0, 0)));
 
         setEmptyRow(node);
         m_EmptyNodes.push_back(node);
@@ -1513,11 +1520,9 @@ void D3D12PipelineStateViewer::setState()
 
     if(showNode(usedSlot, filledSlot))
     {
-      qulonglong length = 0;
+      qulonglong length = v.byteSize;
 
       BufferDescription *buf = m_Ctx.GetBuffer(v.resourceId);
-      if(buf)
-        length = buf->length;
 
       RDTreeWidgetItem *node = NULL;
 
@@ -1528,8 +1533,8 @@ void D3D12PipelineStateViewer::setState()
         node =
             new RDTreeWidgetItem({i, tr("No Buffer Set"), lit("-"), lit("-"), lit("-"), QString()});
 
-      node->setTag(QVariant::fromValue(
-          D3D12VBIBTag(v.resourceId, v.byteOffset, m_Common.GetVBufferFormatString(i))));
+      node->setTag(QVariant::fromValue(D3D12VBIBTag(v.resourceId, v.byteOffset, v.byteSize,
+                                                    m_Common.GetVBufferFormatString(i))));
 
       for(const D3D12Pipe::ResourceData &res : m_Ctx.CurD3D12PipelineState()->resourceStates)
       {
@@ -1610,12 +1615,9 @@ void D3D12PipelineStateViewer::setState()
 
     if(showNode(usedSlot, filledSlot))
     {
-      qulonglong length = 0;
+      qulonglong length = s.byteSize;
 
       BufferDescription *buf = m_Ctx.GetBuffer(s.resourceId);
-
-      if(buf)
-        length = buf->length;
 
       RDTreeWidgetItem *node = new RDTreeWidgetItem(
           {i, s.resourceId, (qulonglong)s.byteOffset, length, s.writtenCountResourceId,
@@ -1821,7 +1823,8 @@ void D3D12PipelineStateViewer::setState()
   ui->stencils->endUpdate();
 
   // set up thread debugging inputs
-  if(m_Ctx.APIProps().shaderDebugging && state.computeShader.reflection && draw &&
+  if(m_Ctx.APIProps().shaderDebugging && state.computeShader.reflection &&
+     state.computeShader.reflection->debugInfo.debuggable && draw &&
      (draw->flags & DrawFlags::Dispatch))
   {
     ui->groupX->setEnabled(true);
@@ -1851,6 +1854,8 @@ void D3D12PipelineStateViewer::setState()
       ui->threadY->setMaximum((int)draw->dispatchThreadsDimension[1] - 1);
       ui->threadZ->setMaximum((int)draw->dispatchThreadsDimension[2] - 1);
     }
+
+    ui->debugThread->setToolTip(QString());
   }
   else
   {
@@ -1863,6 +1868,16 @@ void D3D12PipelineStateViewer::setState()
     ui->threadZ->setEnabled(false);
 
     ui->debugThread->setEnabled(false);
+
+    if(!m_Ctx.APIProps().shaderDebugging)
+      ui->debugThread->setToolTip(tr("This API does not support shader debugging"));
+    else if(!draw || !(draw->flags & DrawFlags::Dispatch))
+      ui->debugThread->setToolTip(tr("No dispatch selected"));
+    else if(!state.computeShader.reflection)
+      ui->debugThread->setToolTip(tr("No compute shader bound"));
+    else if(!state.computeShader.reflection->debugInfo.debuggable)
+      ui->debugThread->setToolTip(tr("This shader doesn't support debugging: %1")
+                                      .arg(state.computeShader.reflection->debugInfo.debugStatus));
   }
 
   // highlight the appropriate stages in the flowchart
@@ -1975,7 +1990,7 @@ void D3D12PipelineStateViewer::resource_itemActivated(RDTreeWidgetItem *item, in
         {
           if(buf->resourceId == m_Ctx.CurD3D12PipelineState()->streamOut.outputs[i].resourceId)
           {
-            size -= m_Ctx.CurD3D12PipelineState()->streamOut.outputs[i].byteOffset;
+            size = m_Ctx.CurD3D12PipelineState()->streamOut.outputs[i].byteSize;
             offs += m_Ctx.CurD3D12PipelineState()->streamOut.outputs[i].byteOffset;
             break;
           }
@@ -2041,9 +2056,12 @@ void D3D12PipelineStateViewer::cbuffer_itemActivated(RDTreeWidgetItem *item, int
     const D3D12Pipe::ConstantBuffer &buf =
         m_Ctx.CurD3D12PipelineState()->rootElements[cb.rootElement].constantBuffers[cb.reg];
 
-    IBufferViewer *viewer = m_Ctx.ViewBuffer(buf.byteOffset, buf.byteSize, buf.resourceId);
+    if(buf.resourceId != ResourceId())
+    {
+      IBufferViewer *viewer = m_Ctx.ViewBuffer(buf.byteOffset, buf.byteSize, buf.resourceId);
 
-    m_Ctx.AddDockWindow(viewer->Widget(), DockReference::AddTo, this);
+      m_Ctx.AddDockWindow(viewer->Widget(), DockReference::AddTo, this);
+    }
 
     return;
   }
@@ -2068,7 +2086,7 @@ void D3D12PipelineStateViewer::on_iaBuffers_itemActivated(RDTreeWidgetItem *item
 
     if(buf.id != ResourceId())
     {
-      IBufferViewer *viewer = m_Ctx.ViewBuffer(buf.offset, UINT64_MAX, buf.id, buf.format);
+      IBufferViewer *viewer = m_Ctx.ViewBuffer(buf.offset, buf.size, buf.id, buf.format);
 
       m_Ctx.AddDockWindow(viewer->Widget(), DockReference::AddTo, this);
     }
@@ -3252,7 +3270,8 @@ void D3D12PipelineStateViewer::on_debugThread_clicked()
 
   // viewer takes ownership of the trace
   IShaderViewer *s =
-      m_Ctx.DebugShader(&bindMapping, shaderDetails, ResourceId(), trace, debugContext);
+      m_Ctx.DebugShader(&bindMapping, shaderDetails,
+                        m_Ctx.CurPipelineState().GetComputePipelineObject(), trace, debugContext);
 
   m_Ctx.AddDockWindow(s->Widget(), DockReference::AddTo, this);
 }

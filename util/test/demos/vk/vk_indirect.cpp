@@ -30,50 +30,6 @@ RD_TEST(VK_Indirect, VulkanGraphicsTest)
       "Tests different indirect drawing and dispatching functions, including parameters that are "
       "generated on the GPU and not known on the CPU at submit time";
 
-  std::string common = R"EOSHADER(
-
-#version 420 core
-
-struct v2f
-{
-	vec4 pos;
-	vec4 col;
-	vec4 uv;
-};
-
-)EOSHADER";
-
-  const std::string vertex = R"EOSHADER(
-
-layout(location = 0) in vec3 Position;
-layout(location = 1) in vec4 Color;
-layout(location = 2) in vec2 UV;
-
-layout(location = 0) out v2f vertOut;
-
-void main()
-{
-	vertOut.pos = vec4(Position.xyz*vec3(1,-1,1), 1);
-	gl_Position = vertOut.pos;
-	vertOut.col = Color;
-	vertOut.uv = vec4(UV.xy, 0, 1);
-}
-
-)EOSHADER";
-
-  const std::string pixel = R"EOSHADER(
-
-layout(location = 0) in v2f vertIn;
-
-layout(location = 0, index = 0) out vec4 Color;
-
-void main()
-{
-	Color = vertIn.col;
-}
-
-)EOSHADER";
-
   const std::string compute = R"EOSHADER(
 
 #version 430 core
@@ -145,15 +101,26 @@ void main()
 
   void Prepare(int argc, char **argv)
   {
+    optDevExts.push_back(VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME);
+
     features.multiDrawIndirect = VK_TRUE;
 
     VulkanGraphicsTest::Prepare(argc, argv);
+
+    if(devVersion >= VK_MAKE_VERSION(1, 2, 0))
+    {
+      static VkPhysicalDeviceVulkan12Features feats = {
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+      };
+
+      feats.drawIndirectCount = VK_TRUE;
+
+      devInfoNext = &feats;
+    }
   }
 
   int main()
   {
-    optDevExts.push_back(VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME);
-
     // initialise, create window, create context, etc
     if(!Init())
       return 3;
@@ -183,8 +150,8 @@ void main()
     };
 
     pipeCreateInfo.stages = {
-        CompileShaderModule(common + vertex, ShaderLang::glsl, ShaderStage::vert, "main"),
-        CompileShaderModule(common + pixel, ShaderLang::glsl, ShaderStage::frag, "main"),
+        CompileShaderModule(VKDefaultVertex, ShaderLang::glsl, ShaderStage::vert, "main"),
+        CompileShaderModule(VKDefaultPixel, ShaderLang::glsl, ShaderStage::frag, "main"),
     };
 
     VkPipeline drawpipe = createGraphicsPipeline(pipeCreateInfo);
@@ -298,14 +265,27 @@ void main()
                            vkh::ClearColorValue(0.2f, 0.2f, 0.2f, 1.0f), 1,
                            vkh::ImageSubresourceRange());
 
+      vkh::cmdPipelineBarrier(
+          primary, {}, {vkh::BufferMemoryBarrier(VK_ACCESS_TRANSFER_WRITE_BIT,
+                                                 VK_ACCESS_TRANSFER_WRITE_BIT, ssbo.buffer)});
+
+      // clear the buffer so that we can't read any of the data back from outside the command buffer
+      vkCmdFillBuffer(primary, ssbo.buffer, 0, ssbo_size, 0);
+
+      vkh::cmdPipelineBarrier(
+          primary, {}, {vkh::BufferMemoryBarrier(VK_ACCESS_TRANSFER_WRITE_BIT,
+                                                 VK_ACCESS_TRANSFER_WRITE_BIT, ssbo.buffer)});
+
       {
         VkCommandBuffer cmd = primary;
 
         pushMarker(cmd, "Primary: Dispatches");
 
         vkh::cmdPipelineBarrier(
-            cmd, {}, {vkh::BufferMemoryBarrier(VK_ACCESS_TRANSFER_WRITE_BIT,
-                                               VK_ACCESS_INDIRECT_COMMAND_READ_BIT, ssbo.buffer)});
+            cmd, {},
+            {vkh::BufferMemoryBarrier(
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, ssbo.buffer)});
 
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, comppipe);
         vkh::cmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, complayout, 0, {descset}, {});
@@ -323,8 +303,10 @@ void main()
         vkCmdDispatch(cmd, 1, 1, 1);
 
         vkh::cmdPipelineBarrier(
-            cmd, {}, {vkh::BufferMemoryBarrier(VK_ACCESS_TRANSFER_WRITE_BIT,
-                                               VK_ACCESS_INDIRECT_COMMAND_READ_BIT, ssbo.buffer)});
+            cmd, {},
+            {vkh::BufferMemoryBarrier(
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, ssbo.buffer)});
 
         mode = 2;
         vkCmdPushConstants(cmd, complayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, &mode);
@@ -500,7 +482,7 @@ void main()
         vkCmdDispatch(cmd, 1, 1, 1);
 
         vkh::cmdPipelineBarrier(
-            cmd, {}, {vkh::BufferMemoryBarrier(VK_ACCESS_TRANSFER_WRITE_BIT,
+            cmd, {}, {vkh::BufferMemoryBarrier(VK_ACCESS_SHADER_WRITE_BIT,
                                                VK_ACCESS_INDIRECT_COMMAND_READ_BIT, ssbo.buffer)});
 
         mode = 2;

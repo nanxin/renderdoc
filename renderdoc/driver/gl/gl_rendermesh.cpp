@@ -98,6 +98,11 @@ void GLReplay::RenderMesh(uint32_t eventId, const rdcarray<MeshFormat> &secondar
       guessProj = Matrix4f::Orthographic(cfg.position.nearPlane, cfg.position.farPlane);
     }
 
+    if(cfg.position.flipY)
+    {
+      guessProj[5] *= -1.0f;
+    }
+
     guessProjInv = guessProj.Inverse();
 
     ModelViewProj = projMat.Mul(camMat.Mul(guessProjInv));
@@ -139,8 +144,8 @@ void GLReplay::RenderMesh(uint32_t eventId, const rdcarray<MeshFormat> &secondar
         drv.glBindVertexBuffer(0, vb, (GLintptr)fmt.vertexByteOffset, fmt.vertexByteStride);
 
         {
-          GLint bytesize = 0;
-          drv.glGetNamedBufferParameterivEXT(vb, eGL_BUFFER_SIZE, &bytesize);
+          GLuint bytesize = 0;
+          drv.glGetNamedBufferParameterivEXT(vb, eGL_BUFFER_SIZE, (GLint *)&bytesize);
 
           // skip empty source buffers
           if(bytesize == 0)
@@ -202,36 +207,45 @@ void GLReplay::RenderMesh(uint32_t eventId, const rdcarray<MeshFormat> &secondar
             meshData[i]->format.compType == CompType::UNorm ||
             meshData[i]->format.compType == CompType::SNorm)
     {
-      GLenum fmttype = eGL_UNSIGNED_INT;
+      if(meshData[i]->format.compByteWidth == 8)
+      {
+        drv.glVertexAttribLFormat(i, meshData[i]->format.compCount, eGL_DOUBLE, 0);
 
-      if(meshData[i]->format.compByteWidth == 4)
-      {
-        if(meshData[i]->format.compType == CompType::Float)
-          fmttype = eGL_FLOAT;
-        else if(meshData[i]->format.compType == CompType::UNorm)
-          fmttype = eGL_UNSIGNED_INT;
-        else if(meshData[i]->format.compType == CompType::SNorm)
-          fmttype = eGL_INT;
+        progidx |= (1 << i);
       }
-      else if(meshData[i]->format.compByteWidth == 2)
+      else
       {
-        if(meshData[i]->format.compType == CompType::Float)
-          fmttype = eGL_HALF_FLOAT;
-        else if(meshData[i]->format.compType == CompType::UNorm)
-          fmttype = eGL_UNSIGNED_SHORT;
-        else if(meshData[i]->format.compType == CompType::SNorm)
-          fmttype = eGL_SHORT;
-      }
-      else if(meshData[i]->format.compByteWidth == 1)
-      {
-        if(meshData[i]->format.compType == CompType::UNorm)
-          fmttype = eGL_UNSIGNED_BYTE;
-        else if(meshData[i]->format.compType == CompType::SNorm)
-          fmttype = eGL_BYTE;
-      }
+        GLenum fmttype = eGL_UNSIGNED_INT;
 
-      drv.glVertexAttribFormat(i, meshData[i]->format.compCount, fmttype,
-                               meshData[i]->format.compType != CompType::Float, 0);
+        if(meshData[i]->format.compByteWidth == 4)
+        {
+          if(meshData[i]->format.compType == CompType::Float)
+            fmttype = eGL_FLOAT;
+          else if(meshData[i]->format.compType == CompType::UNorm)
+            fmttype = eGL_UNSIGNED_INT;
+          else if(meshData[i]->format.compType == CompType::SNorm)
+            fmttype = eGL_INT;
+        }
+        else if(meshData[i]->format.compByteWidth == 2)
+        {
+          if(meshData[i]->format.compType == CompType::Float)
+            fmttype = eGL_HALF_FLOAT;
+          else if(meshData[i]->format.compType == CompType::UNorm)
+            fmttype = eGL_UNSIGNED_SHORT;
+          else if(meshData[i]->format.compType == CompType::SNorm)
+            fmttype = eGL_SHORT;
+        }
+        else if(meshData[i]->format.compByteWidth == 1)
+        {
+          if(meshData[i]->format.compType == CompType::UNorm)
+            fmttype = eGL_UNSIGNED_BYTE;
+          else if(meshData[i]->format.compType == CompType::SNorm)
+            fmttype = eGL_BYTE;
+        }
+
+        drv.glVertexAttribFormat(i, meshData[i]->format.compCount, fmttype,
+                                 meshData[i]->format.compType != CompType::Float, 0);
+      }
     }
     else if(meshData[i]->format.compType == CompType::UInt ||
             meshData[i]->format.compType == CompType::SInt)
@@ -262,12 +276,6 @@ void GLReplay::RenderMesh(uint32_t eventId, const rdcarray<MeshFormat> &secondar
 
       drv.glVertexAttribIFormat(i, meshData[i]->format.compCount, fmttype, 0);
     }
-    else if(meshData[i]->format.compType == CompType::Double)
-    {
-      drv.glVertexAttribLFormat(i, meshData[i]->format.compCount, eGL_DOUBLE, 0);
-
-      progidx |= (1 << i);
-    }
 
     GLintptr offs = (GLintptr)meshData[i]->vertexByteOffset;
 
@@ -278,8 +286,8 @@ void GLReplay::RenderMesh(uint32_t eventId, const rdcarray<MeshFormat> &secondar
         m_pDriver->GetResourceManager()->GetCurrentResource(meshData[i]->vertexResourceId).name;
 
     {
-      GLint bytesize = 0;
-      drv.glGetNamedBufferParameterivEXT(vb, eGL_BUFFER_SIZE, &bytesize);
+      GLuint bytesize = 0;
+      drv.glGetNamedBufferParameterivEXT(vb, eGL_BUFFER_SIZE, (GLint *)&bytesize);
 
       // skip empty source buffers
       if(bytesize == 0)

@@ -314,7 +314,7 @@ if(cmake_build_type_lower STREQUAL "release" OR
 endif()
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -fstrict-aliasing")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -fno-strict-aliasing")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fvisibility=hidden -fvisibility-inlines-hidden")
     if(ENABLE_GGP)
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -gline-tables-only -fno-omit-frame-pointer")
@@ -390,7 +390,7 @@ add_subdirectory(renderdoc)
 # are handled in common
 if(ENABLE_QRENDERDOC OR ENABLE_PYRENDERDOC)
     # Make sure Python 3 is found
-    set(Python_ADDITIONAL_VERSIONS 3.4 3.5 3.6 3.7)
+    set(Python_ADDITIONAL_VERSIONS 3.8 3.7 3.6 3.5 3.4)
     find_package(PythonInterp 3 REQUIRED)
     find_package(PythonLibs 3 REQUIRED)
     # we also need python3-config for swig

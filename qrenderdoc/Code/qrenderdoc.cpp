@@ -22,6 +22,7 @@
  * THE SOFTWARE.
  ******************************************************************************/
 
+#include <stdio.h>
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QDir>
@@ -93,6 +94,11 @@ int main(int argc, char *argv[])
   QGuiApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
   QGuiApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
 
+#if(QT_VERSION >= QT_VERSION_CHECK(5, 14, 0))
+  QGuiApplication::setHighDpiScaleFactorRoundingPolicy(
+      Qt::HighDpiScaleFactorRoundingPolicy::RoundPreferFloor);
+#endif
+
   QApplication::setApplicationVersion(lit(FULL_VERSION_STRING));
 
 // shortcut here so we can run this with a non-GUI application
@@ -104,21 +110,35 @@ int main(int argc, char *argv[])
 
     bool errors = false;
 
-    qInfo() << "Checking python binding consistency.";
+    FILE *logOut = NULL;
+
+    if(argc >= 3)
+      logOut = fopen(argv[2], "w");
+
+    if(logOut == NULL)
+      logOut = stdout;
+
+    fputs("Checking python binding consistency.\n", logOut);
+
+    rdcstr errorLog;
 
     {
       PythonContextHandle py;
-      errors = py.ctx().CheckInterfaces();
+      errors = py.ctx().CheckInterfaces(errorLog);
     }
 
     if(errors)
     {
-      qCritical() << "Found errors in python bindings. Please fix!";
+      RENDERDOC_LogMessage(LogType::Error, "EXTN", __FILE__, __LINE__, errorLog.c_str());
+      fputs("Found errors in python bindings. Please fix!\n", logOut);
+      fputs(errorLog.c_str(), logOut);
       return 1;
     }
-
-    qInfo() << "Python bindings are consistent.";
-    return 0;
+    else
+    {
+      fputs("Python bindings are consistent.\n", logOut);
+      return 0;
+    }
   }
 #endif
 
@@ -169,11 +189,7 @@ int main(int argc, char *argv[])
   bool parsedCommands = parser.parse(application.arguments());
 
   if(!parsedCommands)
-  {
-    QString error = parser.errorText();
-    printf("%s\n", error.toUtf8().data());
-    return 1;
-  }
+    qCritical() << parser.errorText();
 
   if(parser.isSet(helpOption))
   {
@@ -415,7 +431,7 @@ int main(int argc, char *argv[])
         config.Save();
       }
 
-      CaptureContext ctx(filename, remoteHost, remoteIdent, temp, config);
+      CaptureContext ctx(config);
       if(replayHostIndex >= 0)
       {
         ctx.SetRemoteHost(replayHostIndex);
@@ -437,6 +453,8 @@ int main(int argc, char *argv[])
 
       ANALYTIC_SET(Metadata.DaysUsed[QDateTime::currentDateTime().date().day()], true);
 
+      bool pythonExited = false;
+
       if(!pyscripts.isEmpty())
       {
         PythonContextHandle py;
@@ -445,22 +463,29 @@ int main(int argc, char *argv[])
 
         py.ctx().setGlobal("pyrenderdoc", (ICaptureContext *)&ctx);
 
-        QObject::connect(&py.ctx(), &PythonContext::exception,
-                         [](const QString &type, const QString &value, int, QList<QString> frames) {
+        QObject::connect(
+            &py.ctx(), &PythonContext::exception,
+            [&pythonExited](const QString &type, const QString &value, int, QList<QString> frames) {
 
-                           QString exString;
+              if(type == lit("SystemExit"))
+              {
+                pythonExited = true;
+                return;
+              }
 
-                           if(!frames.isEmpty())
-                           {
-                             exString += tr("Traceback (most recent call last):\n");
-                             for(const QString &f : frames)
-                               exString += QFormatStr("  %1\n").arg(f);
-                           }
+              QString exString;
 
-                           exString += QFormatStr("%1: %2\n").arg(type).arg(value);
+              if(!frames.isEmpty())
+              {
+                exString += tr("Traceback (most recent call last):\n");
+                for(const QString &f : frames)
+                  exString += QFormatStr("  %1\n").arg(f);
+              }
 
-                           qCritical("%s", exString.toUtf8().data());
-                         });
+              exString += QFormatStr("%1: %2\n").arg(type).arg(value);
+
+              qCritical("%s", exString.toUtf8().data());
+            });
 
         QObject::connect(&py.ctx(), &PythonContext::textOutput,
                          [](bool isStdError, const QString &output) {
@@ -482,14 +507,22 @@ int main(int argc, char *argv[])
           {
             qWarning() << "Invalid python script" << f;
           }
+
+          if(pythonExited)
+            break;
         }
       }
 
-      while(ctx.isRunning())
+      if(!pythonExited)
       {
-        application.processEvents(QEventLoop::WaitForMoreEvents);
-        QCoreApplication::sendPostedEvents();
-        QCoreApplication::sendPostedEvents(NULL, QEvent::DeferredDelete);
+        ctx.Begin(filename, remoteHost, remoteIdent, temp);
+
+        while(ctx.isRunning())
+        {
+          application.processEvents(QEventLoop::WaitForMoreEvents);
+          QCoreApplication::sendPostedEvents();
+          QCoreApplication::sendPostedEvents(NULL, QEvent::DeferredDelete);
+        }
       }
 
       config.Save();

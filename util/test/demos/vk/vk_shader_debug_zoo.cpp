@@ -1789,7 +1789,10 @@ void main()
       R"EOSHADER(
                OpExecutionMode %main OriginUpperLeft
 )EOSHADER";
-  std::string spv_debug;
+  std::string spv_debug =
+      R"EOSHADER(
+   %filename = OpString "file.foo"
+)EOSHADER";
   std::string decorations = R"EOSHADER(
                OpDecorate %flatData Flat
                OpDecorate %flatData Location 1
@@ -1872,6 +1875,8 @@ void main()
 %ptr_Private_float4 = OpTypePointer Private %float4
 %ptr_Private_float4x4 = OpTypePointer Private %float4x4
 
+%ptr_Function_float = OpTypePointer Function %float
+
 %ptr_Uniform_float = OpTypePointer Uniform %float
 %ptr_Uniform_float2 = OpTypePointer Uniform %float2
 %ptr_Uniform_float3 = OpTypePointer Uniform %float3
@@ -1918,10 +1923,25 @@ void main()
   std::string functions = R"EOSHADER(
 
        %doubler = OpFunction %float None %doublerfunc
+                  OpLine %filename 123 456
+                  OpNoLine
+                  OpLine %filename 111 222
     %doubler_in = OpFunctionParameter %float
+                  OpNoLine
+                  OpLine %filename 99 55
+                  OpLine %filename 199 155
  %doubler_begin = OpLabel
+                  OpLine %filename 299 255
+   %doubler_tmp = OpVariable %ptr_Function_float Function
+                  OpLine %filename 399 355
    %doubler_ret = OpFMul %float %float_2_0 %doubler_in
-                  OpReturnValue %doubler_ret
+                  OpLine %filename 499 455
+                  OpStore %doubler_tmp %doubler_ret
+                  OpLine %filename 599 555
+  %doubler_ret2 = OpLoad %float %doubler_tmp
+                  OpLine %filename 699 655
+                  OpReturnValue %doubler_ret2
+                  OpLine %filename 799 755
                   OpFunctionEnd
 )EOSHADER";
   std::vector<std::string> asm_tests;
@@ -3395,8 +3415,8 @@ OpMemberDecorate %cbuffer_struct 17 Offset 216    ; double doublePackSource
 
     // this set layout has arrays of each type. We'll uniformly, dynamic-uniformly, and
     // non-uniformly access each of these
-    VkDescriptorSetLayout setlayout1;
-    VkDescriptorSetLayout setlayout2;
+    VkDescriptorSetLayout setlayout1 = VK_NULL_HANDLE;
+    VkDescriptorSetLayout setlayout2 = VK_NULL_HANDLE;
 
     if(descIndexing)
     {
@@ -3630,6 +3650,7 @@ OpMemberDecorate %cbuffer_struct 17 Offset 216    ; double doublePackSource
         float f[4];
         int i[4];
       } rnd;
+      memset(&rnd, 0, sizeof(rnd));
 
       for(size_t x = 0; x < 16; x++)
       {
@@ -3730,34 +3751,16 @@ OpMemberDecorate %cbuffer_struct 17 Offset 216    ; double doublePackSource
       vkDeviceWaitIdle(device);
     }
 
-    VkSampler pointsampler = VK_NULL_HANDLE;
-    VkSampler linearsampler = VK_NULL_HANDLE;
-    VkSampler mipsampler = VK_NULL_HANDLE;
-    VkSampler shadowsampler = VK_NULL_HANDLE;
-
-    VkSamplerCreateInfo sampInfo = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-    sampInfo.magFilter = VK_FILTER_NEAREST;
-    sampInfo.minFilter = VK_FILTER_NEAREST;
-
-    vkCreateSampler(device, &sampInfo, NULL, &pointsampler);
-
-    sampInfo.magFilter = VK_FILTER_LINEAR;
-    sampInfo.minFilter = VK_FILTER_LINEAR;
-
-    vkCreateSampler(device, &sampInfo, NULL, &linearsampler);
-
-    sampInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-
-    vkCreateSampler(device, &sampInfo, NULL, &mipsampler);
-
-    sampInfo.compareEnable = VK_TRUE;
-    sampInfo.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
-
-    vkCreateSampler(device, &sampInfo, NULL, &shadowsampler);
+    VkSampler pointsampler = createSampler(vkh::SamplerCreateInfo(VK_FILTER_NEAREST));
+    VkSampler linearsampler = createSampler(vkh::SamplerCreateInfo(VK_FILTER_LINEAR));
+    VkSampler mipsampler = createSampler(vkh::SamplerCreateInfo(VK_FILTER_LINEAR));
+    VkSampler shadowsampler = createSampler(vkh::SamplerCreateInfo(
+        VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT, 0.0f,
+        VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK, 0.0f, 0.0f, 0.0f, VK_COMPARE_OP_LESS_OR_EQUAL));
 
     VkDescriptorSet descset0 = allocateDescriptorSet(setlayout0);
-    VkDescriptorSet descset1;
-    VkDescriptorSet descset2;
+    VkDescriptorSet descset1 = VK_NULL_HANDLE;
+    VkDescriptorSet descset2 = VK_NULL_HANDLE;
 
     if(descIndexing)
     {
@@ -4177,11 +4180,6 @@ OpMemberDecorate %cbuffer_struct 17 Offset 216    ; double doublePackSource
 
       Present();
     }
-
-    vkDestroySampler(device, pointsampler, NULL);
-    vkDestroySampler(device, linearsampler, NULL);
-    vkDestroySampler(device, mipsampler, NULL);
-    vkDestroySampler(device, shadowsampler, NULL);
 
     return 0;
   }

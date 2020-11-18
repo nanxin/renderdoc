@@ -42,7 +42,12 @@
 #include <signal.h>
 
 #define __PRETTY_FUNCTION_SIGNATURE__ __PRETTY_FUNCTION__
+#if ENABLED(RDOC_SWITCH)
+#include <stdlib.h>
+#define OS_DEBUG_BREAK() abort()
+#else
 #define OS_DEBUG_BREAK() raise(SIGTRAP)
+#endif
 
 #if defined(__clang__)
 
@@ -134,7 +139,7 @@ bool DebuggerPresent();
 #define CONCAT(a, b) CONCAT2(a, b)
 
 #define RDCEraseMem(a, b) memset(a, 0, b)
-#define RDCEraseEl(a) memset(&a, 0, sizeof(a))
+#define RDCEraseEl(a) memset((void *)&a, 0, sizeof(a))
 
 template <typename T>
 T RDCCLAMP(const T &val, const T &mn, const T &mx)
@@ -158,6 +163,98 @@ template <typename T>
 T RDCLERP(const T &a, const T &b, const T &step)
 {
   return (1.0f - step) * a + step * b;
+}
+
+inline bool RDCISNAN(float input)
+{
+  union
+  {
+    uint32_t u;
+    float f;
+  } x;
+
+  x.f = input;
+
+  // ignore sign bit (0x80000000)
+  //     check that exponent (0x7f800000) is fully set
+  // AND that mantissa (0x007fffff) is greater than 0 (if it's 0 then this is an inf)
+  return (x.u & 0x7fffffffU) > 0x7f800000U;
+}
+
+inline bool RDCISINF(float input)
+{
+  union
+  {
+    uint32_t u;
+    float f;
+  } x;
+
+  x.f = input;
+
+  // ignore sign bit (0x80000000)
+  //     check that exponent (0x7f800000) is fully set
+  // AND that mantissa (0x007fffff) is exactly than 0 (if it's non-0 then this is an nan)
+  return (x.u & 0x7fffffffU) == 0x7f800000U;
+}
+
+inline bool RDCISFINITE(float input)
+{
+  union
+  {
+    uint32_t u;
+    float f;
+  } x;
+
+  x.f = input;
+
+  // ignore sign bit (0x80000000)
+  //     check that exponent (0x7f800000) is not fully set (if it's fully set then this is a
+  //     nan/inf)
+  return (x.u & 0x7f800000U) != 0x7f800000U;
+}
+
+// double variants
+
+inline bool RDCISNAN(double input)
+{
+  union
+  {
+    uint64_t u;
+    double f;
+  } x;
+
+  x.f = input;
+
+  // ignore sign bit (0x80000000)
+  //     check that exponent (0x7f800000) is fully set
+  // AND that mantissa (0x007fffff) is greater than 0 (if it's 0 then this is an inf)
+  return (x.u & 0x7fffffffffffffffULL) > 0x7ff0000000000000ULL;
+}
+
+inline bool RDCISINF(double input)
+{
+  union
+  {
+    uint64_t u;
+    double f;
+  } x;
+
+  x.f = input;
+
+  return (x.u & 0x7fffffffffffffffULL) == 0x7ff0000000000000ULL;
+}
+
+inline bool RDCISFINITE(double input)
+{
+  union
+  {
+    uint64_t u;
+    double f;
+  } x;
+
+  x.f = input;
+
+  return (x.u & 0x7ff0000000000000ULL) != 0x7ff0000000000000ULL;
 }
 
 template <typename T>
@@ -346,13 +443,13 @@ void rdclog_direct(time_t utcTime, uint32_t pid, LogType type, const char *proje
 const char *rdclog_getfilename();
 void rdclog_filename(const char *filename);
 void rdclog_enableoutput();
-void rdclog_closelog(const char *filename);
+void rdclog_closelog();
 
 #define RDCLOGFILE(fn) rdclog_filename(fn)
 #define RDCGETLOGFILE() rdclog_getfilename()
 
 #define RDCLOGOUTPUT() rdclog_enableoutput()
-#define RDCSTOPLOGGING(filename) rdclog_closelog(filename)
+#define RDCSTOPLOGGING() rdclog_closelog()
 
 #if(ENABLED(RDOC_DEVEL) || ENABLED(FORCE_DEBUG_LOGS)) && DISABLED(STRIP_DEBUG_LOGS)
 #define RDCDEBUG(...) rdclog(LogType::Debug, __VA_ARGS__)

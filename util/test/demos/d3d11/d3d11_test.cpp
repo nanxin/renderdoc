@@ -112,7 +112,7 @@ void D3D11GraphicsTest::Prepare(int argc, char **argv)
     if(dyn_D3D11CreateDevice)
     {
       D3D_FEATURE_LEVEL features[] = {D3D_FEATURE_LEVEL_11_0};
-      hr = CreateDevice(adapters, NULL, features, 0);
+      hr = CreateDevice(NULL, NULL, features, 0);
 
       if(SUCCEEDED(hr))
       {
@@ -148,10 +148,7 @@ bool D3D11GraphicsTest::Init(IDXGIAdapterPtr pAdapter)
 
   if(headless)
   {
-    if(pAdapter != NULL)
-      hr = CreateDevice({pAdapter}, NULL, features, flags);
-    else
-      hr = CreateDevice(adapters, NULL, features, flags);
+    hr = CreateDevice(pAdapter, NULL, features, flags);
 
     if(FAILED(hr))
     {
@@ -182,10 +179,7 @@ bool D3D11GraphicsTest::Init(IDXGIAdapterPtr pAdapter)
   swapDesc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
   swapDesc.Flags = 0;
 
-  if(pAdapter != NULL)
-    hr = CreateDevice({pAdapter}, &swapDesc, features, flags);
-  else
-    hr = CreateDevice(adapters, &swapDesc, features, flags);
+  hr = CreateDevice(pAdapter, &swapDesc, features, flags);
 
   if(FAILED(hr))
   {
@@ -222,23 +216,39 @@ GraphicsWindow *D3D11GraphicsTest::MakeWindow(int width, int height, const char 
   return new Win32Window(width, height, title);
 }
 
-HRESULT D3D11GraphicsTest::CreateDevice(const std::vector<IDXGIAdapterPtr> &adaptersToTry,
-                                        DXGI_SWAP_CHAIN_DESC *swapDesc, D3D_FEATURE_LEVEL *features,
-                                        UINT flags)
+HRESULT D3D11GraphicsTest::CreateDevice(IDXGIAdapterPtr adapterToTry, DXGI_SWAP_CHAIN_DESC *swapDesc,
+                                        D3D_FEATURE_LEVEL *features, UINT flags)
 {
   HRESULT hr = E_FAIL;
-  for(size_t i = 0; i < adaptersToTry.size(); ++i)
+
+  if(adapterToTry)
   {
     if(swapDesc)
-      hr = dyn_D3D11CreateDeviceAndSwapChain(adaptersToTry[i], D3D_DRIVER_TYPE_UNKNOWN, NULL, flags,
+      hr = dyn_D3D11CreateDeviceAndSwapChain(adapterToTry, D3D_DRIVER_TYPE_UNKNOWN, NULL, flags,
                                              features, 1, D3D11_SDK_VERSION, swapDesc, &swap, &dev,
                                              NULL, &ctx);
     else
-      hr = dyn_D3D11CreateDevice(adaptersToTry[i], D3D_DRIVER_TYPE_UNKNOWN, NULL, flags, features,
-                                 1, D3D11_SDK_VERSION, &dev, NULL, &ctx);
+      hr = dyn_D3D11CreateDevice(adapterToTry, D3D_DRIVER_TYPE_UNKNOWN, NULL, flags, features, 1,
+                                 D3D11_SDK_VERSION, &dev, NULL, &ctx);
 
     if(SUCCEEDED(hr))
-      break;
+      return hr;
+  }
+  else
+  {
+    for(size_t i = 0; i < adapters.size(); ++i)
+    {
+      if(swapDesc)
+        hr = dyn_D3D11CreateDeviceAndSwapChain(adapters[i], D3D_DRIVER_TYPE_UNKNOWN, NULL, flags,
+                                               features, 1, D3D11_SDK_VERSION, swapDesc, &swap,
+                                               &dev, NULL, &ctx);
+      else
+        hr = dyn_D3D11CreateDevice(adapters[i], D3D_DRIVER_TYPE_UNKNOWN, NULL, flags, features, 1,
+                                   D3D11_SDK_VERSION, &dev, NULL, &ctx);
+
+      if(SUCCEEDED(hr))
+        break;
+    }
   }
 
   // If it failed, try again on warp
@@ -339,6 +349,9 @@ void D3D11GraphicsTest::Shutdown()
   dev1 = NULL;
   dev2 = NULL;
   dev = NULL;
+
+  swapBlitVS = NULL;
+  swapBlitPS = NULL;
 }
 
 bool D3D11GraphicsTest::Running()
@@ -580,8 +593,7 @@ void D3D11GraphicsTest::SetStencilRef(UINT ref)
   ctx->OMSetDepthStencilState(state, ref);
 }
 
-ID3DBlobPtr D3D11GraphicsTest::Compile(std::string src, std::string entry, std::string profile,
-                                       ID3DBlob **unstripped)
+ID3DBlobPtr D3D11GraphicsTest::Compile(std::string src, std::string entry, std::string profile)
 {
   ID3DBlobPtr blob = NULL;
   ID3DBlobPtr error = NULL;
@@ -602,25 +614,20 @@ ID3DBlobPtr D3D11GraphicsTest::Compile(std::string src, std::string entry, std::
     return NULL;
   }
 
-  if(unstripped)
-  {
-    blob.AddRef();
-    *unstripped = blob.GetInterfacePtr();
-
-    ID3DBlobPtr stripped = NULL;
-
-    dyn_D3DStripShader(blob->GetBufferPointer(), blob->GetBufferSize(),
-                       D3DCOMPILER_STRIP_REFLECTION_DATA | D3DCOMPILER_STRIP_DEBUG_INFO, &stripped);
-
-    blob = NULL;
-
-    return stripped;
-  }
-
   return blob;
 }
 
-void D3D11GraphicsTest::WriteBlob(std::string name, ID3DBlob *blob, bool compress)
+void D3D11GraphicsTest::Strip(ID3DBlobPtr &ptr)
+{
+  ID3DBlobPtr stripped = NULL;
+
+  dyn_D3DStripShader(ptr->GetBufferPointer(), ptr->GetBufferSize(),
+                     D3DCOMPILER_STRIP_REFLECTION_DATA | D3DCOMPILER_STRIP_DEBUG_INFO, &stripped);
+
+  ptr = stripped;
+}
+
+void D3D11GraphicsTest::WriteBlob(std::string name, ID3DBlobPtr blob, bool compress)
 {
   FILE *f = NULL;
   fopen_s(&f, name.c_str(), "wb");
@@ -651,7 +658,7 @@ void D3D11GraphicsTest::WriteBlob(std::string name, ID3DBlob *blob, bool compres
   fclose(f);
 }
 
-ID3DBlobPtr D3D11GraphicsTest::SetBlobPath(std::string name, ID3DBlob *blob)
+void D3D11GraphicsTest::SetBlobPath(std::string name, ID3DBlobPtr &blob)
 {
   ID3DBlobPtr newBlob = NULL;
 
@@ -668,7 +675,7 @@ ID3DBlobPtr D3D11GraphicsTest::SetBlobPath(std::string name, ID3DBlob *blob)
   dyn_D3DSetBlobPart(blob->GetBufferPointer(), blob->GetBufferSize(), D3D_BLOB_PRIVATE_DATA, 0,
                      pathData.c_str(), pathData.size() + 1, &newBlob);
 
-  return newBlob;
+  blob = newBlob;
 }
 
 void D3D11GraphicsTest::SetBlobPath(std::string name, ID3D11DeviceChild *shader)

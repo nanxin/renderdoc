@@ -50,9 +50,9 @@ bool is_exr_file(FILE *f)
 /*
 
  -----------------------------
- File format for version 0x100:
+ File format for version 0x100 and up:
 
- RDCHeader
+ FileHeader
  {
    uint64_t MAGIC_HEADER;
 
@@ -60,13 +60,19 @@ bool is_exr_file(FILE *f)
    uint32_t headerLength; // length of this header, from the start of the file. Allows adding new
                           // fields without breaking compatibilty
    char progVersion[16]; // string "v0.34" or similar with 0s after the string
+ }
 
+ BinaryThumbnail
+ {
    // thumbnail
    uint16_t thumbWidth;
    uint16_t thumbHeight; // thumbnail width and height. If 0x0, no thumbnail data
    uint32_t thumbLength; // number of bytes in thumbnail array below
    byte thumbData[ thumbLength ]; // JPG compressed thumbnail
+ }
 
+ CaptureMetaData
+ {
    // where was the capture created
    uint64_t machineIdent;
 
@@ -74,6 +80,13 @@ bool is_exr_file(FILE *f)
    uint8_t driverNameLength; // length in bytes of the driver name including null terminator
    char driverName[ driverNameLength ]; // the driver name in ASCII. Useful if the current
                                         // implementation doesn't recognise the driver ID above
+ }
+
+ if FileHeader.version >= 0x102 // new fields in 1.2
+ CaptureTimeBase
+ {
+   uint64_t timeBase; // base tick count for capture timers
+   double timeFreq;   // divisor for converting ticks to microseconds
  }
 
  1 or more sections:
@@ -183,6 +196,14 @@ struct CaptureMetaData
   char driverName[1] = {0};
 };
 
+struct CaptureTimeBase
+{
+  // the base tick count for all timers in the capture
+  uint64_t timeBase = 0;
+  // the frequency conversion such that microseconds = ticks / frequency
+  double timeFreq = 1.0;
+};
+
 struct BinarySectionHeader
 {
   // 0x0
@@ -227,9 +248,6 @@ RDCFile::~RDCFile()
 {
   if(m_File)
     FileIO::fclose(m_File);
-
-  if(m_Thumb.pixels)
-    delete[] m_Thumb.pixels;
 }
 
 void RDCFile::Open(const char *path)
@@ -279,6 +297,8 @@ void RDCFile::Open(const char *path)
       m_Driver = RDCDriver::Image;
       m_DriverName = "Image";
       m_MachineIdent = 0;
+      m_TimeBase = 0;
+      m_TimeFrequency = 1.0;
       return;
     }
   }
@@ -323,7 +343,9 @@ void RDCFile::Init(StreamReader &reader)
 
   m_SerVer = header.version;
 
-  if(m_SerVer != SERIALISE_VERSION && m_SerVer != V1_0_VERSION)
+  // in v1.1 we changed chunk flags such that we could support 64-bit length. This is a backwards
+  // compatible change
+  if(m_SerVer != SERIALISE_VERSION && m_SerVer != V1_0_VERSION && m_SerVer != V1_1_VERSION)
   {
     if(header.version < V1_0_VERSION)
     {
@@ -352,12 +374,12 @@ void RDCFile::Init(StreamReader &reader)
     RETURNERROR(ContainerError::Corrupt, "Thumbnail byte length invalid: %u", thumb.length);
   }
 
-  byte *thumbData = new byte[thumb.length];
-  reader.Read(thumbData, thumb.length);
+  bytebuf thumbData;
+  thumbData.resize(thumb.length);
+  reader.Read(thumbData.data(), thumb.length);
 
   if(reader.IsErrored())
   {
-    delete[] thumbData;
     RETURNERROR(ContainerError::FileIO, "I/O error reading thumbnail data");
   }
 
@@ -366,45 +388,51 @@ void RDCFile::Init(StreamReader &reader)
 
   if(reader.IsErrored())
   {
-    delete[] thumbData;
     RETURNERROR(ContainerError::FileIO, "I/O error reading capture metadata");
   }
 
   if(meta.driverNameLength == 0)
   {
-    delete[] thumbData;
     RETURNERROR(ContainerError::Corrupt,
                 "Driver name length is invalid, must be at least 1 to contain NULL terminator");
   }
 
-  char *driverName = new char[meta.driverNameLength];
-  reader.Read(driverName, meta.driverNameLength);
+  rdcstr driverName;
+  driverName.resize(meta.driverNameLength);
+  reader.Read(driverName.data(), meta.driverNameLength);
+  driverName.trim();
 
   if(reader.IsErrored())
   {
-    delete[] thumbData;
-    delete[] driverName;
     RETURNERROR(ContainerError::FileIO, "I/O error reading driver name");
   }
 
-  driverName[meta.driverNameLength - 1] = '\0';
+  // this initialises to a default 'no conversion' timebase, with base of 0 and frequency of 1.0
+  // which means old captures without a timebase won't see anything change
+  CaptureTimeBase timeBase;
+
+  if(m_SerVer >= V1_2_VERSION)
+  {
+    reader.Read(&timeBase, sizeof(CaptureTimeBase));
+
+    if(reader.IsErrored())
+    {
+      RETURNERROR(ContainerError::FileIO, "I/O error reading capture timebase");
+    }
+  }
+
+  m_TimeBase = timeBase.timeBase;
+  m_TimeFrequency = timeBase.timeFreq;
 
   m_Driver = meta.driverID;
   m_DriverName = driverName;
   m_MachineIdent = meta.machineIdent;
   m_Thumb.width = thumb.width;
   m_Thumb.height = thumb.height;
-  m_Thumb.len = thumb.length;
   m_Thumb.format = FileType::JPG;
 
-  if(m_Thumb.len > 0 && m_Thumb.width > 0 && m_Thumb.height > 0)
-  {
-    m_Thumb.pixels = thumbData;
-    thumbData = NULL;
-  }
-
-  delete[] thumbData;
-  delete[] driverName;
+  if(m_Thumb.width > 0 && m_Thumb.height > 0)
+    m_Thumb.pixels.swap(thumbData);
 
   if(reader.GetOffset() > header.headerLength)
   {
@@ -597,22 +625,16 @@ void RDCFile::Init(StreamReader &reader)
       ExtThumbnailHeader thumbHeader;
       if(thumbReader->Read(thumbHeader))
       {
-        thumbData = new byte[thumbHeader.len];
-        bool succeeded = thumbReader->Read(thumbData, thumbHeader.len) && !thumbReader->IsErrored();
+        thumbData.resize(thumbHeader.len);
+        bool succeeded =
+            thumbReader->Read(thumbData.data(), thumbHeader.len) && !thumbReader->IsErrored();
         if(succeeded && (uint32_t)thumbHeader.format < (uint32_t)FileType::Count)
         {
           m_Thumb.width = thumbHeader.width;
           m_Thumb.height = thumbHeader.height;
-          m_Thumb.len = thumbHeader.len;
           m_Thumb.format = thumbHeader.format;
-          delete[] m_Thumb.pixels;
-          m_Thumb.pixels = thumbData;
+          m_Thumb.pixels.swap(thumbData);
         }
-        else
-        {
-          delete[] thumbData;
-        }
-        thumbData = NULL;
       }
       delete thumbReader;
     }
@@ -643,7 +665,7 @@ bool RDCFile::CopyFileTo(const char *filename)
 }
 
 void RDCFile::SetData(RDCDriver driver, const char *driverName, uint64_t machineIdent,
-                      const RDCThumb *thumb)
+                      const RDCThumb *thumb, uint64_t timeBase, double timeFreq)
 {
   m_Driver = driver;
   m_DriverName = driverName;
@@ -651,12 +673,9 @@ void RDCFile::SetData(RDCDriver driver, const char *driverName, uint64_t machine
   if(thumb)
   {
     m_Thumb = *thumb;
-
-    byte *pixels = new byte[m_Thumb.len];
-    memcpy(pixels, thumb->pixels, m_Thumb.len);
-
-    m_Thumb.pixels = pixels;
   }
+  m_TimeBase = timeBase;
+  m_TimeFrequency = timeFreq;
 }
 
 void RDCFile::Create(const char *filename)
@@ -680,10 +699,10 @@ void RDCFile::Create(const char *filename)
 
   thumbHeader.width = m_Thumb.width;
   thumbHeader.height = m_Thumb.height;
-  const byte *jpgPixels = m_Thumb.pixels;
-  thumbHeader.length = m_Thumb.len;
+  const byte *jpgPixels = m_Thumb.pixels.data();
+  thumbHeader.length = (uint32_t)m_Thumb.pixels.size();
 
-  byte *jpgBuffer = NULL;
+  bytebuf jpgBuffer;
   if(m_Thumb.format != FileType::JPG && m_Thumb.width > 0 && m_Thumb.height > 0)
   {
     // the primary thumbnail must be in JPG format, must perform conversion
@@ -695,23 +714,24 @@ void RDCFile::Create(const char *filename)
 
     if(m_Thumb.format == FileType::Raw)
     {
-      rawPixels = m_Thumb.pixels;
+      rawPixels = m_Thumb.pixels.data();
     }
     else
     {
-      rawBuffer = stbi_load_from_memory(m_Thumb.pixels, (int)m_Thumb.len, &w, &h, &comp, 3);
+      rawBuffer =
+          stbi_load_from_memory(m_Thumb.pixels.data(), (int)m_Thumb.pixels.size(), &w, &h, &comp, 3);
       rawPixels = rawBuffer;
     }
 
     if(rawPixels)
     {
       int len = w * h * comp;
-      jpgBuffer = new byte[len];
+      jpgBuffer.resize(len);
       jpge::params p;
       p.m_quality = 90;
-      jpge::compress_image_to_jpeg_file_in_memory(jpgBuffer, len, w, h, comp, rawPixels, p);
+      jpge::compress_image_to_jpeg_file_in_memory(jpgBuffer.data(), len, w, h, comp, rawPixels, p);
       thumbHeader.length = (uint32_t)len;
-      jpgPixels = jpgBuffer;
+      jpgPixels = jpgBuffer.data();
     }
     else
     {
@@ -730,7 +750,12 @@ void RDCFile::Create(const char *filename)
   meta.driverNameLength = uint8_t(m_DriverName.size() + 1);
 
   header.headerLength = sizeof(FileHeader) + offsetof(BinaryThumbnail, data) + thumbHeader.length +
-                        offsetof(CaptureMetaData, driverName) + meta.driverNameLength;
+                        offsetof(CaptureMetaData, driverName) + meta.driverNameLength +
+                        sizeof(CaptureTimeBase);
+
+  CaptureTimeBase timeBase;
+  timeBase.timeBase = m_TimeBase;
+  timeBase.timeFreq = m_TimeFrequency;
 
   {
     StreamWriter writer(m_File, Ownership::Nothing);
@@ -745,7 +770,8 @@ void RDCFile::Create(const char *filename)
 
     writer.Write(m_DriverName.c_str(), meta.driverNameLength);
 
-    delete[] jpgBuffer;
+    writer.Write(timeBase);
+
     if(writer.IsErrored())
     {
       RETURNERROR(ContainerError::FileIO, "Error writing file header");

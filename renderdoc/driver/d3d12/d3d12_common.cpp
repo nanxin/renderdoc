@@ -215,6 +215,10 @@ bool D3D12InitParams::IsSupportedVersion(uint64_t ver)
   if(ver == 0x7)
     return true;
 
+  // 0x8 -> 0x9 - Added serialisation of usedDXIL in D3D12InitParams
+  if(ver == 0x8)
+    return true;
+
   return false;
 }
 
@@ -230,6 +234,11 @@ void DoSerialise(SerialiserType &ser, D3D12InitParams &el)
   else
   {
     RDCEraseEl(el.AdapterDesc);
+  }
+
+  if(ser.VersionAtLeast(0x9))
+  {
+    SERIALISE_MEMBER(usedDXIL);
   }
 }
 
@@ -614,9 +623,12 @@ ShaderStageMask ConvertVisibility(D3D12_SHADER_VISIBILITY ShaderVisibility)
     case D3D12_SHADER_VISIBILITY_DOMAIN: return ShaderStageMask::Domain;
     case D3D12_SHADER_VISIBILITY_GEOMETRY: return ShaderStageMask::Geometry;
     case D3D12_SHADER_VISIBILITY_PIXEL: return ShaderStageMask::Pixel;
+    case D3D12_SHADER_VISIBILITY_AMPLIFICATION:
+    case D3D12_SHADER_VISIBILITY_MESH:
+    default: RDCERR("Unexpected visibility %u", ShaderVisibility); break;
   }
 
-  return ShaderStageMask::Vertex;
+  return ShaderStageMask::Unknown;
 }
 
 // from PIXEventsCommon.h of winpixeventruntime

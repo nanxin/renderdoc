@@ -24,6 +24,7 @@
 
 #pragma once
 
+#include <QDir>
 #include <QFrame>
 #include <QMenu>
 #include <QMouseEvent>
@@ -39,6 +40,7 @@ class ResourcePreview;
 class ThumbnailStrip;
 class TextureGoto;
 class QFileSystemWatcher;
+class TextureViewer;
 
 enum struct FollowType
 {
@@ -55,18 +57,17 @@ struct Following
   int index;
   int arrayEl;
 
-  static const Following Default;
-
+  // this is only for QVariant compatibility and will generate an invalid Following instance! do not
+  // use!
   Following();
 
-  Following(FollowType t, ShaderStage s, int i, int a);
+  Following(const TextureViewer &tex, FollowType t, ShaderStage s, int i, int a);
+  Following(const Following &other);
+  Following &operator=(const Following &other);
 
   bool operator==(const Following &o);
   bool operator!=(const Following &o);
   static void GetDrawContext(ICaptureContext &ctx, bool &copy, bool &clear, bool &compute);
-
-  void SetResources(const rdcarray<BoundResourceArray> &readOnly,
-                    const rdcarray<BoundResourceArray> &readWrite);
 
   int GetHighestMip(ICaptureContext &ctx);
   int GetFirstArraySlice(ICaptureContext &ctx);
@@ -78,14 +79,10 @@ struct Following
   static rdcarray<BoundResource> GetOutputTargets(ICaptureContext &ctx);
 
   static BoundResource GetDepthTarget(ICaptureContext &ctx);
-
-  rdcarray<BoundResourceArray> GetReadWriteResources(ICaptureContext &ctx);
-
-  static rdcarray<BoundResourceArray> GetReadWriteResources(ICaptureContext &ctx, ShaderStage stage);
-
-  rdcarray<BoundResourceArray> GetReadOnlyResources(ICaptureContext &ctx);
-
-  static rdcarray<BoundResourceArray> GetReadOnlyResources(ICaptureContext &ctx, ShaderStage stage);
+  static rdcarray<BoundResourceArray> GetReadWriteResources(ICaptureContext &ctx, ShaderStage stage,
+                                                            bool onlyUsed);
+  static rdcarray<BoundResourceArray> GetReadOnlyResources(ICaptureContext &ctx, ShaderStage stage,
+                                                           bool onlyUsed);
 
   const ShaderReflection *GetReflection(ICaptureContext &ctx);
   static const ShaderReflection *GetReflection(ICaptureContext &ctx, ShaderStage stage);
@@ -94,8 +91,7 @@ struct Following
   static const ShaderBindpointMapping &GetMapping(ICaptureContext &ctx, ShaderStage stage);
 
 private:
-  const rdcarray<BoundResourceArray> *readOnlyResources;
-  const rdcarray<BoundResourceArray> *readWriteResources;
+  const TextureViewer &tex;
 };
 
 struct TexSettings
@@ -334,8 +330,10 @@ private:
   bool m_NeedCustomReload = false;
 
   TextureDescription *m_CachedTexture;
-  Following m_Following = Following::Default;
+  Following m_Following;
   QMap<ResourceId, TexSettings> m_TextureSettings;
+
+  friend struct Following;
 
   rdcarray<BoundResourceArray> m_ReadOnlyResources[(uint32_t)ShaderStage::Count];
   rdcarray<BoundResourceArray> m_ReadWriteResources[(uint32_t)ShaderStage::Count];
@@ -350,6 +348,8 @@ private:
 
   bool canCompileCustomShader(ShaderEncoding encoding);
   void reloadCustomShaders(const QString &filter);
+  QList<QDir> getShaderDirectories() const;
+  QString getShaderPath(const QString &filename) const;
 
   TextureDisplay m_TexDisplay;
 };

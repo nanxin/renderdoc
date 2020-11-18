@@ -520,10 +520,11 @@ values are implementation dependent but will always include a default target fir
 native disassembly of the shader. Further options may be available for additional diassembly views
 or hardware-specific ISA formats.
 
+:param bool withPipeline: More disassembly may be available when a pipeline is specified.
 :return: The list of disassembly targets available.
 :rtype: ``list`` of ``str``
 )");
-  virtual rdcarray<rdcstr> GetDisassemblyTargets() = 0;
+  virtual rdcarray<rdcstr> GetDisassemblyTargets(bool withPipeline) = 0;
 
   DOCUMENT(R"(Retrieve the disassembly for a given shader, for the given disassembly target.
 
@@ -1455,6 +1456,22 @@ replay support.
 )");
   virtual const char *RecordedMachineIdent() = 0;
 
+  DOCUMENT(R"(Retrieves the timestamp basis that all timestamps in the capture are relative to. May
+be 0 if all timestamps are already absolute.
+
+:return: The timestamp base value
+:rtype: ``int``
+)");
+  virtual uint64_t TimestampBase() = 0;
+
+  DOCUMENT(R"(Retrieves frequency for timestamps and durations to be divided by to convert to
+microseconds. May be 1.0 if all timestamps and durations are already in microseconds.
+
+:return: The timestamp frequency
+:rtype: ``float``
+)");
+  virtual double TimestampFrequency() = 0;
+
   DOCUMENT(R"(Sets the matadata for this capture handle.
 
 This function may only be called if the handle is 'empty' - i.e. no file has been opened with
@@ -1475,9 +1492,15 @@ This function may only be called if the handle is 'empty' - i.e. no file has bee
 :param int thumbHeight: The height of the thumbnail. Ignored if :paramref:`SetMetadata.thumbData` is
   empty.
 :param bytes thumbData: The raw data of the thumbnail. If empty, no thumbnail is set.
+:param int timeBase: The base value for timestamps in the capture. Can be set to 0 to indicate that
+  timestamps are already capture relative.
+:param float timeFreq: The frequency for timestamps and durations to be divided by to convert to
+  microseconds. Can be set to 1.0 to indicate that timestamps and durations are already in
+  microseconds.
 )");
   virtual void SetMetadata(const char *driverName, uint64_t machineIdent, FileType thumbType,
-                           uint32_t thumbWidth, uint32_t thumbHeight, const bytebuf &thumbData) = 0;
+                           uint32_t thumbWidth, uint32_t thumbHeight, const bytebuf &thumbData,
+                           uint64_t timeBase, double timeFreq) = 0;
 
   DOCUMENT(R"(Opens a capture for replay locally and returns a handle to the capture. Only supported
 for handles opened with a native ``rdc`` capture, otherwise this will fail.
@@ -1957,7 +1980,8 @@ analysis program.
 extern "C" RENDERDOC_API const char *RENDERDOC_CC RENDERDOC_GetLogFile();
 
 DOCUMENT("Internal function for fetching the contents of a log");
-extern "C" RENDERDOC_API void RENDERDOC_CC RENDERDOC_GetLogFileContents(rdcstr &logfile);
+extern "C" RENDERDOC_API void RENDERDOC_CC RENDERDOC_GetLogFileContents(uint64_t offset,
+                                                                        rdcstr &logfile);
 
 DOCUMENT("Internal function for logging text simply.");
 extern "C" RENDERDOC_API void RENDERDOC_CC RENDERDOC_LogText(const char *text);
@@ -1975,6 +1999,13 @@ This will be in the form "MAJOR.MINOR"
 :rtype: ``str``
 )");
 extern "C" RENDERDOC_API const char *RENDERDOC_CC RENDERDOC_GetVersionString();
+
+DOCUMENT(R"(Determines if this is a release build of RenderDoc or not.
+
+:return: ``True`` if the replay is running on a release build.
+:rtype: ``bool``
+)");
+extern "C" RENDERDOC_API bool RENDERDOC_CC RENDERDOC_IsReleaseBuild();
 
 DOCUMENT(R"(Retrieves the commit hash used to build.
 

@@ -287,7 +287,7 @@ void GLReplay::InitPostVSBuffers(uint32_t eventId)
     }
     else
     {
-      ResourceId id = rm->GetID(rs.Pipeline);
+      ResourceId id = rm->GetResID(rs.Pipeline);
       auto &pipeDetails = m_pDriver->m_Pipelines[id];
 
       for(int i = 0; i < 4; i++)
@@ -346,7 +346,7 @@ void GLReplay::InitPostVSBuffers(uint32_t eventId)
   }
   else
   {
-    auto &progDetails = m_pDriver->m_Programs[rm->GetID(rs.Program)];
+    auto &progDetails = m_pDriver->m_Programs[rm->GetResID(rs.Program)];
 
     for(int i = 0; i < 4; i++)
     {
@@ -735,7 +735,8 @@ void GLReplay::InitPostVSBuffers(uint32_t eventId)
   drv.glUseProgram(feedbackProg);
   drv.glBindProgramPipeline(0);
 
-  drv.glBindTransformFeedback(eGL_TRANSFORM_FEEDBACK, DebugData.feedbackObj);
+  if(HasExt[ARB_transform_feedback2])
+    drv.glBindTransformFeedback(eGL_TRANSFORM_FEEDBACK, DebugData.feedbackObj);
 
   GLuint idxBuf = 0;
 
@@ -799,7 +800,7 @@ void GLReplay::InitPostVSBuffers(uint32_t eventId)
     }
     else    // drawcall is indexed
     {
-      ResourceId idxId = rm->GetID(BufferRes(drv.GetCtx(), elArrayBuffer));
+      ResourceId idxId = rm->GetResID(BufferRes(drv.GetCtx(), elArrayBuffer));
 
       bytebuf idxdata;
       GetBufferData(idxId, drawcall->indexOffset * drawcall->indexByteWidth,
@@ -1021,7 +1022,8 @@ void GLReplay::InitPostVSBuffers(uint32_t eventId)
       drv.glBindBuffer(eGL_ARRAY_BUFFER, rs.BufferBindings[GLRenderState::eBufIdx_Array].name);
       drv.glBindBuffer(eGL_ELEMENT_ARRAY_BUFFER, elArrayBuffer);
 
-      drv.glBindTransformFeedback(eGL_TRANSFORM_FEEDBACK, rs.FeedbackObj.name);
+      if(HasExt[ARB_transform_feedback2])
+        drv.glBindTransformFeedback(eGL_TRANSFORM_FEEDBACK, rs.FeedbackObj.name);
 
       if(!rs.Enabled[GLRenderState::eEnabled_RasterizerDiscard])
         drv.glDisable(eGL_RASTERIZER_DISCARD);
@@ -1406,7 +1408,8 @@ void GLReplay::InitPostVSBuffers(uint32_t eventId)
       drv.glUseProgram(feedbackProg);
       drv.glBindProgramPipeline(0);
 
-      drv.glBindTransformFeedback(eGL_TRANSFORM_FEEDBACK, DebugData.feedbackObj);
+      if(HasExt[ARB_transform_feedback2])
+        drv.glBindTransformFeedback(eGL_TRANSFORM_FEEDBACK, DebugData.feedbackObj);
 
       // need to rebind this here because of an AMD bug that seems to ignore the buffer
       // bindings in the feedback object - or at least it errors if the default feedback
@@ -1741,7 +1744,8 @@ void GLReplay::InitPostVSBuffers(uint32_t eventId)
         drv.glBindBuffer(eGL_ARRAY_BUFFER, rs.BufferBindings[GLRenderState::eBufIdx_Array].name);
         drv.glBindBuffer(eGL_ELEMENT_ARRAY_BUFFER, elArrayBuffer);
 
-        drv.glBindTransformFeedback(eGL_TRANSFORM_FEEDBACK, rs.FeedbackObj.name);
+        if(HasExt[ARB_transform_feedback2])
+          drv.glBindTransformFeedback(eGL_TRANSFORM_FEEDBACK, rs.FeedbackObj.name);
 
         if(!rs.Enabled[GLRenderState::eEnabled_RasterizerDiscard])
           drv.glDisable(eGL_RASTERIZER_DISCARD);
@@ -1886,7 +1890,8 @@ void GLReplay::InitPostVSBuffers(uint32_t eventId)
   if(HasExt[ARB_query_buffer_object])
     drv.glBindBuffer(eGL_QUERY_BUFFER, rs.BufferBindings[GLRenderState::eBufIdx_Query].name);
 
-  drv.glBindTransformFeedback(eGL_TRANSFORM_FEEDBACK, rs.FeedbackObj.name);
+  if(HasExt[ARB_transform_feedback2])
+    drv.glBindTransformFeedback(eGL_TRANSFORM_FEEDBACK, rs.FeedbackObj.name);
 
   if(!rs.Enabled[GLRenderState::eEnabled_RasterizerDiscard])
     drv.glDisable(eGL_RASTERIZER_DISCARD);
@@ -1944,8 +1949,9 @@ MeshFormat GLReplay::GetPostVSBuffers(uint32_t eventId, uint32_t instID, uint32_
 
   if(s.useIndices && s.idxBuf)
   {
-    ret.indexResourceId = m_pDriver->GetResourceManager()->GetID(BufferRes(ctx, s.idxBuf));
+    ret.indexResourceId = m_pDriver->GetResourceManager()->GetResID(BufferRes(ctx, s.idxBuf));
     ret.indexByteStride = s.idxByteWidth;
+    ret.indexByteSize = ~0ULL;
   }
   else
   {
@@ -1956,9 +1962,14 @@ MeshFormat GLReplay::GetPostVSBuffers(uint32_t eventId, uint32_t instID, uint32_
   ret.baseVertex = 0;
 
   if(s.buf)
-    ret.vertexResourceId = m_pDriver->GetResourceManager()->GetID(BufferRes(ctx, s.buf));
+  {
+    ret.vertexResourceId = m_pDriver->GetResourceManager()->GetResID(BufferRes(ctx, s.buf));
+    ret.vertexByteSize = ~0ULL;
+  }
   else
+  {
     ret.vertexResourceId = ResourceId();
+  }
 
   ret.vertexByteOffset = s.instStride * instID;
   ret.vertexByteStride = s.vertStride;

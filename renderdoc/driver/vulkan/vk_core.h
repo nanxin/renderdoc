@@ -53,7 +53,7 @@ struct VkInitParams
   uint64_t GetSerialiseSize();
 
   // check if a frame capture section version is supported
-  static const uint64_t CurrentVersion = 0x11;
+  static const uint64_t CurrentVersion = 0x12;
   static bool IsSupportedVersion(uint64_t ver);
 };
 
@@ -186,13 +186,12 @@ struct VulkanDrawcallTreeNode
   }
 };
 
-#define SERIALISE_TIME_CALL(...)                                                          \
-  {                                                                                       \
-    WriteSerialiser &ser = GetThreadSerialiser();                                         \
-    ser.ChunkMetadata().timestampMicro = RenderDoc::Inst().GetMicrosecondTimestamp();     \
-    __VA_ARGS__;                                                                          \
-    ser.ChunkMetadata().durationMicro =                                                   \
-        RenderDoc::Inst().GetMicrosecondTimestamp() - ser.ChunkMetadata().timestampMicro; \
+#define SERIALISE_TIME_CALL(...)                                                                \
+  {                                                                                             \
+    WriteSerialiser &ser = GetThreadSerialiser();                                               \
+    ser.ChunkMetadata().timestampMicro = Timing::GetTick();                                     \
+    __VA_ARGS__;                                                                                \
+    ser.ChunkMetadata().durationMicro = Timing::GetTick() - ser.ChunkMetadata().timestampMicro; \
   }
 
 // must be at the start of any function that serialises
@@ -295,6 +294,8 @@ private:
   CaptureState m_State;
   bool m_AppControlledCapture = false;
 
+  int32_t m_ReuseEnabled = 1;
+
   PerformanceTimer m_CaptureTimer;
 
   bool m_MarkedActive = false;
@@ -347,6 +348,8 @@ private:
   VulkanDrawcallCallback *m_DrawcallCallback;
   void *m_SubmitChain;
 
+  uint64_t m_TimeBase = 0;
+  double m_TimeFrequency = 1.0f;
   SDFile *m_StructuredFile;
   SDFile m_StoredStructuredData;
 
@@ -389,7 +392,7 @@ private:
     VkPhysicalDeviceFeatures enabledFeatures = {};
     VkPhysicalDeviceProperties props = {};
     VkPhysicalDeviceMemoryProperties memProps = {};
-    VkFormatProperties fmtprops[VK_FORMAT_RANGE_SIZE] = {};
+    std::map<VkFormat, VkFormatProperties> fmtProps = {};
     VkDriverInfo driverInfo = VkDriverInfo(props);
 
     VkPhysicalDevicePerformanceQueryFeaturesKHR performanceQueryFeatures = {};
@@ -399,6 +402,7 @@ private:
   };
 
   bool m_SeparateDepthStencil = false;
+  bool m_NULLDescriptorsAllowed = false;
 
   PFN_vkSetDeviceLoaderData m_SetDeviceLoaderData;
 
@@ -449,7 +453,22 @@ private:
   {
     VkQueue queue = VK_NULL_HANDLE;
     VkCommandPool pool = VK_NULL_HANDLE;
-    VkCommandBuffer buffer = VK_NULL_HANDLE;
+
+    struct
+    {
+      VkCommandBuffer acquire = VK_NULL_HANDLE;
+      VkCommandBuffer release = VK_NULL_HANDLE;
+      VkSemaphore fromext = VK_NULL_HANDLE;
+      VkSemaphore toext = VK_NULL_HANDLE;
+      VkFence fence = VK_NULL_HANDLE;
+    } ring[4];
+    uint32_t ringIndex = 0;
+    uint32_t GetNextIdx()
+    {
+      uint32_t ret = ringIndex;
+      ringIndex = (ringIndex + 1) % ARRAY_COUNT(ring);
+      return ret;
+    }
   };
   rdcarray<ExternalQueue> m_ExternalQueues;
 
@@ -533,10 +552,20 @@ private:
   rdcarray<VkEvent> m_CleanupEvents;
   rdcarray<VkEvent> m_PersistentEvents;
 
-  const VkFormatProperties &GetFormatProperties(VkFormat f)
+  // reset queries must be restored to a valid state on next replay to ensure any query pool
+  // results copies that refer to previous frames have valid data. We initialised all of the
+  // query pool at creation time, but any queries that are reset might not be recorded within
+  // the frame - certainly not if we're doing partial replays. So we record all queries that are
+  // reset to re-initialise them.
+  struct ResetQuery
   {
-    return m_PhysicalDeviceData.fmtprops[f];
-  }
+    VkQueryPool pool;
+    uint32_t firstQuery;
+    uint32_t queryCount;
+  };
+  rdcarray<ResetQuery> m_ResetQueries;
+
+  const VkFormatProperties &GetFormatProperties(VkFormat f);
 
   struct BakedCmdBufferInfo
   {
@@ -572,7 +601,7 @@ private:
 
     VulkanRenderState state;
 
-    std::map<ResourceId, ImageState> imageStates;
+    rdcflatmap<ResourceId, ImageState> imageStates;
 
     ResourceId pushDescriptorID[2][64];
 
@@ -682,6 +711,10 @@ private:
   // All IDs are original IDs, not live.
   VulkanRenderState m_RenderState;
 
+  // an internal structure used to differentiate forced vkFlushMappedMemoryRanges due to coherent
+  // map writes from real calls to vkFlushMappedMemoryRanges
+  VkBaseInStructure internalMemoryFlushMarker = {};
+
   bool InRerecordRange(ResourceId cmdid);
   bool HasRerecordCmdBuf(ResourceId cmdid);
   bool ShouldUpdateRenderState(ResourceId cmdid, bool forcePrimary = false);
@@ -694,20 +727,17 @@ private:
   struct DescriptorSetInfo
   {
     DescriptorSetInfo(bool p = false) : push(p) {}
-    DescriptorSetInfo(const DescriptorSetInfo &) = default;
-    DescriptorSetInfo &operator=(const DescriptorSetInfo &) = default;
+    DescriptorSetInfo(const DescriptorSetInfo &) = delete;
+    DescriptorSetInfo &operator=(const DescriptorSetInfo &) = delete;
     ~DescriptorSetInfo() { clear(); }
     ResourceId layout;
-    rdcarray<DescriptorSetSlot *> currentBindings;
+    BindingStorage data;
     bool push;
 
     void clear()
     {
       layout = ResourceId();
-
-      for(size_t i = 0; i < currentBindings.size(); i++)
-        delete[] currentBindings[i];
-      currentBindings.clear();
+      data.clear();
     }
   };
 
@@ -715,12 +745,23 @@ private:
 
   ResourceId m_LastSwap;
 
+  // hold onto device address resources (buffers and memories) so that if one is destroyed
+  // mid-capture we can hold onto it until the capture is complete.
+  struct
+  {
+    rdcarray<VkDeviceMemory> DeadMemories;
+    rdcarray<VkBuffer> DeadBuffers;
+    rdcarray<ResourceId> IDs;
+  } m_DeviceAddressResources;
+
   // holds the current list of coherent mapped memory. Locked against concurrent use
   rdcarray<VkResourceRecord *> m_CoherentMaps;
   Threading::CriticalSection m_CoherentMapsLock;
 
   rdcarray<VkResourceRecord *> m_ForcedReferences;
   Threading::CriticalSection m_ForcedReferencesLock;
+
+  int64_t m_QueueCounter = 0;
 
   rdcarray<VkResourceRecord *> GetForcedReferences()
   {
@@ -776,6 +817,8 @@ private:
   std::map<ResourceId, rdcarray<EventUsage>> m_ResourceUses;
   std::map<uint32_t, EventFlags> m_EventFlags;
 
+  bytebuf m_MaskedMapData;
+
   // returns thread-local temporary memory
   byte *GetTempMemory(size_t s);
   template <class T>
@@ -818,7 +861,7 @@ private:
   void FirstFrame();
 
   bool CheckMemoryRequirements(const char *resourceName, ResourceId memId,
-                               VkDeviceSize memoryOffset, VkMemoryRequirements mrq);
+                               VkDeviceSize memoryOffset, VkMemoryRequirements mrq, bool external);
 
   void AddImplicitResolveResourceUsage(uint32_t subpass = 0);
   rdcarray<VkImageMemoryBarrier> GetImplicitRenderPassBarriers(uint32_t subpass = 0);
@@ -834,7 +877,8 @@ private:
   void AdvanceFrame();
   void Present(void *dev, void *wnd);
 
-  void HandleVRFrameMarkers(const char *marker, VkCommandBuffer commandBuffer);
+  void HandleFrameMarkers(const char *marker, VkCommandBuffer commandBuffer);
+  void HandleFrameMarkers(const char *marker, VkQueue queue);
 
   template <typename SerialiserType>
   bool Serialise_SetShaderDebugPath(SerialiserType &ser, VkShaderModule ShaderObject,
@@ -925,9 +969,8 @@ private:
                                                       int32_t messageCode, const char *pLayerPrefix,
                                                       const char *pMessage, void *pUserData);
   void AddFrameTerminator(uint64_t queueMarkerTag);
-  void SubmitExtQBarriers(const std::map<uint32_t, rdcarray<VkImageMemoryBarrier>> &extQBarriers);
-  void SubmitExtQBarriers(uint32_t queueFamilyIndex,
-                          const rdcarray<VkImageMemoryBarrier> &queueFamilyBarriers);
+
+  VkResourceRecord *RegisterSurface(WindowingSystem system, void *handle);
 
 public:
   WrappedVulkan();
@@ -998,9 +1041,9 @@ public:
   {
     return m_DescriptorSetState[descSet].layout;
   }
-  const rdcarray<DescriptorSetSlot *> &GetCurrentDescSetBindings(ResourceId descSet)
+  const BindingStorage &GetCurrentDescSetBindingStorage(ResourceId descSet)
   {
-    return m_DescriptorSetState[descSet].currentBindings;
+    return m_DescriptorSetState[descSet].data;
   }
 
   uint32_t GetReadbackMemoryIndex(uint32_t resourceCompatibleBitmask);
@@ -1036,6 +1079,7 @@ public:
   VkCommandBuffer GetNextCmd();
   void RemovePendingCommandBuffer(VkCommandBuffer cmd);
   void AddPendingCommandBuffer(VkCommandBuffer cmd);
+  void AddFreeCommandBuffer(VkCommandBuffer cmd);
   void SubmitCmds(VkSemaphore *unwrappedWaitSemaphores = NULL,
                   VkPipelineStageFlags *waitStageMask = NULL, uint32_t waitSemaphoreCount = 0);
   VkSemaphore GetNextSemaphore();
@@ -1046,6 +1090,7 @@ public:
                                   VkDeviceCreateInfo &createInfo, uint32_t &queueFamilyIndex);
 
   bool SeparateDepthStencil() const { return m_SeparateDepthStencil; }
+  bool NULLDescriptorsAllowed() const { return m_NULLDescriptorsAllowed; }
   VulkanRenderState &GetRenderState() { return m_RenderState; }
   void SetDrawcallCB(VulkanDrawcallCallback *cb) { m_DrawcallCallback = cb; }
   void SetSubmitChain(void *submitChain) { m_SubmitChain = submitChain; }
@@ -1084,7 +1129,7 @@ public:
   LockedImageStateRef InsertImageState(VkImage wrappedHandle, ResourceId id, const ImageInfo &info,
                                        FrameRefType refType, bool *inserted = NULL);
   bool EraseImageState(ResourceId id);
-  void UpdateImageStates(const std::map<ResourceId, ImageState> &dstStates);
+  void UpdateImageStates(const rdcflatmap<ResourceId, ImageState> &dstStates);
 
   inline ImageTransitionInfo GetImageTransitionInfo() const
   {
@@ -1731,6 +1776,16 @@ public:
   VkResult vkCreateAndroidSurfaceKHR(VkInstance instance,
                                      const VkAndroidSurfaceCreateInfoKHR *pCreateInfo,
                                      const VkAllocationCallbacks *pAllocator, VkSurfaceKHR *pSurface);
+
+  // VK_ANDROID_external_memory_android_hardware_buffer
+  VkResult vkGetAndroidHardwareBufferPropertiesANDROID(
+      VkDevice device, const struct AHardwareBuffer *buffer,
+      VkAndroidHardwareBufferPropertiesANDROID *pProperties);
+
+  // VK_ANDROID_external_memory_android_hardware_buffer
+  VkResult vkGetMemoryAndroidHardwareBufferANDROID(
+      VkDevice device, const VkMemoryGetAndroidHardwareBufferInfoANDROID *pInfo,
+      struct AHardwareBuffer **pBuffer);
 #endif
 
 #if defined(VK_USE_PLATFORM_MACOS_MVK)
@@ -2273,4 +2328,60 @@ public:
 
   VkResult vkGetPhysicalDeviceToolPropertiesEXT(VkPhysicalDevice physicalDevice, uint32_t *pToolCount,
                                                 VkPhysicalDeviceToolPropertiesEXT *pToolProperties);
+
+  // VK_EXT_private_data
+
+  VkResult vkCreatePrivateDataSlotEXT(VkDevice device,
+                                      const VkPrivateDataSlotCreateInfoEXT *pCreateInfo,
+                                      const VkAllocationCallbacks *pAllocator,
+                                      VkPrivateDataSlotEXT *pPrivateDataSlot);
+
+  void vkDestroyPrivateDataSlotEXT(VkDevice device, VkPrivateDataSlotEXT privateDataSlot,
+                                   const VkAllocationCallbacks *pAllocator);
+
+  VkResult vkSetPrivateDataEXT(VkDevice device, VkObjectType objectType, uint64_t objectHandle,
+                               VkPrivateDataSlotEXT privateDataSlot, uint64_t data);
+
+  void vkGetPrivateDataEXT(VkDevice device, VkObjectType objectType, uint64_t objectHandle,
+                           VkPrivateDataSlotEXT privateDataSlot, uint64_t *pData);
+
+  // VK_EXT_extended_dynamic_state
+  IMPLEMENT_FUNCTION_SERIALISED(void, vkCmdSetCullModeEXT, VkCommandBuffer commandBuffer,
+                                VkCullModeFlags cullMode);
+
+  IMPLEMENT_FUNCTION_SERIALISED(void, vkCmdSetFrontFaceEXT, VkCommandBuffer commandBuffer,
+                                VkFrontFace frontFace);
+
+  IMPLEMENT_FUNCTION_SERIALISED(void, vkCmdSetPrimitiveTopologyEXT, VkCommandBuffer commandBuffer,
+                                VkPrimitiveTopology primitiveTopology);
+
+  IMPLEMENT_FUNCTION_SERIALISED(void, vkCmdSetViewportWithCountEXT, VkCommandBuffer commandBuffer,
+                                uint32_t viewportCount, const VkViewport *pViewports);
+
+  IMPLEMENT_FUNCTION_SERIALISED(void, vkCmdSetScissorWithCountEXT, VkCommandBuffer commandBuffer,
+                                uint32_t scissorCount, const VkRect2D *pScissors);
+
+  IMPLEMENT_FUNCTION_SERIALISED(void, vkCmdBindVertexBuffers2EXT, VkCommandBuffer commandBuffer,
+                                uint32_t firstBinding, uint32_t bindingCount,
+                                const VkBuffer *pBuffers, const VkDeviceSize *pOffsets,
+                                const VkDeviceSize *pSizes, const VkDeviceSize *pStrides);
+
+  IMPLEMENT_FUNCTION_SERIALISED(void, vkCmdSetDepthTestEnableEXT, VkCommandBuffer commandBuffer,
+                                VkBool32 depthTestEnable);
+
+  IMPLEMENT_FUNCTION_SERIALISED(void, vkCmdSetDepthWriteEnableEXT, VkCommandBuffer commandBuffer,
+                                VkBool32 depthWriteEnable);
+
+  IMPLEMENT_FUNCTION_SERIALISED(void, vkCmdSetDepthCompareOpEXT, VkCommandBuffer commandBuffer,
+                                VkCompareOp depthCompareOp);
+
+  IMPLEMENT_FUNCTION_SERIALISED(void, vkCmdSetDepthBoundsTestEnableEXT,
+                                VkCommandBuffer commandBuffer, VkBool32 depthBoundsTestEnable);
+
+  IMPLEMENT_FUNCTION_SERIALISED(void, vkCmdSetStencilTestEnableEXT, VkCommandBuffer commandBuffer,
+                                VkBool32 stencilTestEnable);
+
+  IMPLEMENT_FUNCTION_SERIALISED(void, vkCmdSetStencilOpEXT, VkCommandBuffer commandBuffer,
+                                VkStencilFaceFlags faceMask, VkStencilOp failOp, VkStencilOp passOp,
+                                VkStencilOp depthFailOp, VkCompareOp compareOp);
 };

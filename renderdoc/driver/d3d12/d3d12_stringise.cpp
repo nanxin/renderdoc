@@ -28,7 +28,7 @@
 template <>
 rdcstr DoStringise(const D3D12Chunk &el)
 {
-  RDCCOMPILE_ASSERT((uint32_t)D3D12Chunk::Max == 1107, "Chunks changed without updating names");
+  RDCCOMPILE_ASSERT((uint32_t)D3D12Chunk::Max == 1109, "Chunks changed without updating names");
 
   BEGIN_ENUM_STRINGISE(D3D12Chunk)
   {
@@ -193,6 +193,10 @@ rdcstr DoStringise(const D3D12Chunk &el)
     STRINGISE_ENUM_CLASS_NAMED(Device_ExternalDXGIResource, "External DXGI Resource import");
     STRINGISE_ENUM_CLASS_NAMED(Swapchain_Present, "IDXGISwapChain::Present");
     STRINGISE_ENUM_CLASS_NAMED(List_ClearState, "ID3D12GraphicsCommandList::ClearState");
+    STRINGISE_ENUM_CLASS_NAMED(CompatDevice_CreateSharedResource,
+                               "ID3D12CompatibilityDevice::CreateSharedResource");
+    STRINGISE_ENUM_CLASS_NAMED(CompatDevice_CreateSharedHeap,
+                               "ID3D12CompatibilityDevice::CreateSharedHeap");
     STRINGISE_ENUM_CLASS_NAMED(Max, "Max Chunk");
   }
   END_ENUM_STRINGISE()
@@ -959,6 +963,11 @@ rdcstr DoStringise(const D3D12_HEAP_FLAGS &el)
     STRINGISE_BITFIELD_BIT(D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER);
     STRINGISE_BITFIELD_BIT(D3D12_HEAP_FLAG_DENY_RT_DS_TEXTURES);
     STRINGISE_BITFIELD_BIT(D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES);
+    STRINGISE_BITFIELD_BIT(D3D12_HEAP_FLAG_HARDWARE_PROTECTED);
+    STRINGISE_BITFIELD_BIT(D3D12_HEAP_FLAG_ALLOW_WRITE_WATCH);
+    STRINGISE_BITFIELD_BIT(D3D12_HEAP_FLAG_ALLOW_SHADER_ATOMICS);
+    STRINGISE_BITFIELD_BIT(D3D12_HEAP_FLAG_CREATE_NOT_RESIDENT);
+    STRINGISE_BITFIELD_BIT(D3D12_HEAP_FLAG_CREATE_NOT_ZEROED);
   }
   END_BITFIELD_STRINGISE();
 }

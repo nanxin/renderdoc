@@ -82,11 +82,18 @@ enum class BlockInfoRecord
   SETRECORDNAME = 3,
 };
 
+static const uint32_t BitcodeMagic = MAKE_FOURCC('B', 'C', 0xC0, 0xDE);
+
+bool BitcodeReader::Valid(const byte *bitcode, size_t length)
+{
+  return length >= 4 && memcmp(bitcode, &BitcodeMagic, sizeof(uint32_t)) == 0;
+}
+
 BitcodeReader::BitcodeReader(const byte *bitcode, size_t length) : b(bitcode, length)
 {
   uint32_t magic = b.Read<uint32_t>();
 
-  RDCASSERT(magic == MAKE_FOURCC('B', 'C', 0xC0, 0xDE));
+  RDCASSERT(magic == BitcodeMagic);
 }
 
 BitcodeReader::~BitcodeReader()
@@ -752,34 +759,34 @@ TEST_CASE("Check LLVM bitreader", "[llvm]")
 
       int64_t val;
 
-      val = b.svbr<int64_t>(4);
+      val = LLVMBC::BitReader::svbr(b.vbr<uint64_t>(4));
       CHECK(val == 2);
 
-      val = b.svbr<int64_t>(4);
+      val = LLVMBC::BitReader::svbr(b.vbr<uint64_t>(4));
       CHECK(val == 0);
 
-      val = b.svbr<int64_t>(4);
+      val = LLVMBC::BitReader::svbr(b.vbr<uint64_t>(4));
       CHECK(val == -2);
 
-      val = b.svbr<int64_t>(4);
+      val = LLVMBC::BitReader::svbr(b.vbr<uint64_t>(4));
       CHECK(val == 0);
 
-      val = b.svbr<int64_t>(4);
+      val = LLVMBC::BitReader::svbr(b.vbr<uint64_t>(4));
       CHECK(val == 98765);
 
-      val = b.svbr<int64_t>(4);
+      val = LLVMBC::BitReader::svbr(b.vbr<uint64_t>(4));
       CHECK(val == -98765);
 
-      val = b.svbr<int64_t>(4);
+      val = LLVMBC::BitReader::svbr(b.vbr<uint64_t>(4));
       CHECK(val == INT64_MAX);
 
-      val = b.svbr<int64_t>(4);
+      val = LLVMBC::BitReader::svbr(b.vbr<uint64_t>(4));
       CHECK(val == -INT64_MAX);
 
-      val = b.svbr<int64_t>(4);
+      val = LLVMBC::BitReader::svbr(b.vbr<uint64_t>(4));
       CHECK(val == 3);
 
-      val = b.svbr<int64_t>(4);
+      val = LLVMBC::BitReader::svbr(b.vbr<uint64_t>(4));
       CHECK(val == 0);
 
       // should be exactly at the end of the stream

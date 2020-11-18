@@ -63,9 +63,7 @@
 
 #include "pipestate.inl"
 
-CaptureContext::CaptureContext(QString paramFilename, QString remoteHost, uint32_t remoteIdent,
-                               bool temp, PersistantConfig &cfg)
-    : m_Config(cfg)
+CaptureContext::CaptureContext(PersistantConfig &cfg) : m_Config(cfg)
 {
   m_CaptureLoaded = false;
   m_LoadInProgress = false;
@@ -90,25 +88,8 @@ CaptureContext::CaptureContext(QString paramFilename, QString remoteHost, uint32
   m_Icon->addFile(QStringLiteral(":/logo.svg"), QSize(), QIcon::Normal, QIcon::Off);
 
   m_MainWindow = new MainWindow(*this);
-  m_MainWindow->show();
 
-  if(remoteIdent != 0)
-  {
-    m_MainWindow->ShowLiveCapture(
-        new LiveCapture(*this, remoteHost, remoteHost, remoteIdent, m_MainWindow, m_MainWindow));
-  }
-
-  if(!paramFilename.isEmpty())
-  {
-    QFileInfo checkFile(paramFilename);
-
-    if(checkFile.exists() && checkFile.isFile())
-    {
-      m_MainWindow->LoadFromFilename(paramFilename, temp);
-      if(temp)
-        m_MainWindow->takeCaptureOwnership();
-    }
-  }
+  m_MainWindow->LoadInitialLayout();
 
   {
     QDir dir(configFilePath("extensions"));
@@ -135,6 +116,29 @@ CaptureContext::~CaptureContext()
   delete m_Icon;
   m_Replay.CloseThread();
   delete m_MainWindow;
+}
+
+void CaptureContext::Begin(QString paramFilename, QString remoteHost, uint32_t remoteIdent, bool temp)
+{
+  m_MainWindow->show();
+
+  if(remoteIdent != 0)
+  {
+    m_MainWindow->ShowLiveCapture(
+        new LiveCapture(*this, remoteHost, remoteHost, remoteIdent, m_MainWindow, m_MainWindow));
+  }
+
+  if(!paramFilename.isEmpty())
+  {
+    QFileInfo checkFile(paramFilename);
+
+    if(checkFile.exists() && checkFile.isFile())
+    {
+      m_MainWindow->LoadFromFilename(paramFilename, temp);
+      if(temp)
+        m_MainWindow->takeCaptureOwnership();
+    }
+  }
 }
 
 bool CaptureContext::isRunning()
@@ -727,6 +731,8 @@ void CaptureContext::LoadCapture(const rdcstr &captureFile, const ReplayOptions 
     ANALYTIC_SET(CaptureFeatures.MultiGPU, true);
   if(m_APIProps.D3D12Bundle)
     ANALYTIC_SET(CaptureFeatures.D3D12Bundle, true);
+  if(m_APIProps.DXILShaders)
+    ANALYTIC_SET(CaptureFeatures.DXILShaders, true);
 
   if(m_APIProps.vendor != GPUVendor::Unknown)
   {

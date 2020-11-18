@@ -25,6 +25,7 @@
 #include "QRDUtils.h"
 #include <QAbstractTextDocumentLayout>
 #include <QApplication>
+#include <QCloseEvent>
 #include <QCollator>
 #include <QDesktopServices>
 #include <QElapsedTimer>
@@ -46,6 +47,7 @@
 #include <QRegularExpressionMatch>
 #include <QStandardPaths>
 #include <QTextBlock>
+#include <QTextBoundaryFinder>
 #include <QTextDocument>
 #include <QtMath>
 #include "Code/Resources.h"
@@ -161,9 +163,17 @@ rdcstr DoStringise(const PointerVal &el)
 
 QString GetTruncatedResourceName(ICaptureContext &ctx, ResourceId id)
 {
-  rdcstr name = ctx.GetResourceName(id);
+  QString name = ctx.GetResourceName(id);
   if(name.length() > 64)
-    return name.substr(0, 64) + "...";
+  {
+    QTextBoundaryFinder boundaries(QTextBoundaryFinder::Grapheme, name.data(), name.length());
+    boundaries.setPosition(64);
+    if(!boundaries.isAtBoundary())
+      boundaries.toPreviousBoundary();
+    int pos = boundaries.position();
+    name.resize(pos);
+    name += lit("...");
+  }
 
   return name;
 }
@@ -752,7 +762,7 @@ bool RichResourceTextMouseEvent(const QWidget *owner, const QVariant &var, QRect
             formatter = BufferFormatter::DeclareStruct(ptrType.descriptor.name, ptrType.members,
                                                        ptrType.descriptor.arrayByteStride);
 
-          IBufferViewer *view = ctx.ViewBuffer(ptr->offset, 0, ptr->base, formatter);
+          IBufferViewer *view = ctx.ViewBuffer(ptr->offset, ~0ULL, ptr->base, formatter);
 
           ctx.AddDockWindow(view->Widget(), DockReference::MainToolArea, NULL);
         }
@@ -998,6 +1008,7 @@ QString ToQStr(const ResourceUsage usage, const GraphicsAPI apitype)
       case ResourceUsage::Indirect: return lit("Indirect argument");
 
       case ResourceUsage::Clear: return lit("Clear");
+      case ResourceUsage::Discard: return lit("Discard");
 
       case ResourceUsage::GenMips: return lit("Generate Mips");
       case ResourceUsage::Resolve: return lit("Resolve");
@@ -1056,6 +1067,7 @@ QString ToQStr(const ResourceUsage usage, const GraphicsAPI apitype)
       case ResourceUsage::Indirect: return lit("Indirect argument");
 
       case ResourceUsage::Clear: return lit("Clear");
+      case ResourceUsage::Discard: return lit("Discard");
 
       case ResourceUsage::GenMips: return lit("Generate Mips");
       case ResourceUsage::Resolve: return vk ? lit("Resolve") : lit("Framebuffer blit");
@@ -1247,7 +1259,6 @@ void CombineUsageEvents(ICaptureContext &ctx, const rdcarray<EventUsage> &usage,
     {
       start = end = u.eventId;
       us = u.usage;
-      continue;
     }
 
     const DrawcallDescription *draw = ctx.GetDrawcall(u.eventId);
@@ -1288,8 +1299,15 @@ void CombineUsageEvents(ICaptureContext &ctx, const rdcarray<EventUsage> &usage,
     if(distinct)
     {
       callback(start, end, us);
-      start = end = u.eventId;
-      us = u.usage;
+      if(end == u.eventId && us == u.usage)
+      {
+        start = 0;
+      }
+      else
+      {
+        start = end = u.eventId;
+        us = u.usage;
+      }
     }
 
     end = u.eventId;
@@ -1379,13 +1397,51 @@ void addStructuredObjects(RDTreeWidgetItem *parent, const StructuredObjectList &
   }
 }
 
+static void validateForJSON(const QVariant &data, QString path = QString())
+{
+  switch((QMetaType::Type)data.type())
+  {
+    case QMetaType::QVariantList:
+    {
+      QVariantList list = data.toList();
+      int i = 0;
+      for(QVariant &v : list)
+        validateForJSON(v, path + QFormatStr("[%1]").arg(i++));
+      break;
+    }
+    case QMetaType::QVariantMap:
+    {
+      QVariantMap map = data.toMap();
+      for(const QString &str : map.keys())
+        validateForJSON(map[str], path + lit(".") + str);
+      break;
+    }
+    case QMetaType::QByteArray:
+    {
+      qCritical() << "Qt can't reliably serialise QByteArray to JSON.\n"
+                  << "Older versions write it as a byte string, new versions base64 encode it.\n"
+                  << "Manually encode if needed and add value as string." << path;
+    }
+    default:
+      // all other types we assume are fine
+      break;
+  }
+}
+
+static QJsonDocument validateAndMakeJSON(const QVariantMap &data)
+{
+  validateForJSON(data);
+
+  return QJsonDocument::fromVariant(data);
+}
+
 bool SaveToJSON(QVariantMap &data, QIODevice &f, const char *magicIdentifier, uint32_t magicVersion)
 {
   // marker that this data is valid
   if(magicIdentifier)
     data[QString::fromLatin1(magicIdentifier)] = magicVersion;
 
-  QJsonDocument doc = QJsonDocument::fromVariant(data);
+  QJsonDocument doc = validateAndMakeJSON(data);
 
   if(doc.isEmpty() || doc.isNull())
   {
@@ -1445,7 +1501,7 @@ bool LoadFromJSON(QVariantMap &data, QIODevice &f, const char *magicIdentifier, 
 
 QString VariantToJSON(const QVariantMap &data)
 {
-  return QString::fromUtf8(QJsonDocument::fromVariant(data).toJson(QJsonDocument::Indented));
+  return QString::fromUtf8(validateAndMakeJSON(data).toJson(QJsonDocument::Indented));
 }
 
 QVariantMap JSONToVariant(const QString &json)
@@ -1730,7 +1786,43 @@ QString RDDialog::getSaveFileName(QWidget *parent, const QString &caption, const
     fd.setDefaultSuffix(defaultSuffixes.first());
   QObject::connect(&fd, &QFileDialog::filterSelected, [&](const QString &filter) {
     int i = fd.nameFilters().indexOf(filter);
-    fd.setDefaultSuffix(defaultSuffixes.value(i));
+    // we expect that this should always be non-negative because only the filters we know about
+    // should get selected
+    if(i >= 0)
+    {
+      fd.setDefaultSuffix(defaultSuffixes.value(i));
+    }
+    else
+    {
+      // GNOME has a bug that passes an empty string to filterSelected, so we ignore it with a
+      // warning.
+      if(filter == QString())
+      {
+        qWarning() << "Empty filter string passed to QFileDialog::filterSelected. "
+                   << "Ignoring this as a likely GNOME bug, default suffix is still: "
+                   << fd.defaultSuffix();
+      }
+      else
+      {
+        // some filter that we don't recognise was selected! Try to figure out the suffix on the
+        // fly
+        QStringList suffixes = getDefaultSuffixesFromFilter(filter);
+
+        if(suffixes.empty())
+        {
+          qWarning() << "Unknown filter " << filter << " selected. "
+                     << "Couldn't determine filename suffix, default suffix is still: "
+                     << fd.defaultSuffix();
+        }
+        else
+        {
+          fd.setDefaultSuffix(suffixes[0]);
+
+          qWarning() << "Unknown filter " << filter << " selected. "
+                     << "Using default suffix: " << fd.defaultSuffix();
+        }
+      }
+    }
   });
   show(&fd);
 
@@ -1940,7 +2032,7 @@ public:
     setWindowFlags(Qt::CustomizeWindowHint | Qt::Dialog | Qt::WindowTitleHint);
     setWindowIcon(QIcon());
     setMinimumSize(QSize(250, 0));
-    setMaximumSize(QSize(250, 10000));
+    setMaximumSize(QSize(500, 200));
     setCancelButton(NULL);
     setMinimumDuration(0);
     setWindowModality(Qt::ApplicationModal);
@@ -1986,7 +2078,7 @@ protected:
 
     QProgressDialog::keyPressEvent(e);
   }
-
+  void closeEvent(QCloseEvent *event) override { event->ignore(); }
   QLabel m_Label;
 
   static const int maxProgress = 1000;
@@ -2148,8 +2240,11 @@ bool RunProcessAsAdmin(const QString &fullExecutablePath, const QStringList &par
 
   if(sudo.isEmpty())
   {
-    qCritical() << "Couldn't find graphical or terminal sudo program!\n"
-                << "Please run " << fullExecutablePath << "with args" << params << "manually.";
+    RDDialog::critical(parent, lit("Error running program as root"),
+                       lit("Couldn't find graphical or terminal sudo program!\n"
+                           "Please run '%1' with args '%2' manually.")
+                           .arg(fullExecutablePath)
+                           .arg(params.join(QLatin1Char(' '))));
     return false;
   }
 
@@ -2182,8 +2277,11 @@ bool RunProcessAsAdmin(const QString &fullExecutablePath, const QStringList &par
     return true;
   }
 
-  qCritical() << "Couldn't find graphical or terminal emulator to launch sudo.\n"
-              << "Please run " << fullExecutablePath << "with args" << params << "manually.";
+  RDDialog::critical(parent, lit("Error running program as root"),
+                     lit("Couldn't find graphical or terminal emulator to launch sudo!\n"
+                         "Please manually run: sudo \"%1\" %2")
+                         .arg(fullExecutablePath)
+                         .arg(params.join(QLatin1Char(' '))));
 
   return false;
 #endif

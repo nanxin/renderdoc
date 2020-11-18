@@ -640,6 +640,8 @@ rdcarray<PixelModification> D3D11Replay::PixelHistory(rdcarray<EventUsage> event
   // while issuing the above queries we can check to see which tests are enabled so we don't
   // bother checking if depth testing failed if the depth test was disabled
   rdcarray<uint32_t> flags(events.size());
+  std::map<uint32_t, D3D11_COMPARISON_FUNC> depthOps;
+  std::map<uint32_t, DXGI_FORMAT> depthFormats;
   enum
   {
     TestEnabled_BackfaceCulling = 1 << 0,
@@ -894,6 +896,8 @@ rdcarray<PixelModification> D3D11Replay::PixelHistory(rdcarray<EventUsage> event
       flags[ev] |= (TestEnabled_BackfaceCulling | TestEnabled_DepthClip);
     }
 
+    D3D11_COMPARISON_FUNC depthOp = D3D11_COMPARISON_LESS;
+
     if(curDS)
     {
       D3D11_DEPTH_STENCIL_DESC dsDesc;
@@ -906,6 +910,12 @@ rdcarray<PixelModification> D3D11Replay::PixelHistory(rdcarray<EventUsage> event
 
         if(dsDesc.DepthFunc == D3D11_COMPARISON_NEVER)
           flags[ev] |= TestMustFail_DepthTesting;
+
+        depthOp = dsDesc.DepthFunc;
+      }
+      else
+      {
+        depthOp = D3D11_COMPARISON_ALWAYS;
       }
 
       if(dsDesc.StencilEnable)
@@ -932,6 +942,8 @@ rdcarray<PixelModification> D3D11Replay::PixelHistory(rdcarray<EventUsage> event
       // defaults
       flags[ev] |= TestEnabled_DepthTesting;
     }
+
+    depthOps[events[ev].eventId] = depthOp;
 
     if(rsDesc.ScissorEnable)
     {
@@ -1081,6 +1093,8 @@ rdcarray<PixelModification> D3D11Replay::PixelHistory(rdcarray<EventUsage> event
         {
           RDCERR("Unexpected size of depth buffer");
         }
+
+        depthFormats[events[ev].eventId] = desc2d.Format;
 
         bool srvable = (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) &&
                        (desc2d.BindFlags & D3D11_BIND_SHADER_RESOURCE) > 0;
@@ -2136,6 +2150,9 @@ rdcarray<PixelModification> D3D11Replay::PixelHistory(rdcarray<EventUsage> event
 
       GetDebugManager()->PixelHistoryCopyPixel(colourCopyParams, postColSlot, 0);
       postColSlot++;
+
+      GetDebugManager()->PixelHistoryCopyPixel(depthCopyParams, depthSlot, 0);
+      depthSlot++;
     }
 
     m_pImmediateContext->OMSetDepthStencilState(m_PixelHistory.StencIncrEqDepthState,
@@ -2251,14 +2268,13 @@ rdcarray<PixelModification> D3D11Replay::PixelHistory(rdcarray<EventUsage> event
         memcpy(&history[h].postMod.col.uintValue[0], data, sizeof(Vec4f));
       }
 
-      // we don't retrieve the correct-precision depth value post-fragment. This is only possible
-      // for D24 and D32 - D16 doesn't have attached stencil, so we wouldn't be able to get correct
-      // depth AND identify each fragment. Instead we just mark this as no data, and the shader
-      // output depth should be sufficient.
+      float *depthdata = (float *)(pixstoreDepthData + sizeof(Vec4f) * pixstoreStride * depthSlot);
+
+      // this is not exactly the right value when the original depth was D16, it will be slightly
+      // higher precision than the actual value but that's better than not having a value at all,
+      // and allows us to identify fragments within a draw which fail the depth test.
       if(history[h].preMod.depth >= 0.0f)
-        history[h].postMod.depth = -2.0f;
-      else
-        history[h].postMod.depth = -1.0f;
+        history[h].postMod.depth = *depthdata;
 
       // we can't retrieve stencil value after each fragment, as we use stencil to identify the
       // fragment
@@ -2271,6 +2287,7 @@ rdcarray<PixelModification> D3D11Replay::PixelHistory(rdcarray<EventUsage> event
       // unbound
 
       postColSlot++;
+      depthSlot++;
     }
 
     // if we're not the first modification in our event, set our preMod to the previous postMod
@@ -2420,6 +2437,42 @@ rdcarray<PixelModification> D3D11Replay::PixelHistory(rdcarray<EventUsage> event
 
       shadColSlot++;
       depthSlot++;
+    }
+
+    // check the depth value between premod/shaderout against the known test if we have valid depth
+    // values, as we don't have per-fragment depth test information.
+    if(history[h].preMod.depth >= 0.0f && history[h].shaderOut.depth >= 0.0f)
+    {
+      DXGI_FORMAT dfmt = depthFormats[history[h].eventId];
+      float shadDepth = history[h].shaderOut.depth;
+
+      // quantise depth to match before comparing
+      if(dfmt == DXGI_FORMAT_D24_UNORM_S8_UINT || dfmt == DXGI_FORMAT_X24_TYPELESS_G8_UINT ||
+         dfmt == DXGI_FORMAT_R24_UNORM_X8_TYPELESS || dfmt == DXGI_FORMAT_R24G8_TYPELESS)
+      {
+        shadDepth = float(uint32_t(float(shadDepth * 0xffffff))) / float(0xffffff);
+      }
+      else if(dfmt == DXGI_FORMAT_D16_UNORM || dfmt == DXGI_FORMAT_R16_TYPELESS ||
+              dfmt == DXGI_FORMAT_R16_UNORM)
+      {
+        shadDepth = float(uint32_t(float(shadDepth * 0xffff))) / float(0xffff);
+      }
+
+      bool passed = true;
+      if(depthOps[history[h].eventId] == D3D11_COMPARISON_EQUAL)
+        passed = (shadDepth == history[h].preMod.depth);
+      else if(depthOps[history[h].eventId] == D3D11_COMPARISON_NOT_EQUAL)
+        passed = (shadDepth != history[h].preMod.depth);
+      else if(depthOps[history[h].eventId] == D3D11_COMPARISON_LESS)
+        passed = (shadDepth < history[h].preMod.depth);
+      else if(depthOps[history[h].eventId] == D3D11_COMPARISON_LESS_EQUAL)
+        passed = (shadDepth <= history[h].preMod.depth);
+      else if(depthOps[history[h].eventId] == D3D11_COMPARISON_GREATER)
+        passed = (shadDepth > history[h].preMod.depth);
+      else if(depthOps[history[h].eventId] == D3D11_COMPARISON_GREATER_EQUAL)
+        passed = (shadDepth >= history[h].preMod.depth);
+
+      history[h].depthTestFailed = !passed;
     }
   }
 

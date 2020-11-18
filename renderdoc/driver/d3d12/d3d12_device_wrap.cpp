@@ -340,9 +340,9 @@ HRESULT WrappedID3D12Device::CreateCommandList(UINT nodeMask, D3D12_COMMAND_LIST
 
     if(IsCaptureMode(m_State))
     {
-      // we just serialise out command allocator creation as a reset, since it's equivalent.
       wrapped->SetInitParams(riid, nodeMask, type);
-      wrapped->Reset(pCommandAllocator, pInitialState);
+      // we just serialise out command allocator creation as a reset, since it's equivalent.
+      wrapped->ResetInternal(pCommandAllocator, pInitialState, true);
 
       {
         CACHE_THREAD_SERIALISER();
@@ -403,33 +403,6 @@ bool WrappedID3D12Device::Serialise_CreateGraphicsPipelineState(
     D3D12_GRAPHICS_PIPELINE_STATE_DESC unwrappedDesc = Descriptor;
     unwrappedDesc.pRootSignature = Unwrap(unwrappedDesc.pRootSignature);
 
-    // check for bytecode - if the user is wrongly using DXIL we will fail to load the capture
-    {
-      D3D12_SHADER_BYTECODE *shaders[] = {
-          &unwrappedDesc.VS, &unwrappedDesc.HS, &unwrappedDesc.DS,
-          &unwrappedDesc.GS, &unwrappedDesc.PS,
-      };
-
-      const char *name[] = {"VS", "HS", "DS", "GS", "PS"};
-
-      for(size_t i = 0; i < ARRAY_COUNT(shaders); i++)
-      {
-        if(shaders[i]->BytecodeLength > 0 && shaders[i]->pShaderBytecode)
-        {
-          if(!DXBC::DXBCContainer::CheckForShaderCode(shaders[i]->pShaderBytecode,
-                                                      shaders[i]->BytecodeLength))
-          {
-            RDCERR(
-                "No shader code found in %s bytecode in pipeline state. "
-                "DXIL is unsupported and must be checked for using CheckFeatureSupport.",
-                name[i]);
-            m_FailedReplayStatus = ReplayStatus::APIReplayFailed;
-            return false;
-          }
-        }
-      }
-    }
-
     ID3D12PipelineState *ret = NULL;
     HRESULT hr = m_pDevice->CreateGraphicsPipelineState(&unwrappedDesc, guid, (void **)&ret);
 
@@ -464,7 +437,8 @@ bool WrappedID3D12Device::Serialise_CreateGraphicsPipelineState(
         }
         else
         {
-          WrappedID3D12Shader *entry = WrappedID3D12Shader::AddShader(*shaders[i], this, wrapped);
+          WrappedID3D12Shader *entry = WrappedID3D12Shader::AddShader(*shaders[i], this);
+          entry->AddRef();
 
           shaders[i]->pShaderBytecode = entry;
 
@@ -540,30 +514,12 @@ HRESULT WrappedID3D12Device::CreateGraphicsPipelineState(const D3D12_GRAPHICS_PI
 
   if(SUCCEEDED(ret))
   {
-    // check for bytecode - if the user is wrongly using DXIL we will prevent capturing
+    for(const D3D12_SHADER_BYTECODE &sh :
+        {unwrappedDesc.VS, unwrappedDesc.HS, unwrappedDesc.DS, unwrappedDesc.GS, unwrappedDesc.PS})
     {
-      D3D12_SHADER_BYTECODE *shaders[] = {
-          &unwrappedDesc.VS, &unwrappedDesc.HS, &unwrappedDesc.DS,
-          &unwrappedDesc.GS, &unwrappedDesc.PS,
-      };
-
-      const char *name[] = {"VS", "HS", "DS", "GS", "PS"};
-
-      for(size_t i = 0; i < ARRAY_COUNT(shaders); i++)
-      {
-        if(shaders[i]->BytecodeLength > 0 && shaders[i]->pShaderBytecode)
-        {
-          if(!DXBC::DXBCContainer::CheckForShaderCode(shaders[i]->pShaderBytecode,
-                                                      shaders[i]->BytecodeLength))
-          {
-            RDCERR(
-                "No shader code found in %s bytecode in pipeline state. "
-                "DXIL is unsupported and must be checked for using CheckFeatureSupport.",
-                name[i]);
-            m_InvalidPSO = true;
-          }
-        }
-      }
+      if(sh.BytecodeLength > 0 && sh.pShaderBytecode &&
+         DXBC::DXBCContainer::CheckForDXIL(sh.pShaderBytecode, sh.BytecodeLength))
+        m_UsedDXIL = true;
     }
 
     WrappedID3D12PipelineState *wrapped = new WrappedID3D12PipelineState(real, this);
@@ -605,7 +561,9 @@ HRESULT WrappedID3D12Device::CreateGraphicsPipelineState(const D3D12_GRAPHICS_PI
         }
         else
         {
-          shaders[i]->pShaderBytecode = WrappedID3D12Shader::AddShader(*shaders[i], this, NULL);
+          WrappedID3D12Shader *sh = WrappedID3D12Shader::AddShader(*shaders[i], this);
+          sh->AddRef();
+          shaders[i]->pShaderBytecode = sh;
         }
       }
 
@@ -673,18 +631,6 @@ bool WrappedID3D12Device::Serialise_CreateComputePipelineState(
     D3D12_COMPUTE_PIPELINE_STATE_DESC unwrappedDesc = Descriptor;
     unwrappedDesc.pRootSignature = Unwrap(unwrappedDesc.pRootSignature);
 
-    // check for bytecode - if the user is wrongly using DXIL we will hard-fail instead of producing
-    // a corrupted capture.
-    if(!DXBC::DXBCContainer::CheckForShaderCode(unwrappedDesc.CS.pShaderBytecode,
-                                                unwrappedDesc.CS.BytecodeLength))
-    {
-      RDCERR(
-          "No shader code found in CS bytecode in pipeline state. "
-          "DXIL is unsupported and must be checked for using CheckFeatureSupport.");
-      m_FailedReplayStatus = ReplayStatus::APIReplayFailed;
-      return false;
-    }
-
     ID3D12PipelineState *ret = NULL;
     HRESULT hr = m_pDevice->CreateComputePipelineState(&unwrappedDesc, guid, (void **)&ret);
 
@@ -700,8 +646,8 @@ bool WrappedID3D12Device::Serialise_CreateComputePipelineState(
 
       wrapped->compute = new D3D12_EXPANDED_PIPELINE_STATE_STREAM_DESC(Descriptor);
 
-      WrappedID3D12Shader *entry =
-          WrappedID3D12Shader::AddShader(wrapped->compute->CS, this, wrapped);
+      WrappedID3D12Shader *entry = WrappedID3D12Shader::AddShader(wrapped->compute->CS, this);
+      entry->AddRef();
 
       AddResourceCurChunk(entry->GetResourceID());
 
@@ -738,16 +684,9 @@ HRESULT WrappedID3D12Device::CreateComputePipelineState(const D3D12_COMPUTE_PIPE
 
   if(SUCCEEDED(ret))
   {
-    // check for bytecode - if the user is wrongly using DXIL we will hard-fail instead of producing
-    // a corrupted capture.
-    if(!DXBC::DXBCContainer::CheckForShaderCode(unwrappedDesc.CS.pShaderBytecode,
-                                                unwrappedDesc.CS.BytecodeLength))
-    {
-      RDCERR(
-          "No shader code found in CS bytecode in pipeline state. "
-          "DXIL is unsupported and must be checked for using CheckFeatureSupport.");
-      m_InvalidPSO = true;
-    }
+    if(DXBC::DXBCContainer::CheckForDXIL(unwrappedDesc.CS.pShaderBytecode,
+                                         unwrappedDesc.CS.BytecodeLength))
+      m_UsedDXIL = true;
 
     WrappedID3D12PipelineState *wrapped = new WrappedID3D12PipelineState(real, this);
 
@@ -774,8 +713,9 @@ HRESULT WrappedID3D12Device::CreateComputePipelineState(const D3D12_COMPUTE_PIPE
 
       wrapped->compute = new D3D12_EXPANDED_PIPELINE_STATE_STREAM_DESC(*pDesc);
 
-      wrapped->compute->CS.pShaderBytecode =
-          WrappedID3D12Shader::AddShader(wrapped->compute->CS, this, NULL);
+      WrappedID3D12Shader *sh = WrappedID3D12Shader::AddShader(wrapped->compute->CS, this);
+      sh->AddRef();
+      wrapped->compute->CS.pShaderBytecode = sh;
     }
 
     *ppPipelineState = (ID3D12PipelineState *)wrapped;
@@ -1052,8 +992,6 @@ void WrappedID3D12Device::CreateConstantBufferView(const D3D12_CONSTANT_BUFFER_V
     write.dest = GetWrapped(DestDescriptor);
     {
       SCOPED_LOCK(m_DynDescLock);
-      m_DynamicDescriptorWrites.push_back(write);
-      write.dest->GetHeap()->AddRef();
       m_DynamicDescriptorRefs.push_back(write.desc);
     }
 
@@ -1093,12 +1031,10 @@ void WrappedID3D12Device::CreateShaderResourceView(ID3D12Resource *pResource,
     DynamicDescriptorWrite write;
     write.desc.Init(pResource, pDesc);
     write.dest = GetWrapped(DestDescriptor);
+    if(pResource && pResource->GetDesc().Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
     {
       SCOPED_LOCK(m_DynDescLock);
-      m_DynamicDescriptorWrites.push_back(write);
-      write.dest->GetHeap()->AddRef();
-      if(pResource && pResource->GetDesc().Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
-        m_DynamicDescriptorRefs.push_back(write.desc);
+      m_DynamicDescriptorRefs.push_back(write.desc);
     }
 
     {
@@ -1144,12 +1080,10 @@ void WrappedID3D12Device::CreateUnorderedAccessView(ID3D12Resource *pResource,
     DynamicDescriptorWrite write;
     write.desc.Init(pResource, pCounterResource, pDesc);
     write.dest = GetWrapped(DestDescriptor);
+    if(pResource && pResource->GetDesc().Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
     {
       SCOPED_LOCK(m_DynDescLock);
-      m_DynamicDescriptorWrites.push_back(write);
-      write.dest->GetHeap()->AddRef();
-      if(pResource && pResource->GetDesc().Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
-        m_DynamicDescriptorRefs.push_back(write.desc);
+      m_DynamicDescriptorRefs.push_back(write.desc);
     }
 
     {
@@ -1190,12 +1124,10 @@ void WrappedID3D12Device::CreateRenderTargetView(ID3D12Resource *pResource,
     DynamicDescriptorWrite write;
     write.desc.Init(pResource, pDesc);
     write.dest = GetWrapped(DestDescriptor);
+    if(pResource && pResource->GetDesc().Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
     {
       SCOPED_LOCK(m_DynDescLock);
-      m_DynamicDescriptorWrites.push_back(write);
-      write.dest->GetHeap()->AddRef();
-      if(pResource && pResource->GetDesc().Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
-        m_DynamicDescriptorRefs.push_back(write.desc);
+      m_DynamicDescriptorRefs.push_back(write.desc);
     }
 
     {
@@ -1233,11 +1165,6 @@ void WrappedID3D12Device::CreateDepthStencilView(ID3D12Resource *pResource,
     DynamicDescriptorWrite write;
     write.desc.Init(pResource, pDesc);
     write.dest = GetWrapped(DestDescriptor);
-    {
-      SCOPED_LOCK(m_DynDescLock);
-      m_DynamicDescriptorWrites.push_back(write);
-      write.dest->GetHeap()->AddRef();
-    }
 
     {
       CACHE_THREAD_SERIALISER();
@@ -1272,11 +1199,6 @@ void WrappedID3D12Device::CreateSampler(const D3D12_SAMPLER_DESC *pDesc,
     DynamicDescriptorWrite write;
     write.desc.Init(pDesc);
     write.dest = GetWrapped(DestDescriptor);
-    {
-      SCOPED_LOCK(m_DynDescLock);
-      m_DynamicDescriptorWrites.push_back(write);
-      write.dest->GetHeap()->AddRef();
-    }
 
     {
       CACHE_THREAD_SERIALISER();
@@ -2171,8 +2093,8 @@ void WrappedID3D12Device::CopyDescriptors(
       // assume descriptors are volatile
       if(capframe)
         copies.push_back(DynamicDescriptorCopy(&dst[dstIdx], &src[srcIdx], DescriptorHeapsType));
-      else
-        dst[dstIdx].CopyFrom(src[srcIdx]);
+
+      dst[dstIdx].CopyFrom(src[srcIdx]);
     }
 
     srcIdx++;
@@ -2232,13 +2154,8 @@ void WrappedID3D12Device::CopyDescriptors(
 
     {
       SCOPED_LOCK(m_DynDescLock);
-      m_DynamicDescriptorCopies.append(copies);
       for(size_t i = 0; i < copies.size(); i++)
-      {
-        copies[i].src->GetHeap()->AddRef();
-        copies[i].dst->GetHeap()->AddRef();
         m_DynamicDescriptorRefs.push_back(*copies[i].src);
-      }
     }
 
     {
@@ -2306,13 +2223,8 @@ void WrappedID3D12Device::CopyDescriptorsSimple(UINT NumDescriptors,
 
     {
       SCOPED_LOCK(m_DynDescLock);
-      m_DynamicDescriptorCopies.append(copies);
       for(size_t i = 0; i < copies.size(); i++)
-      {
-        copies[i].src->GetHeap()->AddRef();
-        copies[i].dst->GetHeap()->AddRef();
         m_DynamicDescriptorRefs.push_back(*copies[i].src);
-      }
     }
 
     {
@@ -2324,11 +2236,9 @@ void WrappedID3D12Device::CopyDescriptorsSimple(UINT NumDescriptors,
       m_FrameCaptureRecord->AddChunk(scope.Get());
     }
   }
-  else
-  {
-    for(UINT i = 0; i < NumDescriptors; i++)
-      dst[i].CopyFrom(src[i]);
-  }
+
+  for(UINT i = 0; i < NumDescriptors; i++)
+    dst[i].CopyFrom(src[i]);
 }
 
 template <typename SerialiserType>
@@ -2409,6 +2319,10 @@ bool WrappedID3D12Device::Serialise_OpenSharedHandle(SerialiserType &ser, HANDLE
 
       // always allow SRVs on replay so we can inspect resources
       desc.Flags &= ~D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+
+      // the runtime doesn't like us telling it what DENY heap flags will be set, remove them
+      heapFlags &= ~(D3D12_HEAP_FLAG_DENY_BUFFERS | D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES |
+                     D3D12_HEAP_FLAG_DENY_RT_DS_TEXTURES);
 
       HRESULT hr;
       ID3D12Resource *ret;
@@ -2548,15 +2462,40 @@ HRESULT WrappedID3D12Device::OpenSharedHandleInternal(D3D12Chunk chunkType, REFI
   bool isFence = riid == __uuidof(ID3D12Fence) || riid == __uuidof(ID3D12Fence1);
   bool isHeap = riid == __uuidof(ID3D12Heap) || riid == __uuidof(ID3D12Heap1);
   bool isDeviceChild = riid == __uuidof(ID3D12DeviceChild);
+  bool isIUnknown = riid == __uuidof(IUnknown);
 
   IID riid_internal = riid;
   void *ret = *ppvObj;
+
+  if(isIUnknown)
+  {
+    // same as device child but we're even more in the dark. Hope against hope it's a
+    // ID3D12DeviceChild
+    IUnknown *real = (IUnknown *)ret;
+
+    ID3D12DeviceChild *d3d12child = NULL;
+    isDeviceChild =
+        SUCCEEDED(real->QueryInterface(__uuidof(ID3D12DeviceChild), (void **)&d3d12child)) &&
+        d3d12child;
+    SAFE_RELEASE(real);
+
+    if(isDeviceChild)
+    {
+      riid_internal = __uuidof(ID3D12DeviceChild);
+      ret = (void *)d3d12child;
+    }
+    else
+    {
+      SAFE_RELEASE(d3d12child);
+      return E_NOINTERFACE;
+    }
+  }
 
   if(isDeviceChild)
   {
     // In this case we need to find out what the actual underlying type is
     // Should be one of ID3D12Heap, ID3D12Resource, ID3D12Fence
-    ID3D12DeviceChild *real = (ID3D12DeviceChild *)(*ppvObj);
+    ID3D12DeviceChild *real = (ID3D12DeviceChild *)ret;
 
     ID3D12Resource *d3d12Res = NULL;
     ID3D12Fence *d3d12Fence = NULL;
@@ -2634,10 +2573,6 @@ HRESULT WrappedID3D12Device::OpenSharedHandleInternal(D3D12Chunk chunkType, REFI
 
       wrappedDeviceChild = wrapped;
 
-      *ppvObj = (ID3D12Fence *)wrapped;
-      if(riid_internal == __uuidof(ID3D12Fence1))
-        *ppvObj = (ID3D12Fence1 *)wrapped;
-
       record = GetResourceManager()->AddResourceRecord(wrapped->GetResourceID());
       record->type = Resource_Fence;
       record->Length = 0;
@@ -2652,18 +2587,6 @@ HRESULT WrappedID3D12Device::OpenSharedHandleInternal(D3D12Chunk chunkType, REFI
       WrappedID3D12Resource1 *wrapped = new WrappedID3D12Resource1(real, this);
 
       wrappedDeviceChild = wrapped;
-
-      if(isDXGIRes)
-      {
-        wrapped->QueryInterface(riid_internal, ppvObj);
-        wrapped->Release();
-      }
-      else
-      {
-        *ppvObj = (ID3D12Resource *)wrapped;
-        if(riid_internal == __uuidof(ID3D12Resource1))
-          *ppvObj = (ID3D12Resource1 *)wrapped;
-      }
 
       D3D12_RESOURCE_DESC desc = wrapped->GetDesc();
       D3D12_RESOURCE_STATES InitialResourceState = D3D12_RESOURCE_STATE_COMMON;
@@ -2707,13 +2630,15 @@ HRESULT WrappedID3D12Device::OpenSharedHandleInternal(D3D12Chunk chunkType, REFI
 
       wrappedDeviceChild = wrapped;
 
-      *ppvObj = wrappedDeviceChild;
-
       record = GetResourceManager()->AddResourceRecord(wrapped->GetResourceID());
       record->type = Resource_Heap;
       record->Length = 0;
       wrapped->SetResourceRecord(record);
     }
+
+    // use queryinterface to get the right interface into ppvObj, then release the reference
+    wrappedDeviceChild->QueryInterface(riid, ppvObj);
+    wrappedDeviceChild->Release();
 
     CACHE_THREAD_SERIALISER();
 
@@ -2851,12 +2776,12 @@ HRESULT WrappedID3D12Device::CheckFeatureSupport(D3D12_FEATURE Feature, void *pF
     if(FeatureSupportDataSize != sizeof(D3D12_FEATURE_DATA_SHADER_MODEL))
       return E_INVALIDARG;
 
-    // don't support sm6.0 and over
-    model->HighestShaderModel = RDCMIN(model->HighestShaderModel, D3D_SHADER_MODEL_5_1);
+    // clamp SM to what we support
+    model->HighestShaderModel = RDCMIN(model->HighestShaderModel, D3D_SHADER_MODEL_6_6);
 
     return S_OK;
   }
-  if(Feature == D3D12_FEATURE_PROTECTED_RESOURCE_SESSION_SUPPORT)
+  else if(Feature == D3D12_FEATURE_PROTECTED_RESOURCE_SESSION_SUPPORT)
   {
     D3D12_FEATURE_DATA_PROTECTED_RESOURCE_SESSION_SUPPORT *opts =
         (D3D12_FEATURE_DATA_PROTECTED_RESOURCE_SESSION_SUPPORT *)pFeatureSupportData;
@@ -2867,7 +2792,7 @@ HRESULT WrappedID3D12Device::CheckFeatureSupport(D3D12_FEATURE Feature, void *pF
 
     return S_OK;
   }
-  if(Feature == D3D12_FEATURE_D3D12_OPTIONS5)
+  else if(Feature == D3D12_FEATURE_D3D12_OPTIONS5)
   {
     HRESULT hr = m_pDevice->CheckFeatureSupport(Feature, pFeatureSupportData, FeatureSupportDataSize);
 
@@ -2886,7 +2811,27 @@ HRESULT WrappedID3D12Device::CheckFeatureSupport(D3D12_FEATURE Feature, void *pF
 
     return hr;
   }
-  if(Feature == D3D12_FEATURE_D3D12_OPTIONS)
+  else if(Feature == D3D12_FEATURE_D3D12_OPTIONS7)
+  {
+    HRESULT hr = m_pDevice->CheckFeatureSupport(Feature, pFeatureSupportData, FeatureSupportDataSize);
+
+    if(SUCCEEDED(hr))
+    {
+      D3D12_FEATURE_DATA_D3D12_OPTIONS7 *opts =
+          (D3D12_FEATURE_DATA_D3D12_OPTIONS7 *)pFeatureSupportData;
+      if(FeatureSupportDataSize != sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS7))
+        return E_INVALIDARG;
+
+      // don't support mesh shading or sampler feedback
+      opts->MeshShaderTier = D3D12_MESH_SHADER_TIER_NOT_SUPPORTED;
+      opts->SamplerFeedbackTier = D3D12_SAMPLER_FEEDBACK_TIER_NOT_SUPPORTED;
+
+      return S_OK;
+    }
+
+    return hr;
+  }
+  else if(Feature == D3D12_FEATURE_D3D12_OPTIONS)
   {
     HRESULT hr = m_pDevice->CheckFeatureSupport(Feature, pFeatureSupportData, FeatureSupportDataSize);
 

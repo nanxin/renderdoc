@@ -522,7 +522,7 @@ void Reflector::PostParse()
         }
         else if(type.type == DataType::MatrixType)
         {
-          type.name += StringFormat::Fmt("%ux%u", type.matrix().count, type.vector().count);
+          type.name += StringFormat::Fmt("%ux%u", type.vector().count, type.matrix().count);
         }
       }
       else if(type.type == DataType::ImageType)
@@ -584,7 +584,8 @@ void Reflector::PostParse()
 
 rdcarray<rdcstr> Reflector::EntryPoints() const
 {
-  rdcarray<rdcstr> ret(entries.size());
+  rdcarray<rdcstr> ret;
+  ret.reserve(entries.size());
   for(const EntryPoint &e : entries)
     ret.push_back(e.name);
   return ret;
@@ -608,6 +609,8 @@ void Reflector::MakeReflection(const GraphicsAPI sourceAPI, const ShaderStage st
   reflection.stage = stage;
   reflection.encoding = ShaderEncoding::SPIRV;
   reflection.rawBytes.assign((byte *)m_SPIRV.data(), m_SPIRV.size() * sizeof(uint32_t));
+
+  CheckDebuggable(reflection.debugInfo.debuggable, reflection.debugInfo.debugStatus);
 
   const EntryPoint *entry = NULL;
   for(const EntryPoint &e : entries)
@@ -768,9 +771,17 @@ void Reflector::MakeReflection(const GraphicsAPI sourceAPI, const ShaderStage st
       if(name.empty() && baseType.type == DataType::StructType)
         name = baseType.name;
 
-      // otherwise fall back to naming after the ID
+      // otherwise fall back to naming after the builtin or location
       if(name.empty())
-        name = StringFormat::Fmt("sig%u", global.id.value());
+      {
+        if(decorations[global.id].flags & Decorations::HasBuiltIn)
+          name = StringFormat::Fmt("_%s", ToStr(decorations[global.id].builtIn).c_str());
+        else if(decorations[global.id].flags & Decorations::HasLocation)
+          name = StringFormat::Fmt("_%s%u", isInput ? "input" : "output",
+                                   decorations[global.id].location);
+        else
+          name = StringFormat::Fmt("_sig%u", global.id.value());
+      }
 
       const bool used = usedIds.find(global.id) != usedIds.end();
 
@@ -1666,7 +1677,6 @@ void Reflector::AddSignatureParameter(const bool isInput, const ShaderStage stag
     }
   }
 }
-
 };    // namespace rdcspv
 
 #if ENABLED(ENABLE_UNIT_TESTS)

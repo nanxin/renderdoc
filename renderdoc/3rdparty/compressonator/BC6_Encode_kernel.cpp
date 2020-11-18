@@ -22,7 +22,7 @@
 //=====================================================================
 #include "BC6_Encode_kernel.h"
 
-#ifdef ASPM_GPU
+#if 0
 void memset(CGU_UINT8 *srcdata, CGU_UINT8 value, CGU_INT size)
 {
     for (CGU_INT i = 0; i < size; i++)
@@ -3807,7 +3807,7 @@ int CMP_CDECL CreateOptionsBC6(void **options)
 {
     (*options) = new BC6H_Encode;
     if (!options) return CGU_CORE_ERR_NEWMEM;
-    SetDefaultBC6Options((BC6H_Encode *)options);
+    SetDefaultBC6Options((BC6H_Encode *)(*options));
     return CGU_CORE_OK;
 }
 

@@ -29,6 +29,16 @@
 #include "api/replay/rdcstr.h"
 #include "api/replay/shader_types.h"
 
+namespace DXBCBytecode
+{
+class Program;
+};
+
+namespace DXIL
+{
+class Program;
+};
+
 namespace DXBC
 {
 struct CountOffset
@@ -86,7 +96,7 @@ enum ResourceRetType
   NUM_RETURN_TYPES,
 };
 
-enum ComponentType
+enum SigCompType
 {
   COMPONENT_TYPE_UNKNOWN = 0,
   COMPONENT_TYPE_UINT32,
@@ -239,7 +249,6 @@ struct ShaderInputBind
   uint32_t reg;
   uint32_t bindCount;
 
-  uint32_t flags;
   DXBC::ResourceRetType retType;
 
   enum Dimension
@@ -258,7 +267,7 @@ struct ShaderInputBind
     DIM_BUFFEREX,
   } dimension;
 
-  uint32_t numSamples;
+  uint32_t numComps;
 };
 
 struct CBufferVariable;
@@ -280,11 +289,10 @@ struct CBufferVariableType
   struct Descriptor
   {
     VariableClass varClass;
-    VariableType type;
+    VarType varType;
     uint32_t rows;
     uint32_t cols;
     uint32_t elements;
-    uint32_t members;
     uint32_t bytesize;
     rdcstr name;
   } descriptor;
@@ -298,18 +306,7 @@ struct CBufferVariableType
 struct CBufferVariable
 {
   rdcstr name;
-
-  struct
-  {
-    rdcstr name;
-    uint32_t offset;    // offset in parent (cbuffer or nested struct)
-    uint32_t flags;
-    rdcarray<uint8_t> defaultValue;
-    uint32_t startTexture;    // first texture
-    uint32_t numTextures;
-    uint32_t startSampler;    // first sampler
-    uint32_t numSamplers;
-  } descriptor;
+  uint32_t offset;    // offset in parent (cbuffer or nested struct)
 
   // type details of this variable
   CBufferVariableType type;
@@ -326,8 +323,6 @@ struct CBuffer
 
   struct Descriptor
   {
-    rdcstr name;
-
     enum Type
     {
       TYPE_CBUFFER = 0,
@@ -336,9 +331,7 @@ struct CBuffer
       TYPE_RESOURCE_BIND_INFO,
     } type;
 
-    uint32_t numVars;
     uint32_t byteSize;
-    uint32_t flags;
   } descriptor;
 
   rdcarray<CBufferVariable> variables;
@@ -362,5 +355,28 @@ struct Reflection
   rdcarray<SigParameter> PatchConstantSig;
 
   uint32_t DispatchThreadsDimension[3];
+};
+
+class DXBCContainer;
+
+class IDebugInfo
+{
+public:
+  virtual ~IDebugInfo() {}
+  virtual rdcstr GetCompilerSig() const = 0;
+  virtual rdcstr GetEntryFunction() const = 0;
+  virtual rdcstr GetShaderProfile() const = 0;
+
+  virtual ShaderCompileFlags GetShaderCompileFlags() const = 0;
+
+  rdcarray<rdcpair<rdcstr, rdcstr>> Files;    // <filename, source>
+
+  virtual void GetLineInfo(size_t instruction, uintptr_t offset, LineColumnInfo &lineInfo) const = 0;
+  virtual void GetCallstack(size_t instruction, uintptr_t offset,
+                            rdcarray<rdcstr> &callstack) const = 0;
+
+  virtual bool HasSourceMapping() const = 0;
+  virtual void GetLocals(const DXBC::DXBCContainer *dxbc, size_t instruction, uintptr_t offset,
+                         rdcarray<SourceVariableMapping> &locals) const = 0;
 };
 };

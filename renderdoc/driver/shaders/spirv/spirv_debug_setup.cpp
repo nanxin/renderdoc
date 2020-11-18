@@ -36,6 +36,40 @@ static ShaderVariable *pointerIfMutable(ShaderVariable &var)
   return &var;
 }
 
+static void ClampScalars(rdcspv::DebugAPIWrapper *apiWrapper, const ShaderVariable &var,
+                         uint32_t &scalar0)
+{
+  if(scalar0 > var.columns && scalar0 != ~0U)
+  {
+    apiWrapper->AddDebugMessage(
+        MessageCategory::Execution, MessageSeverity::High, MessageSource::RuntimeWarning,
+        StringFormat::Fmt("Invalid scalar index %u at %u-vector %s. Clamping to %u", scalar0,
+                          var.columns, var.name.c_str(), var.columns - 1));
+    scalar0 = RDCMIN(0U, uint32_t(var.columns - 1));
+  }
+}
+
+static void ClampScalars(rdcspv::DebugAPIWrapper *apiWrapper, const ShaderVariable &var,
+                         uint32_t &scalar0, uint32_t &scalar1)
+{
+  if(scalar0 > var.columns && scalar0 != ~0U)
+  {
+    apiWrapper->AddDebugMessage(
+        MessageCategory::Execution, MessageSeverity::High, MessageSource::RuntimeWarning,
+        StringFormat::Fmt("Invalid scalar index %u at matrix %s with %u columns. Clamping to %u",
+                          scalar0, var.columns, var.name.c_str(), var.columns - 1));
+    scalar0 = RDCMIN(0U, uint32_t(var.columns - 1));
+  }
+  if(scalar1 > var.rows && scalar1 != ~0U)
+  {
+    apiWrapper->AddDebugMessage(
+        MessageCategory::Execution, MessageSeverity::High, MessageSource::RuntimeWarning,
+        StringFormat::Fmt("Invalid scalar index %u at matrix %s with %u rows. Clamping to %u",
+                          scalar1, var.rows, var.name.c_str(), var.rows - 1));
+    scalar1 = RDCMIN(0U, uint32_t(var.rows - 1));
+  }
+}
+
 static uint32_t VarByteSize(const ShaderVariable &var)
 {
   return VarTypeByteSize(var.type) * RDCMAX(1U, (uint32_t)var.rows) *
@@ -148,24 +182,18 @@ void Debugger::MakeSignatureNames(const rdcarray<SPIRVInterfaceAccess> &sigList,
   }
 }
 
-ShaderDebugTrace *Debugger::BeginDebug(DebugAPIWrapper *apiWrapper, const ShaderStage stage,
-                                       const rdcstr &entryPoint,
-                                       const rdcarray<SpecConstant> &specInfo,
-                                       const std::map<size_t, uint32_t> &instructionLines,
-                                       const SPIRVPatchData &patchData, uint32_t activeIndex)
+// this function is implemented here to keep it next to the code we might need to update, even
+// though it's checked at reflection time.
+void Reflector::CheckDebuggable(bool &debuggable, rdcstr &debugStatus) const
 {
-  Id entryId = entryLookup[entryPoint];
-
-  if(entryId == Id())
-  {
-    RDCERR("Invalid entry point '%s'", entryPoint.c_str());
-    return new ShaderDebugTrace;
-  }
+  debuggable = true;
+  debugStatus.clear();
 
   if(m_MajorVersion > 1 || m_MinorVersion > 5)
   {
-    RDCERR("Unsupported SPIR-V version %u.%u", m_MajorVersion, m_MinorVersion);
-    return new ShaderDebugTrace;
+    debugStatus +=
+        StringFormat::Fmt("Unsupported SPIR-V version %u.%u\n", m_MajorVersion, m_MinorVersion);
+    debuggable = false;
   }
 
   // whitelist supported extensions
@@ -184,8 +212,8 @@ ShaderDebugTrace *Debugger::BeginDebug(DebugAPIWrapper *apiWrapper, const Shader
       continue;
     }
 
-    RDCERR("Unsupported SPIR-V extension %s", ext.c_str());
-    return new ShaderDebugTrace;
+    debuggable = false;
+    debugStatus += StringFormat::Fmt("Unsupported SPIR-V extension %s\n", ext.c_str());
   }
 
   for(Capability c : capabilities)
@@ -375,9 +403,38 @@ ShaderDebugTrace *Debugger::BeginDebug(DebugAPIWrapper *apiWrapper, const Shader
 
     if(!supported)
     {
-      RDCERR("Unsupported capability '%s'", ToStr(c).c_str());
-      return new ShaderDebugTrace;
+      debuggable = false;
+      debugStatus += StringFormat::Fmt("Unsupported capability '%s'\n", ToStr(c).c_str());
     }
+  }
+
+  for(auto it = extSets.begin(); it != extSets.end(); it++)
+  {
+    Id id = it->first;
+    const rdcstr &setname = it->second;
+
+    if(setname == "GLSL.std.450" || setname.beginsWith("NonSemantic."))
+      continue;
+
+    debuggable = false;
+    debugStatus += StringFormat::Fmt("Unsupported extended instruction set: '%s'\n", setname.c_str());
+  }
+
+  debugStatus.trim();
+}
+
+ShaderDebugTrace *Debugger::BeginDebug(DebugAPIWrapper *api, const ShaderStage shaderStage,
+                                       const rdcstr &entryPoint,
+                                       const rdcarray<SpecConstant> &specInfo,
+                                       const std::map<size_t, uint32_t> &instructionLines,
+                                       const SPIRVPatchData &patchData, uint32_t activeIndex)
+{
+  Id entryId = entryLookup[entryPoint];
+
+  if(entryId == Id())
+  {
+    RDCERR("Invalid entry point '%s'", entryPoint.c_str());
+    return new ShaderDebugTrace;
   }
 
   global.clock = uint64_t(time(NULL)) << 32;
@@ -407,35 +464,16 @@ ShaderDebugTrace *Debugger::BeginDebug(DebugAPIWrapper *apiWrapper, const Shader
 
       global.extInsts[id] = extinst;
     }
-    else
-    {
-      RDCERR("Unsupported extended instruction set: %s", setname.c_str());
-      return new ShaderDebugTrace;
-    }
-  }
-
-  for(const rdcstr &e : extensions)
-  {
-    if(e == "SPV_GOOGLE_decorate_string" || e == "SPV_GOOGLE_hlsl_functionality1" ||
-       e == "SPV_EXT_descriptor_indexing")
-    {
-      // supported extensions
-    }
-    else
-    {
-      RDCERR("Unsupported extension '%s'", e.c_str());
-      return new ShaderDebugTrace;
-    }
   }
 
   ShaderDebugTrace *ret = new ShaderDebugTrace;
   ret->debugger = this;
-  ret->stage = stage;
-  this->activeLaneIndex = activeIndex;
-  this->stage = stage;
-  this->apiWrapper = apiWrapper;
+  ret->stage = shaderStage;
+  activeLaneIndex = activeIndex;
+  stage = shaderStage;
+  apiWrapper = api;
 
-  uint32_t workgroupSize = stage == ShaderStage::Pixel ? 4 : 1;
+  uint32_t workgroupSize = shaderStage == ShaderStage::Pixel ? 4 : 1;
   for(uint32_t i = 0; i < workgroupSize; i++)
     workgroup.push_back(ThreadState(i, *this, global));
 
@@ -508,6 +546,8 @@ ShaderDebugTrace *Debugger::BeginDebug(DebugAPIWrapper *apiWrapper, const Shader
         else if(decorations[v.id].flags & Decorations::HasLocation)
           sourceName =
               StringFormat::Fmt("_%s%u", isInput ? "input" : "output", decorations[v.id].location);
+        else
+          sourceName = StringFormat::Fmt("_sig%u", v.id.value());
       }
 
       const DataType &type = dataTypes[v.type];
@@ -518,7 +558,7 @@ ShaderDebugTrace *Debugger::BeginDebug(DebugAPIWrapper *apiWrapper, const Shader
       const rdcarray<rdcstr> &sigNames = isInput ? inputSigNames : outputSigNames;
 
       // fill the interface variable
-      auto fillInputCallback = [this, isInput, ret, stage, &sigNames, &rawName, &sourceName](
+      auto fillInputCallback = [this, isInput, ret, &sigNames, &rawName, &sourceName](
           ShaderVariable &var, const Decorations &curDecorations, const DataType &type,
           uint64_t location, const rdcstr &accessSuffix) {
 
@@ -962,11 +1002,15 @@ ShaderDebugTrace *Debugger::BeginDebug(DebugAPIWrapper *apiWrapper, const Shader
   ret->lineInfo.resize(instructionOffsets.size());
   for(size_t i = 0; i < instructionOffsets.size(); i++)
   {
-    auto it = instructionLines.find(instructionOffsets[i]);
-    if(it != instructionLines.end())
-      ret->lineInfo[i].disassemblyLine = it->second;
-    else
-      ret->lineInfo[i].disassemblyLine = 0;
+    ret->lineInfo[i] = m_LineColInfo[instructionOffsets[i]];
+
+    {
+      auto it = instructionLines.find(instructionOffsets[i]);
+      if(it != instructionLines.end())
+        ret->lineInfo[i].disassemblyLine = it->second;
+      else
+        ret->lineInfo[i].disassemblyLine = 0;
+    }
   }
 
   ret->constantBlocks = global.constantBlocks;
@@ -1287,13 +1331,32 @@ ShaderVariable Debugger::MakeCompositePointer(const ShaderVariable &base, Id id,
     i++;
   while(i < indices.size() && !leaf->members.empty())
   {
-    leaf = &leaf->members[indices[i++]];
+    uint32_t idx = indices[i++];
+    if(idx > leaf->members.size())
+    {
+      apiWrapper->AddDebugMessage(
+          MessageCategory::Execution, MessageSeverity::High, MessageSource::RuntimeWarning,
+          StringFormat::Fmt("Index %u invalid at leaf %s. Clamping to %zu", idx, leaf->name.c_str(),
+                            leaf->members.size() - 1));
+      idx = uint32_t(leaf->members.size() - 1);
+    }
+    leaf = &leaf->members[idx];
   }
 
   // apply any remaining scalar selectors
   uint32_t scalar0 = ~0U, scalar1 = ~0U;
 
   size_t remaining = indices.size() - i;
+
+  if(remaining > 2)
+  {
+    apiWrapper->AddDebugMessage(
+        MessageCategory::Execution, MessageSeverity::High, MessageSource::RuntimeWarning,
+        StringFormat::Fmt("Too many indices left (%zu) at leaf %s. Ignoring all but last two",
+                          remaining, leaf->name.c_str()));
+    i = indices.size() - 2;
+  }
+
   if(remaining == 2)
   {
     scalar0 = indices[i];
@@ -1455,6 +1518,7 @@ ShaderVariable Debugger::ReadFromPointer(const ShaderVariable &ptr) const
   if(ret.rows > 1)
   {
     // matrix case
+    ClampScalars(apiWrapper, ret, scalar0, scalar1);
 
     if(scalar0 != ~0U && scalar1 != ~0U)
     {
@@ -1487,6 +1551,8 @@ ShaderVariable Debugger::ReadFromPointer(const ShaderVariable &ptr) const
   }
   else
   {
+    ClampScalars(apiWrapper, ret, scalar0);
+
     // vector case, selecting a scalar (if anything)
     if(scalar0 != ~0U)
     {
@@ -1644,6 +1710,7 @@ void Debugger::WriteThroughPointer(const ShaderVariable &ptr, const ShaderVariab
     if(storage->rows > 1)
     {
       // matrix case
+      ClampScalars(apiWrapper, *storage, scalar0, scalar1);
 
       if(scalar0 != ~0U && scalar1 != ~0U)
       {
@@ -1668,6 +1735,8 @@ void Debugger::WriteThroughPointer(const ShaderVariable &ptr, const ShaderVariab
     }
     else
     {
+      ClampScalars(apiWrapper, *storage, scalar0);
+
       // vector case, selecting a scalar
       if(VarTypeByteSize(storage->type) == 8)
         storage->value.u64v[scalar0] = val.value.u64v[0];
@@ -1784,8 +1853,8 @@ void Debugger::CalcActiveMask(rdcarray<bool> &activeMask)
     // if we've newly diverged, all workgroups should have the same merge block - the point where we
     // become uniform again.
     convergeBlock = workgroup[0].mergeBlock;
-    for(size_t i = 1; !diverged && i < workgroup.size(); i++)
-      RDCASSERT(convergeBlock == workgroup[i].mergeBlock);
+    for(size_t i = 1; i < workgroup.size(); i++)
+      RDCASSERT(!activeMask[i] || convergeBlock == workgroup[i].mergeBlock);
   }
 
   if(wasDiverged || diverged)
@@ -1822,8 +1891,19 @@ void Debugger::AllocateVariable(Id id, Id typeId, ShaderVariable &outVar)
   // allocs should always be pointers
   RDCASSERT(dataTypes[typeId].type == DataType::PointerType);
 
+  auto initCallback = [](ShaderVariable &var, const Decorations &, const DataType &, uint64_t,
+                         const rdcstr &) {
+    // ignore any callbacks we get on the way up for structs/arrays, we don't need it we only read
+    // or write at primitive level
+    if(!var.members.empty())
+      return;
+
+    // make it obvious when uninitialised values are used
+    memset(var.value.u64v, 0xcc, sizeof(var.value.u64v));
+  };
+
   WalkVariable<ShaderVariable, true>(Decorations(), dataTypes[dataTypes[typeId].InnerType()], ~0U,
-                                     outVar, rdcstr(), NULL);
+                                     outVar, rdcstr(), initCallback);
 }
 
 template <typename ShaderVarType, bool allocate>
@@ -2193,10 +2273,33 @@ void Debugger::RegisterOp(Iter it)
     }
   }
 
-  if(opdata.op == Op::Line || opdata.op == Op::NoLine)
+  if(opdata.op == Op::Source)
   {
-    // ignore OpLine/OpNoLine
+    OpSource source(it);
+
+    if(!source.source.empty())
+    {
+      m_Files[source.file] = m_Files.size();
+    }
   }
+  else if(opdata.op == Op::Line)
+  {
+    OpLine line(it);
+
+    m_CurLineCol.lineStart = line.line;
+    m_CurLineCol.lineEnd = line.line;
+    m_CurLineCol.colStart = line.column;
+    m_CurLineCol.fileIndex = (int32_t)m_Files[line.file];
+  }
+  else if(opdata.op == Op::NoLine)
+  {
+    m_CurLineCol = LineColumnInfo();
+  }
+  else
+  {
+    m_LineColInfo[it.offs()] = m_CurLineCol;
+  }
+
   if(opdata.op == Op::String)
   {
     OpString string(it);

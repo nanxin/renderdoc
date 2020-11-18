@@ -84,6 +84,7 @@ class Iter_Test(rdtest.TestCase):
             mesh.indexResourceId = ib.resourceId
             mesh.indexByteStride = draw.indexByteWidth
             mesh.indexByteOffset = ib.byteOffset + draw.indexOffset * draw.indexByteWidth
+            mesh.indexByteSize = ib.byteSize
             mesh.baseVertex = draw.baseVertex
 
             indices = rdtest.fetch_indices(self.controller, draw, mesh, 0, vtx, 1)
@@ -108,10 +109,7 @@ class Iter_Test(rdtest.TestCase):
         if trace.debugger is None:
             self.controller.FreeTrace(trace)
 
-            if self.props.shaderDebugging:
-                raise rdtest.TestFailureException("Shader debugging supported but no debug result")
-            else:
-                rdtest.log.print("No debug result")
+            rdtest.log.print("No debug result")
             return
 
         cycles, variables = self.process_trace(trace)
@@ -141,6 +139,11 @@ class Iter_Test(rdtest.TestCase):
                     debugged = value.value.iv[0:value.columns]
                 else:
                     debugged = value.value.fv[0:value.columns]
+
+                # For now, ignore debugged values that are uninitialised. This is an application bug but it causes false reports of problems
+                for comp in range(4):
+                    if value.value.uv[comp] == 0xcccccccc:
+                        debugged[comp] = expect[comp]
 
                 # Unfortunately we can't ever trust that we should get back a matching results, because some shaders
                 # rely on undefined/inaccurate maths that we don't emulate.
@@ -206,10 +209,10 @@ class Iter_Test(rdtest.TestCase):
             mod = history[i]
             draw = self.find_draw('', mod.eventId)
 
-            rdtest.log.print("  hit %d at %d is %s (%s)" % (i, mod.eventId, draw.name, str(draw.flags)))
-
             if draw is None or not (draw.flags & rd.DrawFlags.Drawcall):
                 continue
+
+            rdtest.log.print("  hit %d at %d is %s (%s)" % (i, mod.eventId, draw.name, str(draw.flags)))
 
             lastmod = history[i]
 
@@ -217,6 +220,11 @@ class Iter_Test(rdtest.TestCase):
 
             if mod.sampleMasked or mod.backfaceCulled or mod.depthClipped or mod.viewClipped or mod.scissorClipped or mod.shaderDiscarded or mod.depthTestFailed or mod.stencilTestFailed:
                 rdtest.log.print("This hit failed, looking for one that passed....")
+                lastmod = None
+                continue
+
+            if not mod.shaderOut.IsValid():
+                rdtest.log.print("This hit's shader out is not valid, looking for one that valid....")
                 lastmod = None
                 continue
 
@@ -264,6 +272,11 @@ class Iter_Test(rdtest.TestCase):
                     self.controller.FreeTrace(trace)
 
                     debuggedValue = [debugged.value.f.x, debugged.value.f.y, debugged.value.f.z, debugged.value.f.w]
+
+                    # For now, ignore debugged values that are uninitialised. This is an application bug but it causes false reports of problems
+                    for idx in range(4):
+                        if debugged.value.uv[idx] == 0xcccccccc:
+                            debuggedValue[idx] = lastmod.shaderOut.col.floatValue[idx]
 
                     # Unfortunately we can't ever trust that we should get back a matching results, because some shaders
                     # rely on undefined/inaccurate maths that we don't emulate.

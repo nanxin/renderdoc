@@ -38,7 +38,9 @@ public:
   D3D12ShaderCache();
   ~D3D12ShaderCache();
 
-  rdcstr GetShaderBlob(const char *source, const char *entry, const uint32_t compileFlags,
+  rdcstr GetShaderBlob(const char *source, const char *entry, uint32_t compileFlags,
+                       const char *profile, ID3DBlob **srcblob);
+  rdcstr GetShaderBlob(const char *source, const char *entry, const ShaderCompileFlags &compileFlags,
                        const char *profile, ID3DBlob **srcblob);
 
   D3D12RootSignature GetRootSig(const void *data, size_t dataSize);
@@ -47,7 +49,17 @@ public:
                         UINT NumStaticSamplers = 0,
                         const D3D12_STATIC_SAMPLER_DESC *StaticSamplers = NULL);
   ID3DBlob *MakeRootSig(const D3D12RootSignature &rootsig);
-  ID3DBlob *MakeFixedColShader(float overlayConsts[4]);
+
+  // must match the values in fixedcol.hlsl
+  enum FixedColVariant
+  {
+    RED = 0,
+    GREEN = 1,
+    HIGHLIGHT = 2,
+    WIREFRAME = 3,
+  };
+  ID3DBlob *MakeFixedColShader(FixedColVariant variant, bool dxil = false);
+  ID3DBlob *GetQuadShaderDXILBlob();
 
   void SetCaching(bool enabled) { m_CacheShaders = enabled; }
 private:

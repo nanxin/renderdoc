@@ -77,7 +77,7 @@ void VulkanRenderState::BeginRenderPassAndApplyState(WrappedVulkan *vk, VkComman
     imagelessAttachments.pAttachments = imagelessViews.data();
   }
 
-  ObjDisp(cmd)->CmdBeginRenderPass(Unwrap(cmd), &rpbegin, subpassContents);
+  ObjDisp(cmd)->CmdBeginRenderPass(Unwrap(cmd), &rpbegin, VK_SUBPASS_CONTENTS_INLINE);
 
   BindPipeline(vk, cmd, binding, true);
 
@@ -151,16 +151,25 @@ void VulkanRenderState::BindPipeline(WrappedVulkan *vk, VkCommandBuffer cmd,
     const rdcarray<VkPushConstantRange> &pushRanges =
         vk->GetDebugManager()->GetPipelineLayoutInfo(pipeLayoutId).pushRanges;
 
-    bool dynamicStates[VkDynamicCount] = {0};
-    memcpy(dynamicStates, pipeinfo.dynamicStates, sizeof(dynamicStates));
-
-    RDCCOMPILE_ASSERT(sizeof(dynamicStates) == sizeof(pipeinfo.dynamicStates),
-                      "Dynamic states array size is out of sync");
+    const bool(&dynamicStates)[VkDynamicCount] = pipeinfo.dynamicStates;
 
     if(!views.empty() && dynamicStates[VkDynamicViewport])
       ObjDisp(cmd)->CmdSetViewport(Unwrap(cmd), 0, (uint32_t)views.size(), &views[0]);
     if(!scissors.empty() && dynamicStates[VkDynamicScissor])
       ObjDisp(cmd)->CmdSetScissor(Unwrap(cmd), 0, (uint32_t)scissors.size(), &scissors[0]);
+
+    if(dynamicStates[VkDynamicViewportCountEXT])
+      ObjDisp(cmd)->CmdSetViewportWithCountEXT(Unwrap(cmd), (uint32_t)views.size(), views.data());
+    if(dynamicStates[VkDynamicScissorCountEXT])
+      ObjDisp(cmd)->CmdSetScissorWithCountEXT(Unwrap(cmd), (uint32_t)scissors.size(),
+                                              scissors.data());
+
+    if(dynamicStates[VkDynamicCullModeEXT])
+      ObjDisp(cmd)->CmdSetCullModeEXT(Unwrap(cmd), cullMode);
+    if(dynamicStates[VkDynamicFrontFaceEXT])
+      ObjDisp(cmd)->CmdSetFrontFaceEXT(Unwrap(cmd), frontFace);
+    if(dynamicStates[VkDynamicPrimitiveTopologyEXT])
+      ObjDisp(cmd)->CmdSetPrimitiveTopologyEXT(Unwrap(cmd), primitiveTopology);
 
     if(dynamicStates[VkDynamicLineWidth])
       ObjDisp(cmd)->CmdSetLineWidth(Unwrap(cmd), lineWidth);
@@ -171,8 +180,28 @@ void VulkanRenderState::BindPipeline(WrappedVulkan *vk, VkCommandBuffer cmd,
     if(dynamicStates[VkDynamicBlendConstants])
       ObjDisp(cmd)->CmdSetBlendConstants(Unwrap(cmd), blendConst);
 
+    if(dynamicStates[VkDynamicDepthBoundsTestEnableEXT])
+      ObjDisp(cmd)->CmdSetDepthBoundsTestEnableEXT(Unwrap(cmd), depthBoundsTestEnable);
     if(dynamicStates[VkDynamicDepthBounds])
       ObjDisp(cmd)->CmdSetDepthBounds(Unwrap(cmd), mindepth, maxdepth);
+
+    if(dynamicStates[VkDynamicDepthTestEnableEXT])
+      ObjDisp(cmd)->CmdSetDepthTestEnableEXT(Unwrap(cmd), depthTestEnable);
+    if(dynamicStates[VkDynamicDepthWriteEnableEXT])
+      ObjDisp(cmd)->CmdSetDepthWriteEnableEXT(Unwrap(cmd), depthWriteEnable);
+    if(dynamicStates[VkDynamicDepthCompareOpEXT])
+      ObjDisp(cmd)->CmdSetDepthCompareOpEXT(Unwrap(cmd), depthCompareOp);
+
+    if(dynamicStates[VkDynamicStencilTestEnableEXT])
+      ObjDisp(cmd)->CmdSetStencilTestEnableEXT(Unwrap(cmd), stencilTestEnable);
+
+    if(dynamicStates[VkDynamicStencilOpEXT])
+    {
+      ObjDisp(cmd)->CmdSetStencilOpEXT(Unwrap(cmd), VK_STENCIL_FACE_FRONT_BIT, front.failOp,
+                                       front.passOp, front.depthFailOp, front.compareOp);
+      ObjDisp(cmd)->CmdSetStencilOpEXT(Unwrap(cmd), VK_STENCIL_FACE_BACK_BIT, front.failOp,
+                                       front.passOp, front.depthFailOp, front.compareOp);
+    }
 
     if(dynamicStates[VkDynamicStencilCompareMask])
     {
@@ -230,15 +259,39 @@ void VulkanRenderState::BindPipeline(WrappedVulkan *vk, VkCommandBuffer cmd,
           ibuffer.offs, type);
     }
 
+    bool dynamicStride = dynamicStates[VkDynamicVertexInputBindingStrideEXT];
+
     for(size_t i = 0; i < vbuffers.size(); i++)
     {
       if(vbuffers[i].buf == ResourceId())
-        continue;
+      {
+        if(vk->NULLDescriptorsAllowed())
+        {
+          VkBuffer empty = VK_NULL_HANDLE;
 
-      ObjDisp(cmd)->CmdBindVertexBuffers(
-          Unwrap(cmd), (uint32_t)i, 1,
-          UnwrapPtr(vk->GetResourceManager()->GetCurrentHandle<VkBuffer>(vbuffers[i].buf)),
-          &vbuffers[i].offs);
+          if(dynamicStride)
+            ObjDisp(cmd)->CmdBindVertexBuffers2EXT(
+                Unwrap(cmd), (uint32_t)i, 1, &empty, &vbuffers[i].offs,
+                vbuffers[i].size == VK_WHOLE_SIZE ? NULL : &vbuffers[i].size, &vbuffers[i].stride);
+          else
+            ObjDisp(cmd)->CmdBindVertexBuffers(Unwrap(cmd), (uint32_t)i, 1, &empty,
+                                               &vbuffers[i].offs);
+        }
+
+        continue;
+      }
+
+      if(dynamicStride)
+        ObjDisp(cmd)->CmdBindVertexBuffers2EXT(
+            Unwrap(cmd), (uint32_t)i, 1,
+            UnwrapPtr(vk->GetResourceManager()->GetCurrentHandle<VkBuffer>(vbuffers[i].buf)),
+            &vbuffers[i].offs, vbuffers[i].size == VK_WHOLE_SIZE ? NULL : &vbuffers[i].size,
+            &vbuffers[i].stride);
+      else
+        ObjDisp(cmd)->CmdBindVertexBuffers(
+            Unwrap(cmd), (uint32_t)i, 1,
+            UnwrapPtr(vk->GetResourceManager()->GetCurrentHandle<VkBuffer>(vbuffers[i].buf)),
+            &vbuffers[i].offs);
     }
 
     for(size_t i = 0; i < xfbbuffers.size(); i++)
@@ -391,6 +444,7 @@ void VulkanRenderState::BindDescriptorSet(WrappedVulkan *vk, const DescSetLayout
     rdcarray<VkDescriptorImageInfo *> allocImgWrites;
     rdcarray<VkDescriptorBufferInfo *> allocBufWrites;
     rdcarray<VkBufferView *> allocBufViewWrites;
+    rdcarray<VkWriteDescriptorSetInlineUniformBlockEXT *> allocInlineWrites;
 
     const WrappedVulkan::DescriptorSetInfo &setInfo = vk->GetDebugManager()->GetDescSetInfo(descSet);
 
@@ -401,7 +455,7 @@ void VulkanRenderState::BindDescriptorSet(WrappedVulkan *vk, const DescSetLayout
       const DescSetLayout::Binding &bind = descLayout.bindings[b];
 
       // skip if this binding isn't used
-      if(bind.descriptorCount == 0 || bind.stageFlags == 0)
+      if(bind.descriptorType == VK_DESCRIPTOR_TYPE_MAX_ENUM)
         continue;
 
       // push.dstSet; // unused for push descriptors
@@ -410,7 +464,7 @@ void VulkanRenderState::BindDescriptorSet(WrappedVulkan *vk, const DescSetLayout
       push.descriptorType = bind.descriptorType;
       push.descriptorCount = bind.descriptorCount;
 
-      DescriptorSetSlot *slots = setInfo.currentBindings[b];
+      const DescriptorSetSlot *slots = setInfo.data.binds[b];
 
       if(push.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER ||
          push.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)
@@ -445,6 +499,22 @@ void VulkanRenderState::BindDescriptorSet(WrappedVulkan *vk, const DescSetLayout
         push.pImageInfo = dst;
         allocImgWrites.push_back(dst);
       }
+      else if(push.descriptorType == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT)
+      {
+        allocInlineWrites.push_back(new VkWriteDescriptorSetInlineUniformBlockEXT);
+        VkWriteDescriptorSetInlineUniformBlockEXT *inlineWrite = allocInlineWrites.back();
+        inlineWrite->sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_INLINE_UNIFORM_BLOCK_EXT;
+        inlineWrite->pNext = NULL;
+        inlineWrite->dataSize = bind.descriptorCount;
+        inlineWrite->pData = setInfo.data.inlineBytes.data() + slots[0].inlineOffset;
+
+        push.pNext = inlineWrite;
+        push.descriptorCount = bind.descriptorCount;
+        writes.push_back(push);
+
+        // skip validity checks
+        continue;
+      }
       else
       {
         VkDescriptorBufferInfo *dst = new VkDescriptorBufferInfo[push.descriptorCount];
@@ -468,7 +538,7 @@ void VulkanRenderState::BindDescriptorSet(WrappedVulkan *vk, const DescSetLayout
       for(uint32_t w = 0; w < bind.descriptorCount; w++)
       {
         // if this push is valid, we increment the descriptor count and continue
-        if(IsValid(push, w - push.dstArrayElement))
+        if(IsValid(vk->NULLDescriptorsAllowed(), push, w - push.dstArrayElement))
         {
           push.descriptorCount++;
         }
@@ -514,6 +584,8 @@ void VulkanRenderState::BindDescriptorSet(WrappedVulkan *vk, const DescSetLayout
       delete[] a;
     for(VkBufferView *a : allocBufViewWrites)
       delete[] a;
+    for(VkWriteDescriptorSetInlineUniformBlockEXT *a : allocInlineWrites)
+      delete a;
   }
 }
 

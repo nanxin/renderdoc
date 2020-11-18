@@ -380,7 +380,7 @@ bool D3D12Replay::RenderTextureInternal(D3D12_CPU_DESCRIPTOR_HANDLE rtv, Texture
   pixelData.RangeMinimum = cfg.rangeMin;
   pixelData.InverseRangeSize = 1.0f / (cfg.rangeMax - cfg.rangeMin);
 
-  if(_isnan(pixelData.InverseRangeSize) || !_finite(pixelData.InverseRangeSize))
+  if(!RDCISFINITE(pixelData.InverseRangeSize))
   {
     pixelData.InverseRangeSize = FLT_MAX;
   }
@@ -542,9 +542,9 @@ bool D3D12Replay::RenderTextureInternal(D3D12_CPU_DESCRIPTOR_HANDLE rtv, Texture
           if(var.name == "RENDERDOC_TexDim")
           {
             if(var.type.descriptor.rows == 1 && var.type.descriptor.cols == 4 &&
-               var.type.descriptor.type == DXBC::VARTYPE_UINT)
+               var.type.descriptor.varType == VarType::UInt)
             {
-              uint32_t *d = (uint32_t *)(byteData + var.descriptor.offset);
+              uint32_t *d = (uint32_t *)(byteData + var.offset);
 
               d[0] = (uint32_t)resourceDesc.Width;
               d[1] = resourceDesc.Height;
@@ -563,22 +563,22 @@ bool D3D12Replay::RenderTextureInternal(D3D12_CPU_DESCRIPTOR_HANDLE rtv, Texture
           }
           else if(var.name == "RENDERDOC_YUVDownsampleRate")
           {
-            Vec4u *d = (Vec4u *)(byteData + var.descriptor.offset);
+            Vec4u *d = (Vec4u *)(byteData + var.offset);
 
             *d = YUVDownsampleRate;
           }
           else if(var.name == "RENDERDOC_YUVAChannels")
           {
-            Vec4u *d = (Vec4u *)(byteData + var.descriptor.offset);
+            Vec4u *d = (Vec4u *)(byteData + var.offset);
 
             *d = YUVAChannels;
           }
           else if(var.name == "RENDERDOC_SelectedMip")
           {
             if(var.type.descriptor.rows == 1 && var.type.descriptor.cols == 1 &&
-               var.type.descriptor.type == DXBC::VARTYPE_UINT)
+               var.type.descriptor.varType == VarType::UInt)
             {
-              uint32_t *d = (uint32_t *)(byteData + var.descriptor.offset);
+              uint32_t *d = (uint32_t *)(byteData + var.offset);
 
               d[0] = cfg.subresource.mip;
             }
@@ -591,9 +591,9 @@ bool D3D12Replay::RenderTextureInternal(D3D12_CPU_DESCRIPTOR_HANDLE rtv, Texture
           else if(var.name == "RENDERDOC_SelectedSliceFace")
           {
             if(var.type.descriptor.rows == 1 && var.type.descriptor.cols == 1 &&
-               var.type.descriptor.type == DXBC::VARTYPE_UINT)
+               var.type.descriptor.varType == VarType::UInt)
             {
-              uint32_t *d = (uint32_t *)(byteData + var.descriptor.offset);
+              uint32_t *d = (uint32_t *)(byteData + var.offset);
 
               d[0] = cfg.subresource.slice;
             }
@@ -606,9 +606,9 @@ bool D3D12Replay::RenderTextureInternal(D3D12_CPU_DESCRIPTOR_HANDLE rtv, Texture
           else if(var.name == "RENDERDOC_SelectedSample")
           {
             if(var.type.descriptor.rows == 1 && var.type.descriptor.cols == 1 &&
-               var.type.descriptor.type == DXBC::VARTYPE_INT)
+               var.type.descriptor.varType == VarType::SInt)
             {
-              int32_t *d = (int32_t *)(byteData + var.descriptor.offset);
+              int32_t *d = (int32_t *)(byteData + var.offset);
 
               d[0] = cfg.subresource.sample;
             }
@@ -621,9 +621,9 @@ bool D3D12Replay::RenderTextureInternal(D3D12_CPU_DESCRIPTOR_HANDLE rtv, Texture
           else if(var.name == "RENDERDOC_TextureType")
           {
             if(var.type.descriptor.rows == 1 && var.type.descriptor.cols == 1 &&
-               var.type.descriptor.type == DXBC::VARTYPE_UINT)
+               var.type.descriptor.varType == VarType::UInt)
             {
-              uint32_t *d = (uint32_t *)(byteData + var.descriptor.offset);
+              uint32_t *d = (uint32_t *)(byteData + var.offset);
 
               d[0] = resType;
             }

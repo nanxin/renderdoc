@@ -66,6 +66,11 @@ bool RefCountDXGIObject::HandleWrap(REFIID riid, void **ppvObject)
   static const GUID ID3D10Texture2D_uuid = {
       0x9b7e4c04, 0x342c, 0x4106, {0xa1, 0x9f, 0x4f, 0x27, 0x04, 0xf6, 0x89, 0xf0}};
 
+  // unknown/undocumented internal interface
+  // {7abb6563-02bc-47c4-8ef9-acc4795edbcf}
+  static const GUID IDXGIAdapterInternal2_uuid = {
+      0x7abb6563, 0x02bc, 0x47c4, {0x8e, 0xf9, 0xac, 0xc4, 0x79, 0x5e, 0xdb, 0xcf}};
+
   if(riid == __uuidof(IDXGIDevice))
   {
     // should have been handled elsewhere, so we can properly create this device
@@ -172,6 +177,18 @@ bool RefCountDXGIObject::HandleWrap(REFIID riid, void **ppvObject)
     }
     return false;
   }
+  else if(riid == IDXGIAdapterInternal2_uuid)
+  {
+    static bool printed = false;
+    if(!printed)
+    {
+      printed = true;
+      RDCWARN(
+          "Querying IDXGIObject for unsupported/undocumented IDXGIAdapterInternal2 interface: %s",
+          ToStr(riid).c_str());
+    }
+    return false;
+  }
   else if(riid == Unknown_uuid)
   {
     static bool printed = false;
@@ -211,8 +228,8 @@ HRESULT RefCountDXGIObject::WrapQueryInterface(IUnknown *real, REFIID riid, void
   return ret;
 }
 
-WrappedIDXGISwapChain4::WrappedIDXGISwapChain4(IDXGISwapChain *real, HWND wnd, ID3DDevice *device)
-    : RefCountDXGIObject(real), m_pReal(real), m_pDevice(device), m_Wnd(wnd)
+WrappedIDXGISwapChain4::WrappedIDXGISwapChain4(IDXGISwapChain *real, HWND w, ID3DDevice *device)
+    : RefCountDXGIObject(real), m_pReal(real), m_pDevice(device), m_Wnd(w)
 {
   DXGI_SWAP_CHAIN_DESC desc;
   real->GetDesc(&desc);
@@ -230,6 +247,16 @@ WrappedIDXGISwapChain4::WrappedIDXGISwapChain4(IDXGISwapChain *real, HWND wnd, I
 
   WrapBuffersAfterResize();
 
+  HWND wnd = GetHWND();
+
+  if(wnd)
+  {
+    Keyboard::AddInputWindow(WindowingSystem::Win32, wnd);
+
+    RenderDoc::Inst().AddFrameCapturer(m_pDevice->GetFrameCapturerDevice(), wnd,
+                                       m_pDevice->GetFrameCapturer());
+  }
+
   // we do a 'fake' present right at the start, so that we can capture frame 1, by
   // going from this fake present to the first present.
   m_pDevice->FirstFrame(this);
@@ -237,6 +264,15 @@ WrappedIDXGISwapChain4::WrappedIDXGISwapChain4(IDXGISwapChain *real, HWND wnd, I
 
 WrappedIDXGISwapChain4::~WrappedIDXGISwapChain4()
 {
+  HWND wnd = GetHWND();
+
+  if(wnd)
+  {
+    Keyboard::RemoveInputWindow(WindowingSystem::Win32, wnd);
+
+    RenderDoc::Inst().RemoveFrameCapturer(m_pDevice->GetFrameCapturerDevice(), wnd);
+  }
+
   m_pDevice->ReleaseSwapchainResources(this, 0, NULL, NULL);
 
   SAFE_RELEASE(m_pDevice);
